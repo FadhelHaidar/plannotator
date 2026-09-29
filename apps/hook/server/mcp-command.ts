@@ -128,7 +128,9 @@ export function createRealAnnotateDeps(config: McpCommandConfig): AnnotateToolDe
         isRemote: server.isRemote,
         waitForDecision: server.waitForDecision,
         stop: () => {
-          server.stop();
+          // Force-close: this process outlives the session, so the browser's
+          // open SSE stream must not keep a socket and heartbeat timer alive.
+          server.stop(true);
           unregisterSession();
         },
       };
