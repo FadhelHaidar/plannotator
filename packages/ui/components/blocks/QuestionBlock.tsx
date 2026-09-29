@@ -118,10 +118,12 @@ export const QuestionBlock: React.FC<QuestionBlockProps> = ({
   const answered = !!answer && isQuestionAnswered(answer);
   const skipped = !!answer?.skipped && !answered;
   const settledLabels = question.choices.filter((c) => c.settled).map((c) => c.label);
-  const settled = !answered && !skipped && settledLabels.length > 0 && !answer;
+  // A note alone does not change a settled choice: the [x] stays drawn (and
+  // the status stays Settled) until the reviewer picks, fills Other or skips.
+  const settled = !answered && !skipped && settledLabels.length > 0;
   const status: Status = answered ? 'answered' : skipped ? 'skipped' : settled ? 'settled' : 'open';
   const hasRecommendation = question.choices.some((c) => c.recommended) || !!question.suggestedText;
-  const selected = answer ? answer.selected : settledLabels;
+  const selected = answered || skipped ? answer!.selected : settledLabels;
   const base = answer ?? emptyQuestionAnswer(indexed);
 
   const commit = (next: QuestionAnswer) => {

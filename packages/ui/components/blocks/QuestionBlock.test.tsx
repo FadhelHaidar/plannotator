@@ -226,6 +226,16 @@ describe('QuestionBlock', () => {
     expect(answerOf(3)?.selected).toEqual(['WebSocket']);
   });
 
+  test.skipIf(!hasDom)('a note on a settled question keeps the settled choice drawn', async () => {
+    const el = await mount(<Harness markdown={DOC} />);
+    const card = () => cards(el)[3];
+    await click(button(card(), 'Add note')!);
+    await type(card().querySelector('textarea')!, 'fine as is');
+    expect(answerOf(3)?.note).toBe('fine as is');
+    expect(card().dataset.questionStatus).toBe('settled');
+    expect(card().querySelector<HTMLInputElement>('input[type="radio"]:checked')!.closest('label')!.textContent).toContain('REST');
+  });
+
   test.skipIf(!hasDom)('a drag across option text, or a click that ends with text selected, does not pick', async () => {
     const el = await mount(<Harness markdown={DOC} />);
     const text = rowText(cards(el)[0], 'Server-side');
