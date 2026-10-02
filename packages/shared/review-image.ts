@@ -496,7 +496,12 @@ export function createLfsObjectCache(options: { maxEntries?: number; maxBytes?: 
       const pending = inflight.get(oid);
       if (pending) {
         try {
-          return await pending;
+          const shared = await pending;
+          // Only a verified object is content-addressed. `missing` and the
+          // other misses depend on the side and path that asked (the old path
+          // of a rename may be absent from the worktree while the new one is
+          // there), so a different caller resolves its own.
+          if (shared.kind === "ok") return shared;
         } catch (error) {
           // The request that started it went away; ours did not, so run our own.
           if (!isAbortLike(error) || signal?.aborted) throw error;

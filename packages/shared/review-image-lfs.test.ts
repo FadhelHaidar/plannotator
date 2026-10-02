@@ -228,6 +228,34 @@ describe("handleReviewImageRequest with LFS pointers", () => {
     expect((await request("new")).status).toBe(200);
     expect(resolves).toBe(1);
   });
+
+  test("a side that misses while another side resolves the same oid concurrently still resolves its own", async () => {
+    // Regression: the in-flight share handed the old side's path-dependent
+    // `missing` to the new side, which then answered `lfs-pointer`.
+    const patch = [
+      "diff --git a/old.png b/new.png",
+      "similarity index 100%",
+      "rename from old.png",
+      "rename to new.png",
+      "",
+    ].join("\n");
+    const lfsObjects = createLfsObjectCache();
+    const request = (side: string) =>
+      handleReviewImageRequest({
+        ...base,
+        patch,
+        params: new URLSearchParams(`path=new.png&side=${side}&snapshot=snap`),
+        readSide: async () => ({ kind: "ok", bytes: enc(pointerText(IMG_OLD)) }),
+        resolveLfs: async (resolveSide) => {
+          await new Promise((r) => setTimeout(r, 5));
+          return resolveSide === "old" ? { kind: "missing" } : { kind: "ok", bytes: IMG_OLD };
+        },
+        lfsObjects,
+      });
+    const [before, after] = await Promise.all([request("old"), request("new")]);
+    expect(before.status).toBe(415);
+    expect(after.status).toBe(200);
+  });
 });
 
 describe("readPRLfsSide (checkout first, platform only for a side neither has)", () => {
