@@ -69,9 +69,13 @@ import {
 	REVIEW_IMAGE_ENDPOINT,
 	REVIEW_IMAGE_READ_CONCURRENCY,
 	createConcurrencyLimiter,
+	createLfsObjectCache,
 	handleReviewImageRequest,
+	readLfsObjectLocally,
 	readPRImageSide,
+	readPRLfsSide,
 } from "../generated/review-image.ts";
+import type { LfsPointer } from "../generated/diff-paths.ts";
 import {
 	getGitButlerContextRevision,
 	getGitButlerPatchFingerprint,
@@ -125,6 +129,7 @@ import {
 	fetchPRContext,
 	fetchPRFileContent,
 	fetchPRFileBytes,
+	fetchPRLfsFileBytes,
 	fetchPRList,
 	fetchPRStack,
 	fetchPRViewedFiles,
@@ -1837,6 +1842,10 @@ export async function startReviewServer(options: {
 	// no repository, and P4 drops binary files from its patch entirely.
 	const imagePreviewSupported = !isStaticPatchMode;
 	const runImageRead = createConcurrencyLimiter(REVIEW_IMAGE_READ_CONCURRENCY);
+	// Git LFS images (#1665) ride the same advert: a client only treats a
+	// pointer chunk as an image when this server says it can resolve one.
+	const lfsImagePreviewSupported = imagePreviewSupported;
+	const lfsObjects = createLfsObjectCache();
 	const sourceKindAdvert = isStaticPatchMode
 		? ({ sourceKind: "patch" } as const)
 		: ({} as Record<string, never>);
@@ -2214,6 +2223,7 @@ export async function startReviewServer(options: {
 				sharingEnabled,
 				approvalNotesSupported,
 				imagePreviewSupported,
+				lfsImagePreviewSupported,
 				...sourceKindAdvert,
 				// Mount is the only place the pin matters, so it rides /api/diff
 				// alone (not the switch endpoints).
@@ -2553,6 +2563,7 @@ export async function startReviewServer(options: {
 						snapshotId: currentSnapshotId(),
 						approvalNotesSupported,
 						imagePreviewSupported,
+						lfsImagePreviewSupported,
 						...sourceKindAdvert,
 						diffType: currentDiffType,
 						diffOptions: workspace.diffOptions,
@@ -2705,6 +2716,7 @@ export async function startReviewServer(options: {
 					snapshotId: currentSnapshotId(),
 					approvalNotesSupported,
 					imagePreviewSupported,
+					lfsImagePreviewSupported,
 					...sourceKindAdvert,
 					diffType: currentDiffType,
 					// Echo the base the server actually used. resolveBaseBranch
@@ -2770,6 +2782,7 @@ export async function startReviewServer(options: {
 						draftState: reviewDrafts.state(currentDraftKeys()),
 						approvalNotesSupported,
 						imagePreviewSupported,
+						lfsImagePreviewSupported,
 						...sourceKindAdvert,
 						prDiffScope: currentPRDiffScope,
 						...(layerPatchIncomplete ? { prPatchIncomplete: true, prPatchUpgradeAvailable: layerUpgradeAvailable } : {}),
@@ -2840,6 +2853,7 @@ export async function startReviewServer(options: {
 						draftState: reviewDrafts.state(currentDraftKeys()),
 						approvalNotesSupported,
 						imagePreviewSupported,
+						lfsImagePreviewSupported,
 						...sourceKindAdvert,
 						prDiffScope: currentPRDiffScope,
 						...(layerPatchIncomplete ? { prPatchIncomplete: true, prPatchUpgradeAvailable: layerUpgradeAvailable } : {}),
@@ -2884,6 +2898,7 @@ export async function startReviewServer(options: {
 					draftState: reviewDrafts.state(currentDraftKeys()),
 					approvalNotesSupported,
 					imagePreviewSupported,
+					lfsImagePreviewSupported,
 					...sourceKindAdvert,
 					prDiffScope: currentPRDiffScope,
 					semanticDiff: await getSemanticDiffAdvert(),
@@ -2973,6 +2988,7 @@ export async function startReviewServer(options: {
 					draftState: reviewDrafts.state(currentDraftKeys()),
 					approvalNotesSupported,
 					imagePreviewSupported,
+					lfsImagePreviewSupported,
 					...sourceKindAdvert,
 					prMetadata: pr.metadata,
 					// The new PR's checkout (null while warming) so Open-in re-roots
@@ -3216,6 +3232,48 @@ export async function startReviewServer(options: {
 				}
 				return { kind: "unavailable" };
 			};
+			// Git LFS (#1665): where the current mode can find the real file a
+			// pointer names. The shared handler verifies whatever comes back.
+			const resolveLfs = async (
+				side: DiffSide,
+				filePath: string,
+				oldPath: string | undefined,
+				pointer: LfsPointer,
+				maxBytes: number,
+				signal?: AbortSignal,
+			): Promise<FileBytesRead> => {
+				const sidePath = side === "old" ? oldPath ?? filePath : filePath;
+				if (workspace) {
+					const location = workspace.getLfsLocation(filePath, oldPath, side);
+					return readLfsObjectLocally(reviewRuntime, location.cwd, pointer, [location.path], maxBytes);
+				}
+				const prCwd = (options.worktreePool && prMeta) ? options.worktreePool.resolve(prMeta.url) : options.agentCwd;
+				if (isPRMode && currentPRDiffScope === "full-stack" && prCwd) {
+					return readLfsObjectLocally(reviewRuntime, prCwd, pointer, [sidePath], maxBytes);
+				}
+				if (hasLocalAccess && !isPRMode) {
+					const cwd = parseWorktreeDiffType(currentDiffType)?.path ?? options.gitContext?.cwd;
+					return readLfsObjectLocally(reviewRuntime, cwd, pointer, [sidePath], maxBytes);
+				}
+				if (isPRMode && prMeta && prRef) {
+					const ref = prRef;
+					return readPRLfsSide({
+						gitRuntime: reviewRuntime,
+						poolCwd: prCwd,
+						oldSha: prMeta.mergeBaseSha ?? prMeta.baseSha,
+						headSha: prMeta.headSha,
+						side,
+						filePath,
+						oldPath,
+						pointer,
+						maxBytes,
+						fetchLfs: async (sha, path, max, fetchSignal) =>
+							(await fetchPRLfsFileBytes(ref, sha, path, max, fetchSignal)) ?? { kind: "missing" },
+						signal,
+					});
+				}
+				return { kind: "unavailable" };
+			};
 			// node:http has no request signal: abort when the client closes the
 			// socket before the response is written.
 			const requestAbort = new AbortController();
@@ -3231,6 +3289,9 @@ export async function startReviewServer(options: {
 				signal: requestAbort.signal,
 				readSide: (side, filePath, oldPath, maxBytes, signal) =>
 					runImageRead(() => readSide(side, filePath, oldPath, maxBytes, signal), signal),
+				resolveLfs: (side, filePath, oldPath, pointer, maxBytes, signal) =>
+					runImageRead(() => resolveLfs(side, filePath, oldPath, pointer, maxBytes, signal), signal),
+				lfsObjects,
 			});
 			if (requestAbort.signal.aborted) return;
 			res.writeHead(result.status, result.headers);
