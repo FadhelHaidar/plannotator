@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import React, { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { ASK_SESSION_DOCS_URL, AskSessionAnnouncementDialog } from './AskSessionAnnouncementDialog';
+import { ASK_SESSION_DOCS_URL, ASK_SESSION_WATCH_URL, AskSessionAnnouncementDialog } from './AskSessionAnnouncementDialog';
 import type { AskSessionAgent } from '../utils/askSessionAnnouncement';
 
 const hasDom = typeof document !== 'undefined';
@@ -118,27 +118,33 @@ describe('AskSessionAnnouncementDialog', () => {
     }
   });
 
-  test.skipIf(!hasDom)('Learn more opens the docs in a new tab without dismissing', async () => {
+  test.skipIf(!hasDom)('Watch on X and Learn more open in a new tab without dismissing', async () => {
     const onDismiss = mock(() => {});
     await mountHarness(onDismiss);
 
-    const link = document.querySelector<HTMLAnchorElement>(`${DIALOG} a[data-ask-session-learn-more]`);
-    if (!link) throw new Error('Learn more did not render');
-    expect(link.getAttribute('href')).toBe(ASK_SESSION_DOCS_URL);
-    expect(link.getAttribute('target')).toBe('_blank');
-    expect(link.getAttribute('rel')).toBe('noopener noreferrer');
-
-    // Got it stays the primary: it has focus, and Tab order reaches the link first.
+    const links = [
+      ['a[data-ask-session-watch]', ASK_SESSION_WATCH_URL],
+      ['a[data-ask-session-learn-more]', ASK_SESSION_DOCS_URL],
+    ] as const;
     const gotIt = gotItButton();
+    // Got it stays the primary: it has focus, and Tab order reaches the links first.
     expect(document.activeElement).toBe(gotIt);
-    expect(link.compareDocumentPosition(gotIt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-    // Like the terminal-tools announcement's outbound links, following it
-    // neither closes the announcement nor spends its cookie.
-    const stopNavigation = (event: Event) => event.preventDefault();
-    link.addEventListener('click', stopNavigation);
-    await act(async () => link.click());
-    link.removeEventListener('click', stopNavigation);
+    for (const [selector, href] of links) {
+      const link = document.querySelector<HTMLAnchorElement>(`${DIALOG} ${selector}`);
+      if (!link) throw new Error(`${selector} did not render`);
+      expect(link.getAttribute('href')).toBe(href);
+      expect(link.getAttribute('target')).toBe('_blank');
+      expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+      expect(link.compareDocumentPosition(gotIt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+      // Like the terminal-tools announcement's outbound links, following one
+      // neither closes the announcement nor spends its cookie.
+      const stopNavigation = (event: Event) => event.preventDefault();
+      link.addEventListener('click', stopNavigation);
+      await act(async () => link.click());
+      link.removeEventListener('click', stopNavigation);
+    }
     expect(onDismiss).not.toHaveBeenCalled();
     expect(document.querySelector(DIALOG)).not.toBeNull();
   });
@@ -167,13 +173,14 @@ describe('AskSessionAnnouncementDialog', () => {
     expect(play?.getAttribute('aria-label')).toBe('Play demo');
   });
 
-  test.skipIf(!hasDom)('when the media cannot load, the frame stays and says so', async () => {
+  test.skipIf(!hasDom)('when the media cannot load, the frame stays and offers the X post', async () => {
     await mountDialog();
     const sources = video().querySelectorAll('source');
     await act(async () => {
       sources[sources.length - 1].dispatchEvent(new Event('error'));
     });
-    expect(document.querySelector(`${DIALOG} [data-ask-session-demo-unavailable]`)).not.toBeNull();
+    const fallback = document.querySelector(`${DIALOG} [data-ask-session-demo-unavailable]`);
+    expect(fallback?.querySelector('a')?.getAttribute('href')).toBe(ASK_SESSION_WATCH_URL);
     // The way out is unaffected.
     expect(gotItButton()).toBeDefined();
   });

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ExternalLink, Pause, Play } from 'lucide-react';
-import { prefersReducedMotion } from './TerminalToolsAnnouncementDialog';
+import { prefersReducedMotion, XMark } from './TerminalToolsAnnouncementDialog';
 import type { AskSessionAgent } from '../utils/askSessionAnnouncement';
 
 /**
@@ -15,16 +15,23 @@ import type { AskSessionAgent } from '../utils/askSessionAnnouncement';
  * that swallows Mod+Enter).
  *
  * LAST in each app's first-run dialog chain; the Apps gate rendering through
- * askSessionAnnouncementCanShow.
+ * askSessionAnnouncementEligible and useFirstRunAnnouncementWindow.
  *
  * The footage is hosted on plannotator.ai (`apps/marketing/public/assets/`),
  * not inlined, so the dialog has to look right without it: the poster stays up
  * while the video buffers, and if the media cannot load the frame keeps its
- * place and says so.
+ * place and offers the X post instead.
  */
 
 /** The feature's docs page (goes live with the 0.28.0 release that ships this dialog). */
 export const ASK_SESSION_DOCS_URL = 'https://docs.plannotator.ai/open-source/workflows/ask-this-session';
+
+/** The X post the footage was cut for. */
+export const ASK_SESSION_WATCH_URL = 'https://x.com/plannotator/status/2106875215170899992';
+
+/** Same look as the terminal-tools announcement's outbound actions. */
+const OUTBOUND_ACTION_CLASS =
+  'inline-flex min-h-9 items-center gap-2 rounded-lg border border-border bg-surface-0/40 px-3 text-sm font-medium text-foreground outline-none transition-colors motion-reduce:transition-none hover:bg-surface-1/70 focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-card';
 
 /** Where the marketing deploy publishes `apps/marketing/public/assets/`. */
 const MEDIA_BASE_URL = 'https://plannotator.ai/assets';
@@ -124,9 +131,17 @@ function DemoPlayer({ reducedMotion }: { readonly reducedMotion: boolean }) {
       {failed ? (
         <div
           data-ask-session-demo-unavailable
-          className="absolute inset-0 grid place-items-center bg-background/70 px-6 text-center text-sm text-muted-foreground backdrop-blur-sm"
+          className="absolute inset-0 grid place-items-center bg-background/70 backdrop-blur-sm"
         >
-          The demo video could not load. Open Ask AI in a review to try it.
+          <a
+            href={ASK_SESSION_WATCH_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-border bg-card px-4 text-sm font-medium text-foreground outline-none hover:bg-surface-1 focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          >
+            <XMark className="size-3.5" />
+            Watch on X
+          </a>
         </div>
       ) : (
         <button
@@ -271,26 +286,40 @@ export function AskSessionAnnouncementDialog({
               <span className="size-2 shrink-0 rounded-full bg-success" aria-hidden="true" />
               This session is connected. Open Ask AI to try it.
             </p>
-            {/* Like the terminal-tools announcement's outbound links: opening it
-                does not dismiss the announcement or spend its cookie. */}
-            <a
-              href={ASK_SESSION_DOCS_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              data-ask-session-learn-more
-              className="ml-auto inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-border bg-surface-0/40 px-3 text-sm font-medium text-foreground outline-none transition-colors motion-reduce:transition-none hover:bg-surface-1/70 focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-card"
-            >
-              Learn more
-              <ExternalLink className="size-3.5" aria-hidden="true" />
-            </a>
-            <button
-              ref={dismissRef}
-              type="button"
-              onClick={onDismiss}
-              className="min-h-9 rounded-lg bg-primary px-5 text-sm font-medium text-primary-foreground outline-none transition-opacity motion-reduce:transition-none hover:opacity-90 focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-card"
-            >
-              Got it
-            </button>
+            {/* The actions wrap as one group, so a narrow panel puts them on their
+                own row under the status line instead of splitting them. */}
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+              {/* Like the terminal-tools announcement's outbound links: opening
+                  either one does not dismiss the announcement or spend its cookie. */}
+              <a
+                href={ASK_SESSION_WATCH_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                data-ask-session-watch
+                className={OUTBOUND_ACTION_CLASS}
+              >
+                <XMark className="size-3.5" />
+                Watch on X
+              </a>
+              <a
+                href={ASK_SESSION_DOCS_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                data-ask-session-learn-more
+                className={OUTBOUND_ACTION_CLASS}
+              >
+                Learn more
+                <ExternalLink className="size-3.5" aria-hidden="true" />
+              </a>
+              <button
+                ref={dismissRef}
+                type="button"
+                onClick={onDismiss}
+                className="min-h-9 rounded-lg bg-primary px-5 text-sm font-medium text-primary-foreground outline-none transition-opacity motion-reduce:transition-none hover:opacity-90 focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+              >
+                Got it
+              </button>
+            </div>
           </div>
         </div>
       </div>
