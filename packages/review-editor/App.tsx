@@ -1140,6 +1140,10 @@ const ReviewApp: React.FC = () => {
   // reasoning-effort control populate past the static fallback. Never called
   // on load — that would reintroduce the eager `codex app-server` spawn.
   const activateAIProvider = useAIProviderActivation({
+    // Only providers the server lists for Ask AI: a saved id that the
+    // resolver has not replaced yet (e.g. codex-sdk on a session-bridge
+    // server) must not start that provider's discovery.
+    providers: aiProviders,
     onCapabilities: (providers, defaultProvider) => {
       setAiProviders(providers);
       setAiDefaultProvider(defaultProvider);
