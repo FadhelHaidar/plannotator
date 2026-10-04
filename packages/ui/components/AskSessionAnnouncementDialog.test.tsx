@@ -13,7 +13,6 @@ const VIDEO = `${DIALOG} video[data-ask-session-demo]`;
 
 interface MountProps {
   readonly agent?: AskSessionAgent;
-  readonly connected?: boolean;
   readonly reducedMotion?: boolean;
 }
 
@@ -26,7 +25,6 @@ async function mountDialog(onDismiss: () => void = () => {}, props: MountProps =
       <AskSessionAnnouncementDialog
         isOpen
         agent={props.agent ?? 'claude-code'}
-        connected={props.connected ?? true}
         reducedMotion={props.reducedMotion}
         onDismiss={onDismiss}
       />,
@@ -41,7 +39,6 @@ function Harness({ onDismiss }: { readonly onDismiss: () => void }) {
     <AskSessionAnnouncementDialog
       isOpen={open}
       agent="claude-code"
-      connected
       onDismiss={() => {
         onDismiss();
         setOpen(false);
@@ -111,17 +108,14 @@ describe('AskSessionAnnouncementDialog', () => {
     }
   });
 
-  test.skipIf(!hasDom)('says the session is connected only when the server offers it', async () => {
-    await mountDialog(() => {}, { connected: true });
-    expect(document.querySelector(`${DIALOG} [data-ask-session-status="connected"]`)).not.toBeNull();
-    expect(document.querySelector(`${DIALOG} [data-ask-session-status="setup"]`)).toBeNull();
-    await unmount();
-
-    await mountDialog(() => {}, { agent: 'pi', connected: false });
-    expect(document.querySelector(`${DIALOG} [data-ask-session-status="connected"]`)).toBeNull();
-    // The Pi setup line carries the command that gets the feature.
-    expect(document.querySelector(`${DIALOG} [data-ask-session-status="setup"]`)?.textContent)
-      .toContain('pi update --extensions');
+  test.skipIf(!hasDom)('always says the session is connected; there is no setup variant', async () => {
+    // The Apps open it only for a connected session, so the footer never
+    // tells a reader to go and set something up.
+    for (const agent of ['claude-code', 'pi', 'opencode'] as const) {
+      await mountDialog(() => {}, { agent });
+      expect(document.querySelector(`${DIALOG} [data-ask-session-status="connected"]`)).not.toBeNull();
+      await unmount();
+    }
   });
 
   test.skipIf(!hasDom)('the footage is hosted, inline, silent, looping and autoplaying', async () => {

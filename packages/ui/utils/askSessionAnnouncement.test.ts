@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
-  askSessionAgentForOrigin,
-  askSessionAnnouncementCanShow,
+  askSessionAnnouncementEligible,
   askSessionAnnouncementPendingThisLoad,
+  connectedAskSessionAgent,
   markAskSessionAnnouncementSeen,
   needsAskSessionAnnouncement,
   type AskSessionAnnouncementGateState,
@@ -18,11 +18,11 @@ const memoryBackend: StorageBackend = {
 };
 
 function showable(overrides: Partial<AskSessionAnnouncementGateState> = {}) {
-  return askSessionAnnouncementCanShow({
+  return askSessionAnnouncementEligible({
     announcementPending: true,
     isLoading: false,
-    origin: 'claude-code',
-    aiAvailable: true,
+    connectedAgent: 'claude-code',
+    askAIUsable: true,
     readOnlySession: false,
     compact: false,
     otherFirstRunDialogVisible: false,
@@ -68,24 +68,33 @@ describe('Ask this session announcement gate', () => {
     expect(askSessionAnnouncementPendingThisLoad()).toBe(false);
   });
 
-  test('only the hosts that have the feature are addressed', () => {
-    expect(askSessionAgentForOrigin('claude-code')).toBe('claude-code');
-    expect(askSessionAgentForOrigin('pi')).toBe('pi');
-    expect(askSessionAgentForOrigin('opencode')).toBe('opencode');
-    for (const origin of ['codex', 'amp', 'droid', 'copilot-cli', 'gemini-cli', 'kiro-cli', 'mistral-vibe', 'oh-my-pi'] as const) {
-      expect(askSessionAgentForOrigin(origin)).toBeNull();
-      expect(showable({ origin })).toBe(false);
-    }
-    expect(showable({ origin: null })).toBe(false);
-    expect(showable({ origin: 'pi' })).toBe(true);
-    expect(showable({ origin: 'opencode' })).toBe(true);
+  test('only a live session bridge counts as connected', () => {
+    const bridge = (host: string, status: 'ready' | 'busy' | 'blocked' | 'gone') => ({
+      name: 'session-bridge',
+      sessionBridge: { host, status, modes: { turn: true, transient: false } },
+    });
+    const sdk = { name: 'claude-agent-sdk' };
+
+    expect(connectedAskSessionAgent([bridge('claude-code', 'ready')])).toBe('claude-code');
+    expect(connectedAskSessionAgent([bridge('pi', 'busy')])).toBe('pi');
+    expect(connectedAskSessionAgent([bridge('opencode', 'blocked')])).toBe('opencode');
+    // No bridge: remote, --tailscale, Windows, mod off, -p, OpenCode 1...
+    expect(connectedAskSessionAgent([])).toBeNull();
+    expect(connectedAskSessionAgent([sdk])).toBeNull();
+    // Listed but gone: telling the reader it is connected would be false.
+    expect(connectedAskSessionAgent([bridge('claude-code', 'gone')])).toBeNull();
+    // A host this copy cannot name.
+    expect(connectedAskSessionAgent([bridge('amp', 'ready')])).toBeNull();
+    // The provider row without its live status.
+    expect(connectedAskSessionAgent([{ name: 'session-bridge' }])).toBeNull();
   });
 
   test('every suppressing condition independently withholds the dialog', () => {
     expect(showable()).toBe(true);
     expect(showable({ announcementPending: false })).toBe(false);
     expect(showable({ isLoading: true })).toBe(false);
-    expect(showable({ aiAvailable: false })).toBe(false);
+    expect(showable({ connectedAgent: null })).toBe(false);
+    expect(showable({ askAIUsable: false })).toBe(false);
     expect(showable({ readOnlySession: true })).toBe(false);
     expect(showable({ compact: true })).toBe(false);
     expect(showable({ otherFirstRunDialogVisible: true })).toBe(false);

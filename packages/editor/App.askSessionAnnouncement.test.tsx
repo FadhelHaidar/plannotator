@@ -50,20 +50,24 @@ interface Session {
   readonly origin: string;
   readonly mode?: "archive";
   /** What /api/ai/capabilities answers. */
-  readonly ai: "bridge" | "providers" | "off";
+  readonly ai: "bridge" | "gone" | "providers" | "off";
 }
 
-const SESSION_BRIDGE = {
-  id: "session-bridge",
-  name: "session-bridge",
-  label: "Ask this session · Claude Code",
-  capabilities: {},
-  models: [],
-  sessionBridge: { host: "claude-code", status: "ready", modes: { turn: true, transient: false } },
-};
+function sessionBridge(host: string, status: "ready" | "gone") {
+  return {
+    id: "session-bridge",
+    name: "session-bridge",
+    label: "Ask this session",
+    capabilities: {},
+    models: [],
+    sessionBridge: { host, status, modes: { turn: true, transient: false } },
+  };
+}
 const SDK_PROVIDER = { id: "claude-agent-sdk", name: "claude-agent-sdk", capabilities: {}, models: [] };
 
 let decisions: string[] = [];
+/** When set, /api/ai/capabilities waits for it before answering. */
+let capabilitiesGate: Promise<void> | null = null;
 let root: Root | null = null;
 let host: HTMLElement | null = null;
 
@@ -85,12 +89,14 @@ function stubFetch(session: Session): typeof fetch {
     }
     if (url.pathname === "/api/archive/plans") return Response.json({ plans: [] });
     if (url.pathname === "/api/ai/capabilities") {
+      if (capabilitiesGate) await capabilitiesGate;
       if (session.ai === "off") return Response.json({ available: false, providers: [] });
-      return Response.json({
-        available: true,
-        providers: session.ai === "bridge" ? [SESSION_BRIDGE] : [SDK_PROVIDER],
-        defaultProvider: null,
-      });
+      const providers = session.ai === "bridge"
+        ? [sessionBridge(session.origin, "ready")]
+        : session.ai === "gone"
+          ? [sessionBridge(session.origin, "gone")]
+          : [SDK_PROVIDER];
+      return Response.json({ available: true, providers, defaultProvider: null });
     }
     if (url.pathname === "/api/approve" || url.pathname === "/api/deny") {
       decisions.push(url.pathname);
@@ -159,6 +165,7 @@ describe.if(hasDom)("Ask this session announcement in the plan editor", () => {
   beforeEach(() => {
     memory.clear();
     decisions = [];
+    capabilitiesGate = null;
     storageModule?.setStorageBackend(memoryBackend);
   });
 
@@ -188,19 +195,43 @@ describe.if(hasDom)("Ask this session announcement in the plan editor", () => {
     expect(document.querySelector(DIALOG)).toBeNull();
   });
 
-  test("a session without the bridge yet gets the setup line instead", async () => {
+  test("names the connected host", async () => {
     seedEarlierChainSeen();
-    await mountApp({ origin: "pi", ai: "providers" });
-
+    await mountApp({ origin: "pi", ai: "bridge" });
     expect(document.querySelector(DIALOG)?.getAttribute("data-ask-session-agent")).toBe("pi");
-    expect(document.querySelector(`${DIALOG} [data-ask-session-status="setup"]`)).not.toBeNull();
   });
 
-  test("other hosts never see it and never spend it", async () => {
+  test("a session that is not connected never sees it and never spends it", async () => {
+    // A Claude Code session without the bridge (mod off, remote, older CLI),
+    // a bridge whose session is gone, and another host entirely.
+    const sessions: Session[] = [
+      { origin: "claude-code", ai: "providers" },
+      { origin: "pi", ai: "gone" },
+      { origin: "codex", ai: "providers" },
+    ];
+    for (const session of sessions) {
+      seedEarlierChainSeen();
+      await mountApp(session);
+      expect(document.querySelector(DIALOG)).toBeNull();
+      expect(memory.has(ASK_KEY)).toBe(false);
+      await unmountApp();
+    }
+  });
+
+  test("a reader who starts working before the session answers is not interrupted", async () => {
     seedEarlierChainSeen();
-    await mountApp({ origin: "codex", ai: "providers" });
+    let answerCapabilities: () => void = () => {};
+    capabilitiesGate = new Promise<void>((resolve) => { answerCapabilities = resolve; });
+    await mountApp({ origin: "claude-code", ai: "bridge" });
+    expect(document.querySelector(DIALOG)).toBeNull();
+
+    // The reader's first click, and only then the capabilities answer.
+    await act(async () => { document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true })); });
+    await act(async () => { answerCapabilities(); });
+    for (let attempt = 0; attempt < 10; attempt += 1) await settle();
 
     expect(document.querySelector(DIALOG)).toBeNull();
+    // Deferred, not spent: a later load may show it.
     expect(memory.has(ASK_KEY)).toBe(false);
   });
 

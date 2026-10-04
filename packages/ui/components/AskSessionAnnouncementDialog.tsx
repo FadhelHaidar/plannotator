@@ -41,37 +41,31 @@ interface AgentCopy {
   readonly name: string;
   /** How the session stays free. OpenCode's plan review still holds the session. */
   readonly freeLine: string;
-  /** What to do when this session is not connected yet. One short line. */
-  readonly setupLine: string;
 }
 
 const AGENT_COPY: Record<AskSessionAgent, AgentCopy> = {
   'claude-code': {
     name: 'Claude Code',
     freeLine: 'Claude Code stays free while you review, and your decision arrives as a message.',
-    setupLine: 'Needs Claude Code 2.1.287 or later and the latest Plannotator plugin.',
   },
   pi: {
     name: 'Pi',
     freeLine: 'Pi stays free while you review, and your decision arrives as a message.',
-    setupLine: 'Update the Plannotator extension: pi update --extensions',
   },
   opencode: {
     name: 'OpenCode',
     freeLine: 'Code review and annotate no longer hold the session, and your feedback arrives as a message.',
-    setupLine: 'Needs OpenCode 2. Re-run the Plannotator installer to update.',
   },
 };
 
 interface AskSessionAnnouncementDialogProps {
   readonly isOpen: boolean;
-  /** The host that opened this session; names the agent in the copy. */
-  readonly agent: AskSessionAgent;
   /**
-   * The server offers "Ask this session" right now. When false, the footer
-   * says what the reader needs to get it instead.
+   * The host whose session is connected to this Plannotator session
+   * (connectedAskSessionAgent); names the agent in the copy. The Apps only
+   * open the dialog while one is connected.
    */
-  readonly connected: boolean;
+  readonly agent: AskSessionAgent;
   /** Marks the announcement seen and closes it. Also wired to Escape and the backdrop. */
   readonly onDismiss: () => void;
   /** Test seam. Defaults to the media query. */
@@ -157,7 +151,6 @@ function DemoPlayer({ reducedMotion }: { readonly reducedMotion: boolean }) {
 export function AskSessionAnnouncementDialog({
   isOpen,
   agent,
-  connected,
   onDismiss,
   reducedMotion,
 }: AskSessionAnnouncementDialogProps) {
@@ -268,19 +261,13 @@ export function AskSessionAnnouncementDialog({
           </p>
 
           <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-3">
-            {connected ? (
-              <p
-                data-ask-session-status="connected"
-                className="inline-flex min-w-0 items-center gap-2 text-sm text-foreground"
-              >
-                <span className="size-2 shrink-0 rounded-full bg-success" aria-hidden="true" />
-                This session is connected. Open Ask AI to try it.
-              </p>
-            ) : (
-              <p data-ask-session-status="setup" className="min-w-0 text-sm text-muted-foreground">
-                {copy.setupLine}
-              </p>
-            )}
+            <p
+              data-ask-session-status="connected"
+              className="inline-flex min-w-0 items-center gap-2 text-sm text-foreground"
+            >
+              <span className="size-2 shrink-0 rounded-full bg-success" aria-hidden="true" />
+              This session is connected. Open Ask AI to try it.
+            </p>
             <button
               ref={dismissRef}
               type="button"

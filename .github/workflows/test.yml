@@ -206,6 +206,7 @@ jobs:
           packages/editor/App.terminalToolsAnnouncement.test.tsx
           packages/ui/components/AskSessionAnnouncementDialog.test.tsx
           packages/editor/App.askSessionAnnouncement.test.tsx
+          packages/ui/hooks/useFirstRunAnnouncementWindow.test.tsx
           packages/review-editor/components/ReviewSidebar.generalComment.test.tsx
           packages/review-editor/components/ReviewSidebar.outdated.test.tsx
           packages/ui/components/HtmlSurfaceControls.test.tsx

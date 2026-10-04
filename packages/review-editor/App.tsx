@@ -59,11 +59,12 @@ import {
 } from '@plannotator/ui/utils/terminalToolsAnnouncement';
 import { AskSessionAnnouncementDialog } from '@plannotator/ui/components/AskSessionAnnouncementDialog';
 import {
-  askSessionAgentForOrigin,
-  askSessionAnnouncementCanShow,
+  askSessionAnnouncementEligible,
   askSessionAnnouncementPendingThisLoad,
+  connectedAskSessionAgent,
   markAskSessionAnnouncementSeen,
 } from '@plannotator/ui/utils/askSessionAnnouncement';
+import { useFirstRunAnnouncementWindow } from '@plannotator/ui/hooks/useFirstRunAnnouncementWindow';
 import { CodeAnnotation, CodeAnnotationType, SelectedLineRange, TokenAnnotationMeta, ConventionalLabel, ConventionalDecoration, Annotation, CommentAnnotation, AgentJobInfo, type ArtifactAnnotationMeta, type CallFlowAnnotationTarget } from '@plannotator/ui/types';
 import type { CommentAskAIHandler } from '@plannotator/ui/components/CommentPopover';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
@@ -1718,23 +1719,28 @@ const ReviewApp: React.FC = () => {
       || editModeIntroVisible
       || tokenHoverIntroVisible,
   });
-  // After the terminal-tools announcement: only for reviews opened by a host
-  // that has "Ask this session" (Claude Code, Pi, OpenCode), once the server
-  // has said Ask AI is available.
-  const askSessionAgent = askSessionAgentForOrigin(origin);
-  const askSessionIntroVisible = askSessionAnnouncementCanShow({
-    announcementPending: askSessionIntroPending,
-    isLoading,
-    origin,
-    aiAvailable,
-    readOnlySession: false,
-    compact: isCompactTouchLayout,
-    otherFirstRunDialogVisible:
-      guideIntroVisible
-      || showLookAndFeel
-      || editModeIntroVisible
-      || tokenHoverIntroVisible
-      || terminalToolsIntroVisible,
+  // After the terminal-tools announcement, and only while this review is
+  // actually connected to its agent (Claude Code, Pi, OpenCode) and the Ask AI
+  // button is there. It may only open before the reviewer starts working
+  // (useFirstRunAnnouncementWindow); otherwise it waits for a later load.
+  const askSessionAgent = connectedAskSessionAgent(aiProviders);
+  const askSessionIntroVisible = useFirstRunAnnouncementWindow({
+    pending: askSessionIntroPending,
+    armed: !isLoading,
+    eligible: askSessionAnnouncementEligible({
+      announcementPending: askSessionIntroPending,
+      isLoading,
+      connectedAgent: askSessionAgent,
+      askAIUsable: aiAvailable,
+      readOnlySession: false,
+      compact: isCompactTouchLayout,
+      otherFirstRunDialogVisible:
+        guideIntroVisible
+        || showLookAndFeel
+        || editModeIntroVisible
+        || tokenHoverIntroVisible
+        || terminalToolsIntroVisible,
+    }),
   });
   const hoveredTokenSymbol = tokenHover.hover?.request.symbol;
   const startTokenHover = tokenHover.onTokenHoverEnter;
@@ -5890,7 +5896,6 @@ const ReviewApp: React.FC = () => {
           <AskSessionAnnouncementDialog
             isOpen
             agent={askSessionAgent}
-            connected={hasSessionBridge}
             onDismiss={dismissAskSessionIntro}
           />
         )}

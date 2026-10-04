@@ -516,12 +516,14 @@ not hand the turn to an earlier dialog.
 Not CI. The gate is one cookie, `plannotator-announce-ask-session-seen`. Seed
 `plannotator-announce-tui-herdr-seen=1` (and the other first-run keys) so the chain reaches it.
 
-1. **Who sees it.** Open a review from Claude Code (`/plannotator-review`), Pi or OpenCode: the
-   announcement opens, its headline names that agent, and the footer says the session is connected
-   (green dot) when Ask AI shows "Ask this session". Open one with `PLANNOTATOR_ORIGIN=codex`: no
-   announcement, cookie still unset. With `PLANNOTATOR_AI=disabled`: none either, cookie unset.
-2. **Not connected yet.** A Claude Code / Pi / OpenCode session without the bridge (older plugin,
-   `PLANNOTATOR_CLAUDE_MOD=0`) shows the one-line "Needs …" setup hint instead of the green dot.
+1. **Who sees it.** Open a review from Claude Code (`/plannotator-review`), Pi or OpenCode 2 and
+   don't touch anything: the announcement opens within a few seconds, its headline names that
+   agent, and Ask AI shows "Ask this session". `PLANNOTATOR_ORIGIN=codex`,
+   `PLANNOTATOR_AI=disabled`, `PLANNOTATOR_CLAUDE_MOD=0` or `PLANNOTATOR_REMOTE=1`: no
+   announcement, and the cookie is still unset afterwards.
+2. **It never interrupts.** Clear the cookie, open a session and click into the page (or start
+   typing a comment) before it appears: it does not open on this load, and the cookie is unset.
+   Reload without touching anything: it opens.
 3. **One announcement per load.** Clear both announcement cookies: the terminal-tools one shows;
    dismiss it, and this one does NOT follow on the same load. Reload: now this one shows.
 4. **Exits and keyboard.** Got it, `Escape` and a click on the backdrop all close it and write the

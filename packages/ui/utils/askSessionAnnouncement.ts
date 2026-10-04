@@ -12,7 +12,7 @@
  * from "seeded default".
  */
 
-import type { Origin } from '@plannotator/core/agents';
+import { isSessionBridgeProvider, type AIProviderOption } from './aiProvider';
 import { storage } from './storage';
 import { needsTerminalToolsAnnouncement } from './terminalToolsAnnouncement';
 
@@ -39,11 +39,26 @@ export function askSessionAnnouncementPendingThisLoad(): boolean {
   return needsAskSessionAnnouncement() && !needsTerminalToolsAnnouncement();
 }
 
-/** The hosts whose sessions can answer Ask AI and take decisions as messages. */
+/** The hosts whose sessions answer Ask AI through the session bridge. */
 export type AskSessionAgent = 'claude-code' | 'pi' | 'opencode';
 
-export function askSessionAgentForOrigin(origin: Origin | null | undefined): AskSessionAgent | null {
-  return origin === 'claude-code' || origin === 'pi' || origin === 'opencode' ? origin : null;
+function askSessionAgentForHost(host: string | undefined): AskSessionAgent | null {
+  return host === 'claude-code' || host === 'pi' || host === 'opencode' ? host : null;
+}
+
+/**
+ * The agent whose session is connected to THIS Plannotator session right now:
+ * the server lists the "Ask this session" provider and its session is not
+ * gone. Null everywhere the feature is not live (remote, --tailscale, Windows,
+ * the Claude Code mod turned off, `-p`, Pi's event-API path, OpenCode 1, an
+ * older CLI): the announcement only describes what the reader can use here.
+ */
+export function connectedAskSessionAgent(
+  providers: ReadonlyArray<Pick<AIProviderOption, 'name' | 'sessionBridge'>>,
+): AskSessionAgent | null {
+  const bridge = providers.find(isSessionBridgeProvider)?.sessionBridge;
+  if (!bridge || bridge.status === 'gone') return null;
+  return askSessionAgentForHost(bridge.host);
 }
 
 export interface AskSessionAnnouncementGateState {
@@ -52,18 +67,17 @@ export interface AskSessionAnnouncementGateState {
   /** The app has not finished loading its initial payload. */
   readonly isLoading: boolean;
   /**
-   * The agent that opened this session (`/api/plan` / `/api/diff` origin).
-   * Only Claude Code, Pi and OpenCode have the feature; any other origin never
-   * sees the announcement and never consumes the cookie.
+   * connectedAskSessionAgent() of the capabilities answer. Null while that
+   * answer is pending and whenever the session is not connected: deferred,
+   * never consumed, so the reader sees it in a session where it is true.
    */
-  readonly origin: Origin | null | undefined;
+  readonly connectedAgent: AskSessionAgent | null;
   /**
-   * The server answered /api/ai/capabilities with Ask AI available. False
-   * while that answer is pending and when Ask AI is turned off
-   * (PLANNOTATOR_AI=disabled): an announcement about Ask AI is noise to someone
-   * who switched it off, and the cookie is kept for a session that has it.
+   * Ask AI is actually reachable on this surface (the plan editor's canUseAI,
+   * not taken over by the annotate agent terminal; code review's AI button),
+   * so "Open Ask AI to try it" never points at nothing.
    */
-  readonly aiAvailable: boolean;
+  readonly askAIUsable: boolean;
   /** Archive browsing, a read-only shared plan, or no Plannotator server. Deferred, not consumed. */
   readonly readOnlySession: boolean;
   /** Plannotator's compact touch shell. Deferred, not consumed. */
@@ -73,17 +87,19 @@ export interface AskSessionAnnouncementGateState {
 }
 
 /**
- * Chain gate. LAST in each app's first-run chain, after the terminal-tools
- * announcement (see askSessionAnnouncementPendingThisLoad) and behind every
- * dialog that asks the user to decide something, for the reasons
- * terminalToolsAnnouncementCanShow gives.
+ * Whether the announcement may open now. LAST in each app's first-run chain,
+ * after the terminal-tools announcement (see askSessionAnnouncementPendingThisLoad)
+ * and behind every dialog that asks the user to decide something, for the
+ * reasons terminalToolsAnnouncementCanShow gives. The Apps pass this through
+ * useFirstRunAnnouncementWindow, which only lets it open before the reader has
+ * started working.
  */
-export function askSessionAnnouncementCanShow(state: AskSessionAnnouncementGateState): boolean {
+export function askSessionAnnouncementEligible(state: AskSessionAnnouncementGateState): boolean {
   return (
     state.announcementPending &&
     !state.isLoading &&
-    askSessionAgentForOrigin(state.origin) !== null &&
-    state.aiAvailable &&
+    state.connectedAgent !== null &&
+    state.askAIUsable &&
     !state.readOnlySession &&
     !state.compact &&
     !state.otherFirstRunDialogVisible

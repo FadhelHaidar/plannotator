@@ -919,14 +919,24 @@ Escape / Tab wrap / focus restore, backdrop dismiss, capture-phase keydown that 
 (one plain cookie, `plannotator-announce-ask-session-seen` = `'1'`, shared by every surface; not a
 settings-registry entry, for the same seeding reason).
 
-**Who sees it:** plan review, annotate and code review sessions whose origin is `claude-code`, `pi`
-or `opencode` (`askSessionAgentForOrigin`), once `/api/ai/capabilities` has answered with Ask AI
-available. Other origins, `PLANNOTATOR_AI=disabled`, archive / shared / no-server sessions, the
-compact touch shell and the initial load never show it and never consume the cookie. The headline
-names the host; the footer says "This session is connected" when the server offers the session
-bridge (`hasSessionBridge`), and otherwise one short line on what gets it (Claude Code 2.1.287+ and
-the latest plugin; `pi update --extensions`; OpenCode 2 and the installer). OpenCode's copy says
-"code review and annotate no longer hold the session" because its plan review still does.
+**Who sees it:** only a plan review, annotate or code review session that is actually connected
+right now: `/api/ai/capabilities` lists the session-bridge provider for `claude-code`, `pi` or
+`opencode` and its status is not `gone` (`connectedAskSessionAgent`), and Ask AI is reachable on
+the surface (the plan editor's `canUseAI` and not taken over by the annotate agent terminal; code
+review's AI button). Everything else defers WITHOUT writing the cookie, so the reader sees it in a
+session where it is true: no bridge (remote, `--tailscale`, Windows, the mod off, `-p`, Pi's
+event-API path, OpenCode 1, an older CLI), a gone session, other origins, `PLANNOTATOR_AI=disabled`,
+archive / shared / no-server sessions, the compact touch shell and the initial load. The headline
+names the connected host and the footer always says "This session is connected"; there is no
+setup variant. OpenCode's copy says "code review and annotate no longer hold the session" because
+its plan review still does.
+
+**Timing:** `useFirstRunAnnouncementWindow` (`packages/ui/hooks/`) lets it open only before the
+reader's first pointer press, key press or focus into a text field, within 4 s of the initial load,
+and never while a text field (a comment composer) has focus. Capabilities can answer late (model
+discovery), and a dialog that opened then would take focus mid-comment and be dismissed unread by
+the next Space or Enter; instead it misses the load, cookie unwritten. Once open it stays until
+dismissed.
 
 **Ordering:** after the terminal-tools announcement and never on the same load
 (`askSessionAnnouncementPendingThisLoad` is false while that cookie is unset), so a fresh browser
