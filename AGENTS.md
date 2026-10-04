@@ -379,9 +379,15 @@ released 0.27.25 and 0.27.10 binaries as processes:
   call through to Claude Code's own flow, where the plugin's classic
   PermissionRequest hook runs the familiar blocking review, logs ONE line
   telling the user to update the CLI, removes the launch directory, and sends
-  every later ExitPlanMode of that session straight to the classic flow
-  without probing again. Any other startup failure also falls back, with the
-  CLI's error logged. Plan review is therefore blocking, not broken.
+  every later ExitPlanMode straight to the classic flow without probing again.
+  The flag lives on the mod instance, not in `$.store`, so a restart or
+  `--resume` probes once more (and picks up a CLI updated in between). An old
+  CLI that refuses only after the hook stopped waiting (15 s) is caught by the
+  timer: same fallback, plus a plugin turn asking Claude to call ExitPlanMode
+  again, since it was told a review was open. While the hook waits, the timer
+  leaves the launch alone (`starting`), so only one of the two reports it. Any
+  other startup failure also falls back, with the CLI's error logged. Plan
+  review is therefore blocking, not broken.
 - Review, annotate, last and the `plannotator` tool: work. The old CLI writes
   the ready file (0.19.24+) and no result record; a decision that exits 0 is
   delivered from its stdout (`legacyResult` in `delivery.ts`), with the default

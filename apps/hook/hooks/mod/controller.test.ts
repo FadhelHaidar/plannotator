@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { PlannotatorMod, STORE_LAUNCHES } from './controller'
 import { PLAN_APPROVAL_NEXT_STEP } from './delivery'
+import { CLASSIC_PLAN_REVIEW_TEXT } from './plan'
 import { fakeHost, type FakeHost, type RunCall } from './testing/fake-host'
 
 const SESSION = { sessionId: 'session-1', dataDir: '/data', interactive: true }
@@ -202,6 +203,50 @@ describe('plan review', () => {
       expect(mod.onPlanPermission('t2', { plan: PLAN })).toBeNull()
     })
   }
+
+  test('an old CLI that exits while the hook waits is reported once, by the hook, even when the timer ticks then', async () => {
+    const host = fakeHost()
+    let dir = ''
+    host.onRun = (call) => {
+      if (isLaunch(call)) dir = launchDirOf(call)
+    }
+    host.onWait = () => {
+      if (!dir || host.files.has(`${dir}/exit`)) return
+      host.files.set(`${dir}/stderr`, 'Unknown command: claude-mod-plan\n')
+      host.files.set(`${dir}/exit`, '1')
+      // The 1 s timer fires in the same moment the CLI exits.
+      void host.tick()
+    }
+    const mod = new PlannotatorMod(host, SESSION)
+
+    expect(await mod.onPlanCall({ tool_use_id: 't1', plan: PLAN })).toEqual({ pass: true })
+    await host.tick()
+
+    expect(host.logs).toEqual([CLASSIC_PLAN_REVIEW_TEXT])
+    expect(host.submits).toEqual([])
+  })
+
+  test('an old CLI that refuses only after the hook stopped waiting: Claude is asked to call ExitPlanMode again', async () => {
+    const host = fakeHost()
+    const mod = new PlannotatorMod(host, SESSION)
+
+    // Nothing within the hook's 15 s: Claude is told the review is open.
+    const answer = await mod.onPlanCall({ tool_use_id: 't1', plan: PLAN })
+    expect('deny' in answer && answer.deny).toContain('NOT approved')
+
+    const dir = launchDirOf(launches(host)[0]!)
+    host.files.set(`${dir}/stderr`, 'Unknown command: claude-mod-plan\n')
+    host.files.set(`${dir}/exit`, '1')
+    await host.tick()
+
+    expect(host.logs).toEqual([CLASSIC_PLAN_REVIEW_TEXT])
+    expect(host.submits).toHaveLength(1)
+    expect(host.submits[0]).toContain('Call ExitPlanMode again')
+    // The call it asks for goes to the classic review without another launch.
+    expect(await mod.onPlanCall({ tool_use_id: 't2', plan: PLAN })).toEqual({ pass: true })
+    expect(launches(host)).toHaveLength(1)
+    expect(host.store.get(STORE_LAUNCHES)).toEqual([])
+  })
 })
 
 describe('commands', () => {

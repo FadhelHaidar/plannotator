@@ -28,6 +28,7 @@ import {
 } from './launch'
 import {
   approvedPermissionDecision,
+  CLASSIC_PLAN_RETRY_TEXT,
   CLASSIC_PLAN_REVIEW_TEXT,
   cliLacksModPlan,
   decidingDenyText,
@@ -84,6 +85,11 @@ interface LiveLaunch extends LaunchRecord {
   pidMisses: number
   ticks: number
   settling: boolean
+  /**
+   * A hook is still waiting in `awaitReady` for this launch to come up or
+   * fail: that hook reports the outcome, so the timer leaves the launch alone.
+   */
+  starting: boolean
   bridge: BridgeHandle | null
 }
 
@@ -156,7 +162,7 @@ export class PlannotatorMod {
   }
 
   private adopt(record: LaunchRecord): LiveLaunch {
-    const live: LiveLaunch = { ...record, pidMisses: 0, ticks: 0, settling: false, bridge: null }
+    const live: LiveLaunch = { ...record, pidMisses: 0, ticks: 0, settling: false, starting: false, bridge: null }
     this.launches.set(record.id, live)
     return live
   }
@@ -167,7 +173,7 @@ export class PlannotatorMod {
       (record) => record && record.sessionId !== this.session.sessionId,
     )
     const mine: LaunchRecord[] = [...this.launches.values()].map(
-      ({ pidMisses: _misses, ticks: _ticks, settling: _settling, bridge: _bridge, ...record }) => record,
+      ({ pidMisses: _misses, ticks: _ticks, settling: _settling, starting: _starting, bridge: _bridge, ...record }) => record,
     )
     await this.host.storeSet(STORE_LAUNCHES, [...others, ...mine])
   }
@@ -249,6 +255,15 @@ export class PlannotatorMod {
    * in a `$.clock` wait that would spend the hook's budget.
    */
   private async awaitReady(launch: LiveLaunch, ms: number): Promise<'ready' | 'exited' | 'timeout'> {
+    launch.starting = true
+    try {
+      return await this.waitReadyOrExit(launch, ms)
+    } finally {
+      launch.starting = false
+    }
+  }
+
+  private async waitReadyOrExit(launch: LiveLaunch, ms: number): Promise<'ready' | 'exited' | 'timeout'> {
     const ready = fileIn(launch.dir, 'ready')
     const exit = fileIn(launch.dir, 'exit')
     const deadline = (await this.host.now()) + ms
@@ -284,6 +299,18 @@ export class PlannotatorMod {
     const text = failedText(launch.subject, await read('stderr'), await read('stdout'), Number.isFinite(code) ? code : null)
     await this.forget(launch)
     return text
+  }
+
+  /**
+   * Not a failure to report each time: an older CLI. Say so once, and leave
+   * this instance's plans to the classic review (a resumed session probes
+   * once more, so a CLI updated in between is picked up).
+   */
+  private async fallBackToClassicPlans(launch: LiveLaunch): Promise<void> {
+    this.classicPlanReview = true
+    await this.forget(launch)
+    await this.host.run(cleanupArgv(launch.dir), { timeoutMs: 5_000 }).catch(() => undefined)
+    this.host.log(CLASSIC_PLAN_REVIEW_TEXT)
   }
 
   /** The plan launch exited because the CLI has no `claude-mod-plan`. */
@@ -439,13 +466,8 @@ export class PlannotatorMod {
     const outcome = await this.awaitReady(started, READY_WAIT_MS.other)
     if (outcome === 'exited') {
       if (await this.lacksModPlan(started)) {
-        // Not a failure to report each time: an older CLI. Say so once, and
-        // leave this session's plans to the classic review.
-        this.classicPlanReview = true
         this.planVersion = version - 1
-        await this.forget(started)
-        await this.host.run(cleanupArgv(started.dir), { timeoutMs: 5_000 }).catch(() => undefined)
-        this.host.log(CLASSIC_PLAN_REVIEW_TEXT)
+        await this.fallBackToClassicPlans(started)
         return { pass: true }
       }
       this.host.log(await this.startupFailure(started))
@@ -510,7 +532,7 @@ export class PlannotatorMod {
   private async tick(): Promise<void> {
     if (this.disposed) return
     for (const launch of [...this.launches.values()]) {
-      if (launch.settling) continue
+      if (launch.settling || launch.starting) continue
       launch.ticks += 1
       try {
         await this.check(launch)
@@ -539,11 +561,20 @@ export class PlannotatorMod {
       launch.settling = true
       const code = (await this.host.readFile(fileIn(launch.dir, 'exit')).catch(() => '')).trim()
       // A CLI older than the host result file still prints the decision the
-      // skill would have shown Claude; a plan never gets here (an old CLI has
-      // no claude-mod-plan and the call fell back to the classic flow).
+      // skill would have shown Claude. (A plan never exits 0 without a record.)
       if (code === '0' && launch.kind !== 'plan') {
         const printed = (await this.host.readFile(fileIn(launch.dir, 'stdout')).catch(() => '')).trim()
         await this.settle(launch, legacyResult(launch.kind, printed))
+        return
+      }
+      // An old CLI that took longer to refuse claude-mod-plan than the hook
+      // waited: Claude was told a review is open and is waiting on nothing.
+      if (launch.kind === 'plan' && (await this.lacksModPlan(launch))) {
+        await this.fallBackToClassicPlans(launch)
+        this.delivering = this.delivering
+          .then(() => this.host.submit(`Plannotator: ${launch.subject} — not opened.\n\n${CLASSIC_PLAN_RETRY_TEXT}`))
+          .catch(() => undefined)
+        await this.delivering
         return
       }
       // Exited without a decision: a crash, a kill, or a startup failure we did not wait for.
