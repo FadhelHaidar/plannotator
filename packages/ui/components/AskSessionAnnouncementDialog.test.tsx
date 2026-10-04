@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import React, { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { AskSessionAnnouncementDialog } from './AskSessionAnnouncementDialog';
+import { ASK_SESSION_DOCS_URL, AskSessionAnnouncementDialog } from './AskSessionAnnouncementDialog';
 import type { AskSessionAgent } from '../utils/askSessionAnnouncement';
 
 const hasDom = typeof document !== 'undefined';
@@ -116,6 +116,31 @@ describe('AskSessionAnnouncementDialog', () => {
       expect(document.querySelector(`${DIALOG} [data-ask-session-status="connected"]`)).not.toBeNull();
       await unmount();
     }
+  });
+
+  test.skipIf(!hasDom)('Learn more opens the docs in a new tab without dismissing', async () => {
+    const onDismiss = mock(() => {});
+    await mountHarness(onDismiss);
+
+    const link = document.querySelector<HTMLAnchorElement>(`${DIALOG} a[data-ask-session-learn-more]`);
+    if (!link) throw new Error('Learn more did not render');
+    expect(link.getAttribute('href')).toBe(ASK_SESSION_DOCS_URL);
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+
+    // Got it stays the primary: it has focus, and Tab order reaches the link first.
+    const gotIt = gotItButton();
+    expect(document.activeElement).toBe(gotIt);
+    expect(link.compareDocumentPosition(gotIt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // Like the terminal-tools announcement's outbound links, following it
+    // neither closes the announcement nor spends its cookie.
+    const stopNavigation = (event: Event) => event.preventDefault();
+    link.addEventListener('click', stopNavigation);
+    await act(async () => link.click());
+    link.removeEventListener('click', stopNavigation);
+    expect(onDismiss).not.toHaveBeenCalled();
+    expect(document.querySelector(DIALOG)).not.toBeNull();
   });
 
   test.skipIf(!hasDom)('the footage is hosted, inline, silent, looping and autoplaying', async () => {

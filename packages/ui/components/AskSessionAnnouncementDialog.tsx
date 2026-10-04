@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Pause, Play } from 'lucide-react';
+import { ExternalLink, Pause, Play } from 'lucide-react';
 import { prefersReducedMotion } from './TerminalToolsAnnouncementDialog';
 import type { AskSessionAgent } from '../utils/askSessionAnnouncement';
 
@@ -22,6 +22,9 @@ import type { AskSessionAgent } from '../utils/askSessionAnnouncement';
  * while the video buffers, and if the media cannot load the frame keeps its
  * place and says so.
  */
+
+/** The feature's docs page (goes live with the 0.28.0 release that ships this dialog). */
+export const ASK_SESSION_DOCS_URL = 'https://docs.plannotator.ai/open-source/workflows/ask-this-session';
 
 /** Where the marketing deploy publishes `apps/marketing/public/assets/`. */
 const MEDIA_BASE_URL = 'https://plannotator.ai/assets';
@@ -268,11 +271,23 @@ export function AskSessionAnnouncementDialog({
               <span className="size-2 shrink-0 rounded-full bg-success" aria-hidden="true" />
               This session is connected. Open Ask AI to try it.
             </p>
+            {/* Like the terminal-tools announcement's outbound links: opening it
+                does not dismiss the announcement or spend its cookie. */}
+            <a
+              href={ASK_SESSION_DOCS_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              data-ask-session-learn-more
+              className="ml-auto inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-border bg-surface-0/40 px-3 text-sm font-medium text-foreground outline-none transition-colors motion-reduce:transition-none hover:bg-surface-1/70 focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+            >
+              Learn more
+              <ExternalLink className="size-3.5" aria-hidden="true" />
+            </a>
             <button
               ref={dismissRef}
               type="button"
               onClick={onDismiss}
-              className="ml-auto min-h-9 rounded-lg bg-primary px-5 text-sm font-medium text-primary-foreground outline-none transition-opacity motion-reduce:transition-none hover:opacity-90 focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+              className="min-h-9 rounded-lg bg-primary px-5 text-sm font-medium text-primary-foreground outline-none transition-opacity motion-reduce:transition-none hover:opacity-90 focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-card"
             >
               Got it
             </button>
