@@ -924,7 +924,7 @@ if ($vibeAvailable -and $skipVibeResolved) {
 # leaves OpenCode's own cache directory alone; the Bun package cache is a
 # shared cache, not OpenCode's home, and is always cleared.
 if (-not $skipOpencodeResolved) {
-    $opencodeCacheDir = if ($env:XDG_CACHE_HOME) { Join-Path $env:XDG_CACHE_HOME "opencode" } else { "$env:USERPROFILE\.cache\opencode" }
+    $opencodeCacheDir = if ($env:XDG_CACHE_HOME) { "$env:XDG_CACHE_HOME\opencode" } else { "$env:USERPROFILE\.cache\opencode" }
     Remove-Item -Recurse -Force -LiteralPath "$opencodeCacheDir\node_modules\@plannotator" -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force -LiteralPath "$opencodeCacheDir\packages\@plannotator" -ErrorAction SilentlyContinue
     $opencodeNpmScope = "$opencodeCacheDir\npm\@plannotator"
