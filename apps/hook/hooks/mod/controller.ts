@@ -28,6 +28,8 @@ import {
 } from './launch'
 import {
   approvedPermissionDecision,
+  CLASSIC_PLAN_REVIEW_TEXT,
+  cliLacksModPlan,
   decidingDenyText,
   isTrustablePlanPath,
   MAX_PLAN_FILE_BYTES,
@@ -98,6 +100,12 @@ export class PlannotatorMod {
   /** ExitPlanMode calls passed through as the approved plan, by tool_use_id. */
   private passing = new Map<string, PendingApproval>()
   private planVersion = 0
+  /**
+   * The CLI has no `claude-mod-plan` (it is older than the plugin): every
+   * ExitPlanMode of this session takes Claude Code's own flow, and the
+   * plugin's classic hook reviews it, blocking, as before the mod.
+   */
+  private classicPlanReview = false
   private timer: { cancel: () => void } | null = null
   private delivering: Promise<void> = Promise.resolve()
   private sequence = 0
@@ -278,6 +286,12 @@ export class PlannotatorMod {
     return text
   }
 
+  /** The plan launch exited because the CLI has no `claude-mod-plan`. */
+  private async lacksModPlan(launch: LiveLaunch): Promise<boolean> {
+    const stderr = await this.host.readFile(fileIn(launch.dir, 'stderr')).catch(() => '')
+    return cliLacksModPlan(stderr)
+  }
+
   // --- Commands ------------------------------------------------------------
 
   /** `/plannotator-review`, `/plannotator-annotate`, `/plannotator-last`: open and return at once. */
@@ -411,6 +425,7 @@ export class PlannotatorMod {
   }
 
   private async startPlanReview(plan: string, planFilePath?: string): Promise<{ pass: true } | { deny: string }> {
+    if (this.classicPlanReview) return { pass: true }
     const version = this.planVersion + 1
     const subject = subjectFor('plan', '', version)
     const stdin = (dir: string) => JSON.stringify({ plan, planFilePath, revisionFile: fileIn(dir, 'revision') })
@@ -423,6 +438,16 @@ export class PlannotatorMod {
     this.planVersion = version
     const outcome = await this.awaitReady(started, READY_WAIT_MS.other)
     if (outcome === 'exited') {
+      if (await this.lacksModPlan(started)) {
+        // Not a failure to report each time: an older CLI. Say so once, and
+        // leave this session's plans to the classic review.
+        this.classicPlanReview = true
+        this.planVersion = version - 1
+        await this.forget(started)
+        await this.host.run(cleanupArgv(started.dir), { timeoutMs: 5_000 }).catch(() => undefined)
+        this.host.log(CLASSIC_PLAN_REVIEW_TEXT)
+        return { pass: true }
+      }
       this.host.log(await this.startupFailure(started))
       return { pass: true }
     }

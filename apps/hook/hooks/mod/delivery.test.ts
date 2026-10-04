@@ -1,5 +1,14 @@
 import { describe, expect, test } from 'bun:test'
-import { deliveryFor, PLAN_APPROVAL_NEXT_STEP, parseHostResult, type HostResultRecord } from './delivery'
+import { DEFAULT_REVIEW_APPROVED_PROMPT, DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT } from '@plannotator/shared/prompts'
+import {
+  deliveryFor,
+  LEGACY_REVIEW_APPROVED_TEXT,
+  LEGACY_REVIEW_APPROVED_WITH_NOTES_HEADING,
+  legacyResult,
+  PLAN_APPROVAL_NEXT_STEP,
+  parseHostResult,
+  type HostResultRecord,
+} from './delivery'
 import { splitShellWords } from './shell-words'
 
 const CONTEXT = { subject: 'notes.md', overflowPath: '/data/x/feedback.md' }
@@ -46,6 +55,36 @@ describe('deliveryFor', () => {
     expect(delivery.overflow?.text.trimEnd()).toBe(big)
     expect(delivery.text).toContain(CONTEXT.overflowPath)
     expect(delivery.text.length).toBeLessThan(1000)
+  })
+})
+
+// An older CLI (no host result file, e.g. 0.27.25) only prints the decision
+// on stdout; these are the outputs it was observed to print.
+describe('legacyResult (a CLI that predates the host result file)', () => {
+  test('a review approval is an LGTM, not "Changes requested"', () => {
+    const lgtm = legacyResult('review', `${DEFAULT_REVIEW_APPROVED_PROMPT}\n`)
+    expect(deliveryFor(lgtm, CONTEXT).action).toBe('log')
+  })
+
+  test('a review approval with notes is delivered under its own outcome', () => {
+    const printed = DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT.replace('{{feedback}}', 'rename foo')
+    const delivery = deliveryFor(legacyResult('review', printed), CONTEXT)
+    expect(delivery.action).toBe('submit')
+    expect(delivery.text.split('\n')[0]).toBe('Plannotator: notes.md — Approved with notes.')
+    expect(delivery.text).toContain('rename foo')
+  })
+
+  test('feedback, close and the annotate approval line', () => {
+    expect(deliveryFor(legacyResult('review', '# Code Review Feedback\n\nfix'), CONTEXT).text).toContain('Changes requested')
+    expect(deliveryFor(legacyResult('review', 'Review session closed without feedback.'), CONTEXT).action).toBe('log')
+    expect(deliveryFor(legacyResult('annotate', 'The user approved.'), CONTEXT).action).toBe('log')
+    expect(deliveryFor(legacyResult('annotate', ''), CONTEXT).action).toBe('log')
+  })
+
+  // The mod cannot import packages/shared: its copies must follow the CLI's defaults.
+  test('the recognized approval texts are the CLI defaults', () => {
+    expect(LEGACY_REVIEW_APPROVED_TEXT).toBe(DEFAULT_REVIEW_APPROVED_PROMPT)
+    expect(DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT.split('\n')[0]).toBe(LEGACY_REVIEW_APPROVED_WITH_NOTES_HEADING)
   })
 })
 

@@ -93,6 +93,20 @@ export function revisionPendingDenyText(version: number): string {
   return `Plan v${version} was sent to the open Plannotator review. It is NOT approved. End your turn and wait for the decision.`
 }
 
+/**
+ * Whether a `plannotator claude-mod-plan` launch failed because the CLI is
+ * older than the plugin (the two update separately) and has no such
+ * subcommand: 0.27.11+ answers "Unknown command", and older CLIs read any
+ * unknown subcommand as the classic hook, which finds no hook event on stdin.
+ */
+export function cliLacksModPlan(stderr: string): boolean {
+  return /Unknown command: claude-mod-plan\b/.test(stderr) || /No plan content in hook event/.test(stderr)
+}
+
+/** Logged once per session when the CLI has no non-blocking plan review. */
+export const CLASSIC_PLAN_REVIEW_TEXT =
+  'Your plannotator CLI is older than the Plannotator plugin and has no non-blocking plan review, so plans open in the classic review, which holds this session until you decide. Update the CLI (curl -fsSL https://plannotator.ai/install.sh | bash) and start a new session to get non-blocking plan review.'
+
 /** Shown in the status line and toasts. */
 export function planWaitingStatus(version: number): string {
   return `Plan v${version} · waiting for your review`

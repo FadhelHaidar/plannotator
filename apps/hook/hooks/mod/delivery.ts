@@ -133,9 +133,22 @@ export function deliveryFor(record: HostResultRecord, context: DeliveryContext):
 }
 
 /**
+ * The CLI's default review approval prompts (`DEFAULT_REVIEW_APPROVED_PROMPT`
+ * and the first line of `DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT` in
+ * packages/shared/prompts.ts; delivery.test.ts keeps them equal). An older
+ * CLI prints them on stdout for an approval, and only stdout says what the
+ * decision was.
+ */
+export const LEGACY_REVIEW_APPROVED_TEXT = '# Code Review\n\nCode review completed — no changes requested.'
+export const LEGACY_REVIEW_APPROVED_WITH_NOTES_HEADING = '# Code Review — Approved with Notes'
+
+/**
  * A CLI that predates the host result file (the plugin and the binary update
  * separately): what it printed on stdout, the text the skill would have shown
- * Claude. Empty output, or the legacy close/approve lines, carry nothing.
+ * Claude. Empty output, or the legacy close/approve lines, carry nothing; a
+ * review approval (the default approved prompt) is an LGTM, as the newer CLI
+ * reports it, rather than "Changes requested". A user-customized approved
+ * prompt cannot be told apart from feedback and is delivered as feedback.
  */
 export function legacyResult(kind: SessionKind, printed: string): HostResultRecord {
   const surface = kind === 'review' ? 'review' : kind === 'last' ? 'annotate-last' : 'annotate'
@@ -144,5 +157,11 @@ export function legacyResult(kind: SessionKind, printed: string): HostResultReco
     return { v: 1, surface, decision: 'dismissed', message: '', noop: true }
   }
   if (text === 'The user approved.') return { v: 1, surface, decision: 'approved', message: '', noop: true }
+  if (surface === 'review' && text === LEGACY_REVIEW_APPROVED_TEXT) {
+    return { v: 1, surface, decision: 'approved', message: '', noop: true }
+  }
+  if (surface === 'review' && text.startsWith(LEGACY_REVIEW_APPROVED_WITH_NOTES_HEADING)) {
+    return { v: 1, surface, decision: 'approved', message: text, noop: false, withNotes: true }
+  }
   return { v: 1, surface, decision: 'annotated', message: text, noop: false }
 }

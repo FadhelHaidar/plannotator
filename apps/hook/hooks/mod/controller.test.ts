@@ -168,6 +168,40 @@ describe('plan review', () => {
     expect(await mod.onPlanCall({ tool_use_id: 't1', plan: PLAN })).toEqual({ pass: true })
     expect(host.logs.join('\n')).toContain('unknown subcommand')
   })
+
+  // Version skew: the plugin installs from main and the binary updates on its
+  // own, so a mod can meet a CLI with no claude-mod-plan. What those CLIs
+  // print, observed by running them: 0.27.25 (0.27.11+) and 0.27.10 (older
+  // CLIs read an unknown subcommand as the classic hook).
+  for (const [cli, stderr] of [
+    ['0.27.11 to 0.27.25', "Unknown command: claude-mod-plan\n\nRun 'plannotator --help' for the list of commands.\n"],
+    ['before 0.27.11', 'No plan content in hook event\n'],
+  ] as const) {
+    test(`a CLI without claude-mod-plan (${cli}): every plan takes the classic review, said once, nothing left behind`, async () => {
+      const host = fakeHost()
+      host.onRun = (call) => {
+        if (isLaunch(call)) {
+          host.files.set(`${launchDirOf(call)}/stderr`, stderr)
+          host.files.set(`${launchDirOf(call)}/exit`, '1')
+        }
+      }
+      const mod = new PlannotatorMod(host, SESSION)
+
+      expect(await mod.onPlanCall({ tool_use_id: 't1', plan: PLAN })).toEqual({ pass: true })
+      expect(await mod.onPlanCall({ tool_use_id: 't2', plan: `${PLAN}2. More.\n` })).toEqual({ pass: true })
+
+      // One probe, then no more launches; one explanation, not an error per plan.
+      expect(launches(host)).toHaveLength(1)
+      expect(host.logs).toHaveLength(1)
+      expect(host.logs[0]).toContain('classic review')
+      expect(host.logs[0]).not.toContain('could not open')
+      // The plan copy on stdin is removed; nothing is waiting or watched.
+      const dir = launchDirOf(launches(host)[0]!)
+      expect(host.runs.some((call) => call.argv[3] === 'plannotator-cleanup' && call.argv[4] === dir)).toBe(true)
+      expect(host.store.get(STORE_LAUNCHES)).toEqual([])
+      expect(mod.onPlanPermission('t2', { plan: PLAN })).toBeNull()
+    })
+  }
 })
 
 describe('commands', () => {
