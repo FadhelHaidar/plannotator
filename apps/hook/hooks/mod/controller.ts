@@ -25,6 +25,7 @@ import {
   RECENT_MESSAGES_SUBJECT,
   recentAssistantTexts,
   subjectFor,
+  wordsOf,
 } from './launch'
 import {
   approvedPermissionDecision,
@@ -44,7 +45,13 @@ import {
   type OpenPlanReview,
   type PendingApproval,
 } from './plan'
-import { parsePlannotatorToolInput, plannotatorToolArgs, plannotatorToolOpenedText } from './tool'
+import {
+  parsePlannotatorToolInput,
+  plannotatorToolArgs,
+  plannotatorToolOpenedText,
+  scriptOnlyAnnotateFlag,
+  scriptOnlyAnnotateFlagText,
+} from './tool'
 import { TurnTracker } from './turns'
 
 /** Persisted in `$.store` so open reviews reattach after a restart or `--resume`. */
@@ -368,6 +375,12 @@ export class PlannotatorMod {
     | { state: 'starting'; subject: string }
     | { state: 'ready'; subject: string; url: string; extra?: string }
   > {
+    if (kind === 'annotate') {
+      // Strict gates and --hook answer on the CLI's exit code, stdout or result
+      // file, which nothing reads under a detached launch: refuse up front.
+      const flag = scriptOnlyAnnotateFlag(wordsOf(args))
+      if (flag) return { state: 'error', text: scriptOnlyAnnotateFlagText(flag) }
+    }
     let stdin = ''
     let extra: string | undefined
     const side: { messages?: string } = {}

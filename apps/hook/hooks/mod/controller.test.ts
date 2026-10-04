@@ -278,6 +278,35 @@ describe('commands', () => {
     expect(host.store.get(STORE_LAUNCHES)).toEqual([])
   })
 
+  test('annotate refuses strict-gate and hook flags instead of launching a session whose decision nothing reads', async () => {
+    for (const [words, flag] of [
+      ['notes.md --gate --json --require-approval', '--require-approval'],
+      ['notes.md --gate --json --result-file out.json', '--result-file'],
+      ['notes.md --hook', '--hook'],
+    ] as const) {
+      const host = fakeHost()
+      serveOnLaunch(host)
+      const mod = new PlannotatorMod(host, SESSION)
+
+      const text = await mod.runCommand('annotate', words)
+
+      expect(text).toContain(flag)
+      expect(text).toContain('in a terminal')
+      expect(launches(host)).toEqual([])
+      expect(host.store.get(STORE_LAUNCHES)).toBeUndefined()
+    }
+  })
+
+  test('a word that merely mentions a strict flag inside a quoted path still opens', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+
+    await mod.runCommand('annotate', '"notes --hook.md" --gate')
+
+    expect(launches(host)[0]?.argv.slice(5)).toEqual(['plannotator', 'annotate', 'notes --hook.md', '--gate'])
+  })
+
   test('last sends the last assistant message on stdin', async () => {
     const host = fakeHost()
     serveOnLaunch(host)

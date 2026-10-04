@@ -277,6 +277,32 @@ export function simpleShellCommandWords(command: string): string[] | null {
   return words
 }
 
+/**
+ * Annotate flags for a script that reads the CLI's own channels: the exit
+ * code and stdout record of a strict gate (`--require-approval`,
+ * `--result-file`) or the hook-shaped stdout (`--hook`). A host that starts
+ * the CLI detached and delivers the decision later as a message has no caller
+ * reading any of them, so the reviewer's decision would be lost. Such a host
+ * refuses annotate words carrying one (`scriptOnlyAnnotateFlag`), and the
+ * shell take-over below leaves a command carrying one to run as written.
+ */
+export const SCRIPT_ONLY_ANNOTATE_FLAGS: readonly string[] = ['--require-approval', '--result-file', '--hook']
+
+/** The first script-only annotate flag among the words, or null. */
+export function scriptOnlyAnnotateFlag(words: readonly string[]): string | null {
+  return words.find((word) => SCRIPT_ONLY_ANNOTATE_FLAGS.includes(word)) ?? null
+}
+
+/** What a detached host answers when the user's annotate words carry a script-only flag. */
+export function scriptOnlyAnnotateFlagText(flag: string): string {
+  return (
+    `Plannotator did not open: ${flag} is for scripts that read the CLI's exit code or result file, ` +
+    'and here your decision comes back as a message instead, so nothing would read it. ' +
+    `Run \`plannotator annotate <file> --gate --json ${flag === '--result-file' ? '--result-file <path>' : flag}\` in a terminal, ` +
+    `or drop ${SCRIPT_ONLY_ANNOTATE_FLAGS.join(' / ')} to annotate here.`
+  )
+}
+
 const COMMAND_ACTIONS: Record<string, PlannotatorToolAction> = {
   annotate: 'annotate',
   review: 'review',
@@ -322,6 +348,7 @@ export function plannotatorCommandToToolInput(command: string): PlannotatorToolI
   const call: Record<string, unknown> = { action }
   const options: Record<string, unknown> = {}
   const rest = words.slice(2)
+  if (scriptOnlyAnnotateFlag(rest)) return null
   for (let index = 0; index < rest.length; index += 1) {
     const word = rest[index] as string
     if (!word.startsWith('-')) {
