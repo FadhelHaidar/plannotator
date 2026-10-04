@@ -401,7 +401,11 @@ timestamp. The CLI (`apps/hook/server/host-messages.ts`) honors the variable
 only with `--stdin`, only for a `messages.json` under the data dir's
 `claude-code-mod/`, takes it at startup and scrubs it from the env, and
 validates fail-closed (v 1, 1..25 entries, string fields, unique ids, 2 MiB per
-message, 8 MiB file); a malformed file is a startup error (exit 1). Why a
+message, 8 MiB file); a malformed file is a startup error (exit 1). The mod
+(`pickerFile`) budgets the SERIALIZED file, 256 KiB under that cap, because
+JSON escaping inflates text (ESC becomes `\u001b`): older messages that do not
+fit are left out, and when the newest alone does not fit no file is written
+(stdin only). Why a
 variable and not a flag: a CLI that predates it ignores the variable and opens
 the stdin text exactly as before, while an unknown flag to `annotate-last` is
 silently ignored (it would fall through to the transcript lookup) and a changed

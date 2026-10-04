@@ -20,7 +20,7 @@ import {
   launchDirOf,
   openedText,
   parseReadyFile,
-  pickerMessages,
+  pickerFile,
   privateDirArgv,
   RECENT_MESSAGES_SUBJECT,
   recentAssistantTexts,
@@ -336,11 +336,11 @@ export class PlannotatorMod {
       if (!text) return { state: 'error', text: 'There is no assistant message to annotate yet.' }
       // stdin always carries the newest text: all an older CLI reads.
       stdin = text
-      const picker = await pickerMessages(texts, (value) => this.host.sha256(value))
-      if (picker.length > 1) {
-        side.messages = JSON.stringify({ v: 1, messages: picker })
+      const picker = await pickerFile(texts, (value) => this.host.sha256(value))
+      if (picker.messages.length > 1) {
+        side.messages = picker.json
         subject = RECENT_MESSAGES_SUBJECT
-        extra = `${picker.length} messages, newest first`
+        extra = `${picker.messages.length} messages, newest first`
       } else {
         const words = text.trim().split(/\s+/).length
         extra = `${words} ${words === 1 ? 'word' : 'words'}`

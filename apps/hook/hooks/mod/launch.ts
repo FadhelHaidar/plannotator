@@ -251,10 +251,17 @@ export const RECENT_MESSAGES_SUBJECT = "Claude's recent messages"
 
 /** The classic `annotate-last` picker's limit (RECENT_MESSAGES_LIMIT in the CLI). */
 export const RECENT_MESSAGES_LIMIT = 25
-/** The CLI's limits on the messages file (`apps/hook/server/host-messages.ts`). */
+/** The CLI's limits on the messages file (`apps/hook/server/host-messages.ts`): raw text per message. */
 export const MAX_PICKER_MESSAGE_BYTES = 2 * 1024 * 1024
-/** Under the CLI's 8 MiB file cap, leaving room for the JSON around the texts. */
-const PICKER_BUDGET_BYTES = 7 * 1024 * 1024
+/** The CLI's cap on the whole SERIALIZED file. */
+export const MAX_PICKER_FILE_BYTES = 8 * 1024 * 1024
+/**
+ * What the mod lets the serialized file reach: under the CLI's cap with a
+ * margin. Measured on the JSON as written, since escaping inflates text
+ * (quotes and newlines double, a control character such as ESC becomes
+ * `\u001b`, six bytes).
+ */
+export const PICKER_FILE_BUDGET_BYTES = MAX_PICKER_FILE_BYTES - 256 * 1024
 
 /**
  * The assistant messages that have text, newest first, at most `limit`.
@@ -290,31 +297,47 @@ export interface PickerMessage {
   text: string
 }
 
+export interface PickerFile {
+  messages: PickerMessage[]
+  /** Exactly what is written to `messages.json`, within PICKER_FILE_BUDGET_BYTES. */
+  json: string
+}
+
 /**
  * The picker list the CLI reads from `messages.json`: `texts` newest first,
  * each with an id derived from its content (stable across launches, so a
- * message keeps its id as newer ones arrive). Older messages over the CLI's
- * size limits are left out; an empty list when the newest itself is too large
- * (the launch then hands over stdin alone).
+ * message keeps its id as newer ones arrive), and the file text itself. The
+ * budget is the serialized size: older messages that would push the file past
+ * it (or are over the CLI's per-message limit) are left out. When the newest
+ * alone does not fit, the list is empty and the launch hands over stdin alone.
  */
-export async function pickerMessages(texts: readonly string[], sha256: (text: string) => Promise<string>): Promise<PickerMessage[]> {
+export async function pickerFile(
+  texts: readonly string[],
+  sha256: (text: string) => Promise<string>,
+  budgetBytes: number = PICKER_FILE_BUDGET_BYTES,
+): Promise<PickerFile> {
   const encoder = new TextEncoder()
+  const size = (text: string) => encoder.encode(text).length
+  const empty = { messages: [], json: JSON.stringify({ v: 1, messages: [] }) }
   const picked: PickerMessage[] = []
   const used = new Map<string, number>()
-  let total = 0
+  // `{"v":1,"messages":[]}`, then each entry's JSON plus a comma between entries.
+  let total = size(empty.json)
   for (const [index, text] of texts.entries()) {
-    const bytes = encoder.encode(text).length
-    if (bytes > MAX_PICKER_MESSAGE_BYTES || total + bytes > PICKER_BUDGET_BYTES) {
-      if (index === 0) return []
+    const fits = size(text) <= MAX_PICKER_MESSAGE_BYTES
+    const base = fits ? `cc-${(await sha256(text)).slice(0, 16)}` : ''
+    const seen = used.get(base) ?? 0
+    const message = { messageId: seen === 0 ? base : `${base}-${seen + 1}`, text }
+    const cost = size(JSON.stringify(message)) + (picked.length > 0 ? 1 : 0)
+    if (!fits || total + cost > budgetBytes) {
+      if (index === 0) return empty
       continue
     }
-    total += bytes
-    const base = `cc-${(await sha256(text)).slice(0, 16)}`
-    const seen = used.get(base) ?? 0
+    total += cost
     used.set(base, seen + 1)
-    picked.push({ messageId: seen === 0 ? base : `${base}-${seen + 1}`, text })
+    picked.push(message)
   }
-  return picked
+  return { messages: picked, json: JSON.stringify({ v: 1, messages: picked }) }
 }
 
 /** The command's own output once the server is up. */

@@ -13,8 +13,11 @@ import {
   isAllowedHostMessagesPath,
   MAX_HOST_MESSAGE_BYTES,
   MAX_HOST_MESSAGES,
+  MAX_HOST_MESSAGES_FILE_BYTES,
   parseHostMessages,
 } from "./host-messages";
+// The mod's own writer: this file pins the contract between the two halves.
+import { MAX_PICKER_FILE_BYTES, MAX_PICKER_MESSAGE_BYTES, pickerFile, RECENT_MESSAGES_LIMIT } from "../hooks/mod/launch";
 
 const entry = resolve(import.meta.dir, "index.ts");
 const distDir = resolve(import.meta.dir, "../dist");
@@ -114,6 +117,44 @@ describe("annotate-last --stdin with the host messages file", () => {
     const stderr = await new Response(proc.stderr).text();
     expect(stderr).toContain("invalid host messages: message 0 has no text");
   }, 30_000);
+});
+
+describe("the mod's messages.json against the CLI's limits", () => {
+  const sha256 = async (text: string) => new Bun.CryptoHasher("sha256").update(text).digest("hex");
+  // Quote, backslash and ESC: 3 raw bytes that serialize to 10 (\" \\ \u001b).
+  const escapeHeavy = (tag: number, units: number) => `${tag}:${'"\\\x1b'.repeat(units)}`;
+
+  test("escape-heavy messages: the written file stays under the CLI cap and the CLI accepts it", async () => {
+    // ~1 MiB raw each, ~3.3 MiB serialized: a raw-text budget would take
+    // seven of these and write ~23 MiB, which the CLI refuses.
+    const texts = Array.from({ length: MAX_HOST_MESSAGES }, (_, index) => escapeHeavy(index, 330_000));
+    const file = await pickerFile(texts, sha256);
+
+    expect(Buffer.byteLength(file.json, "utf8")).toBeLessThanOrEqual(MAX_HOST_MESSAGES_FILE_BYTES);
+    expect(file.messages.length).toBeGreaterThan(1);
+    expect(file.messages[0]?.text).toBe(texts[0]);
+    const parsed = parseHostMessages(file.json);
+    expect(parsed.ok && parsed.messages.map((message) => message.text)).toEqual(file.messages.map((message) => message.text));
+
+    const { proc, base } = start(texts[0]!, file.json);
+    const url = await base();
+    const shown = (await (await fetch(`${url}/api/plan`)).json()) as PlanPayload;
+    expect(shown.plan).toBe(texts[0]!);
+    expect(shown.recentMessages?.length).toBe(file.messages.length);
+    await close(proc, url);
+  }, 60_000);
+
+  test("the mod's copies of the CLI's limits agree (a hooks module cannot import them)", () => {
+    expect(MAX_PICKER_FILE_BYTES).toBe(MAX_HOST_MESSAGES_FILE_BYTES);
+    expect(MAX_PICKER_MESSAGE_BYTES).toBe(MAX_HOST_MESSAGE_BYTES);
+    expect(RECENT_MESSAGES_LIMIT).toBe(MAX_HOST_MESSAGES);
+  });
+
+  test("a newest message too large to serialize within the cap means no file (stdin only)", async () => {
+    // 1.5 MiB of ESC is under the per-message raw limit but ~9 MiB as JSON.
+    const file = await pickerFile(["\x1b".repeat(1_500_000), "older"], sha256);
+    expect(file.messages).toEqual([]);
+  });
 });
 
 describe("parseHostMessages", () => {
