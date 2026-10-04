@@ -13,6 +13,7 @@
  *   pid          the CLI's pid, for the liveness check
  *   exit         the CLI's exit code, written after it exits
  *   revision.json / revision.json.ack   plan revisions pushed into an open review
+ *   messages.json  PLANNOTATOR_HOST_MESSAGES_FILE: `last`'s recent assistant messages, for the picker
  *
  * No listener in the mod: it looks at these files on a timer.
  */
@@ -43,6 +44,7 @@ export const LAUNCH_FILES = {
   pid: 'pid',
   exit: 'exit',
   revision: 'revision.json',
+  messages: 'messages.json',
   overflow: 'feedback.md',
 } as const
 
@@ -241,13 +243,78 @@ export function subjectFor(kind: SessionKind, args: string | readonly string[], 
   }
 }
 
-/** The text of the last assistant message that has any. */
-export function lastAssistantText(messages: readonly { role: string; text: string }[]): string | null {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    if (message && message.role === 'assistant' && message.text.trim()) return message.text
+/**
+ * `last`'s subject when the reviewer can pick among several messages: the
+ * feedback may be about an older one (its excerpt rides in the feedback).
+ */
+export const RECENT_MESSAGES_SUBJECT = "Claude's recent messages"
+
+/** The classic `annotate-last` picker's limit (RECENT_MESSAGES_LIMIT in the CLI). */
+export const RECENT_MESSAGES_LIMIT = 25
+/** The CLI's limits on the messages file (`apps/hook/server/host-messages.ts`). */
+export const MAX_PICKER_MESSAGE_BYTES = 2 * 1024 * 1024
+/** Under the CLI's 8 MiB file cap, leaving room for the JSON around the texts. */
+const PICKER_BUDGET_BYTES = 7 * 1024 * 1024
+
+/**
+ * The assistant messages that have text, newest first, at most `limit`.
+ * Consecutive assistant rows (no user row between them) are one response, so
+ * their texts are joined, as the transcript path groups chunks by message id.
+ */
+export function recentAssistantTexts(
+  messages: readonly { role: string; text: string }[],
+  limit: number = RECENT_MESSAGES_LIMIT,
+): string[] {
+  const texts: string[] = []
+  let run: string[] = []
+  const flush = () => {
+    const text = run.join('\n')
+    run = []
+    if (text.trim()) texts.push(text)
   }
-  return null
+  for (let index = messages.length - 1; index >= 0 && texts.length < limit; index -= 1) {
+    const message = messages[index]
+    if (!message) continue
+    if (message.role === 'assistant') {
+      if (message.text.trim()) run.unshift(message.text)
+    } else {
+      flush()
+    }
+  }
+  if (texts.length < limit) flush()
+  return texts
+}
+
+export interface PickerMessage {
+  messageId: string
+  text: string
+}
+
+/**
+ * The picker list the CLI reads from `messages.json`: `texts` newest first,
+ * each with an id derived from its content (stable across launches, so a
+ * message keeps its id as newer ones arrive). Older messages over the CLI's
+ * size limits are left out; an empty list when the newest itself is too large
+ * (the launch then hands over stdin alone).
+ */
+export async function pickerMessages(texts: readonly string[], sha256: (text: string) => Promise<string>): Promise<PickerMessage[]> {
+  const encoder = new TextEncoder()
+  const picked: PickerMessage[] = []
+  const used = new Map<string, number>()
+  let total = 0
+  for (const [index, text] of texts.entries()) {
+    const bytes = encoder.encode(text).length
+    if (bytes > MAX_PICKER_MESSAGE_BYTES || total + bytes > PICKER_BUDGET_BYTES) {
+      if (index === 0) return []
+      continue
+    }
+    total += bytes
+    const base = `cc-${(await sha256(text)).slice(0, 16)}`
+    const seen = used.get(base) ?? 0
+    used.set(base, seen + 1)
+    picked.push({ messageId: seen === 0 ? base : `${base}-${seen + 1}`, text })
+  }
+  return picked
 }
 
 /** The command's own output once the server is up. */

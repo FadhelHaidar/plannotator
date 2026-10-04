@@ -16,12 +16,14 @@ import {
   cliArgvFor,
   failedText,
   fileIn,
-  lastAssistantText,
   launchArgv,
   launchDirOf,
   openedText,
   parseReadyFile,
+  pickerMessages,
   privateDirArgv,
+  RECENT_MESSAGES_SUBJECT,
+  recentAssistantTexts,
   subjectFor,
 } from './launch'
 import {
@@ -197,6 +199,7 @@ export class PlannotatorMod {
     subject: string,
     stdin: string | ((dir: string) => string),
     extra: Partial<LaunchRecord> = {},
+    side: { messages?: string } = {},
   ): Promise<LiveLaunch | { error: string }> {
     const id = await this.newLaunchId()
     const dir = launchDirOf(this.session.dataDir, this.session.sessionId, id)
@@ -206,10 +209,14 @@ export class PlannotatorMod {
       const made = await this.host.run(privateDirArgv(dir), { timeoutMs: 5_000 })
       if (made.exitCode !== 0) return { error: made.stderr.trim() || `could not create ${dir}` }
       await this.host.writeFile(fileIn(dir, 'stdin'), typeof stdin === 'function' ? stdin(dir) : stdin)
+      // `last`'s picker list. A CLI that predates the variable ignores it and
+      // opens the newest message from stdin, as before.
+      if (side.messages !== undefined) await this.host.writeFile(fileIn(dir, 'messages'), side.messages)
       const result = await this.host.run(launchArgv(dir, cliArgv), {
         env: {
           PLANNOTATOR_READY_FILE: fileIn(dir, 'ready'),
           PLANNOTATOR_HOST_RESULT_FILE: fileIn(dir, 'result'),
+          ...(side.messages !== undefined ? { PLANNOTATOR_HOST_MESSAGES_FILE: fileIn(dir, 'messages') } : {}),
           PLANNOTATOR_SESSION_BRIDGE_TOKEN: bridgeToken,
           PLANNOTATOR_SESSION_BRIDGE_HOST: BRIDGE_HOST,
           PLANNOTATOR_SESSION_BRIDGE_MODES: BRIDGE_MODES,
@@ -322,14 +329,24 @@ export class PlannotatorMod {
   > {
     let stdin = ''
     let extra: string | undefined
+    const side: { messages?: string } = {}
     if (kind === 'last') {
-      const text = lastAssistantText(await this.host.messages())
+      const texts = recentAssistantTexts(await this.host.messages())
+      const text = texts[0]
       if (!text) return { state: 'error', text: 'There is no assistant message to annotate yet.' }
+      // stdin always carries the newest text: all an older CLI reads.
       stdin = text
-      const words = text.trim().split(/\s+/).length
-      extra = `${words} ${words === 1 ? 'word' : 'words'}`
+      const picker = await pickerMessages(texts, (value) => this.host.sha256(value))
+      if (picker.length > 1) {
+        side.messages = JSON.stringify({ v: 1, messages: picker })
+        subject = RECENT_MESSAGES_SUBJECT
+        extra = `${picker.length} messages, newest first`
+      } else {
+        const words = text.trim().split(/\s+/).length
+        extra = `${words} ${words === 1 ? 'word' : 'words'}`
+      }
     }
-    const started = await this.launch(kind, cliArgvFor(kind, args), subject, stdin, record)
+    const started = await this.launch(kind, cliArgvFor(kind, args), subject, stdin, record, side)
     if ('error' in started) return { state: 'error', text: `Plannotator could not start: ${started.error}` }
 
     const outcome = await this.awaitReady(started, kind === 'review' ? READY_WAIT_MS.review : READY_WAIT_MS.other)

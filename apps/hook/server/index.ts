@@ -123,6 +123,7 @@ import {
   reviewHostResult,
   takeHostResultPath,
 } from "./host-result";
+import { readHostMessages, takeHostMessagesPath } from "./host-messages";
 import { parseModPlanInput, readModPlanRevision, writeModPlanRevisionAck } from "./claude-mod-plan";
 import { LIVE_APP_REMOTE_MESSAGE } from "@plannotator/shared/live-probe";
 // Bridge sources for live app sessions: the CLI supplies them so
@@ -236,6 +237,8 @@ takeEnvPullSessionBridgeConfig();
 // Detached-host result side channel (the Claude Code mod): same treatment, so
 // nothing the server spawns inherits the path.
 takeHostResultPath();
+// The Claude Code mod's recent-messages file for `annotate-last --stdin`.
+takeHostMessagesPath();
 
 const rawArgs = process.argv.slice(2);
 let parsedStrictAnnotateOptions;
@@ -1601,7 +1604,19 @@ if (args[0] === "sessions") {
   }
   const copilotDetected = isCopilot || copilotSessionDir !== null;
 
-  if (stdinFlag) {
+  const hostMessagesPath = stdinFlag ? takeHostMessagesPath() : undefined;
+  if (hostMessagesPath) {
+    // A detached host (the Claude Code mod) wrote its recent assistant
+    // messages, newest first, so the picker shows as on the transcript path.
+    // stdin still carries the newest text for a CLI that predates the file.
+    const loaded = readHostMessages(hostMessagesPath);
+    if (!loaded.ok) {
+      console.error(`Plannotator: ${loaded.error}.`);
+      process.exit(1);
+    }
+    recentMessages = loaded.messages.map((m) => ({ ...m, lineNumbers: [] }));
+    lastMessage = recentMessages[0] ?? null;
+  } else if (stdinFlag) {
     const text = (await Bun.stdin.text()).trim();
     if (text) {
       lastMessage = { messageId: "stdin", text, lineNumbers: [] };

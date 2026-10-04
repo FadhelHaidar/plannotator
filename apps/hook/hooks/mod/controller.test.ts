@@ -214,6 +214,74 @@ describe('commands', () => {
     const [launch] = launches(host)
     expect(launch?.argv.slice(5)).toEqual(['plannotator', 'annotate-last', '--stdin'])
     expect(host.files.get(`${launchDirOf(launch!)}/stdin`)).toBe('The answer is 42.')
+    // One message: nothing to pick, so the launch is exactly the old one.
+    expect(host.files.has(`${launchDirOf(launch!)}/messages.json`)).toBe(false)
+    expect(launch?.env?.PLANNOTATOR_HOST_MESSAGES_FILE).toBeUndefined()
+  })
+
+  // The regression: under the mod only the newest text reached the CLI, so
+  // the picker never showed and an earlier message could not be annotated.
+  test('last hands the CLI the recent assistant messages, newest first, for the picker', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    host.transcript = [
+      { role: 'user', text: 'first question' },
+      { role: 'assistant', text: 'First answer.' },
+      { role: 'user', text: 'second question' },
+      { role: 'assistant', text: '' }, // a tool-use row: no text
+      { role: 'user', text: '' }, // its tool result
+      { role: 'assistant', text: 'Second answer, part one.' },
+      { role: 'assistant', text: 'Part two.' }, // same response, next block
+      { role: 'user', text: 'third question' },
+      { role: 'assistant', text: '' },
+    ]
+    const mod = new PlannotatorMod(host, SESSION)
+
+    const opened = await mod.runCommand('last', '')
+
+    const [launch] = launches(host)
+    const dir = launchDirOf(launch!)
+    expect(launch?.argv.slice(5)).toEqual(['plannotator', 'annotate-last', '--stdin'])
+    // stdin still carries the newest text: all an older CLI reads.
+    expect(host.files.get(`${dir}/stdin`)).toBe('Second answer, part one.\nPart two.')
+    expect(launch?.env?.PLANNOTATOR_HOST_MESSAGES_FILE).toBe(`${dir}/messages.json`)
+    const payload = JSON.parse(host.files.get(`${dir}/messages.json`) ?? '{}') as { v: number; messages: { messageId: string; text: string }[] }
+    expect(payload.v).toBe(1)
+    expect(payload.messages.map((message) => message.text)).toEqual(['Second answer, part one.\nPart two.', 'First answer.'])
+    expect(new Set(payload.messages.map((message) => message.messageId)).size).toBe(2)
+    expect(opened).toContain("Claude's recent messages")
+
+    // The decision names what the reviewer could pick from, not "the last message".
+    decide(host, launch!, { surface: 'annotate-last', decision: 'annotated', message: '# Message Annotations\n\nfix it', noop: false, annotationCount: 1 })
+    await host.tick()
+    expect(host.submits[0]).toStartWith("Plannotator: Claude's recent messages — Feedback · 1 comment.")
+  })
+
+  test('a message keeps its picker id as newer messages arrive, and the list stops at 25', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+    const turns = (count: number) => Array.from({ length: count }, (_, index) => [
+      { role: 'user' as const, text: `q${index}` },
+      { role: 'assistant' as const, text: `answer ${index}` },
+    ]).flat()
+    const idOf = (call: RunCall, text: string) => {
+      const payload = JSON.parse(host.files.get(`${launchDirOf(call)}/messages.json`) ?? '{}') as { messages: { messageId: string; text: string }[] }
+      return { ids: payload.messages, id: payload.messages.find((message) => message.text === text)?.messageId }
+    }
+
+    host.transcript = turns(10)
+    await mod.runCommand('last', '')
+    host.transcript = turns(30)
+    await mod.runCommand('last', '')
+
+    const [first, second] = launches(host)
+    expect(idOf(second!, 'answer 7').id).toBeDefined()
+    expect(idOf(second!, 'answer 7').id).toBe(idOf(first!, 'answer 7').id)
+    const list = idOf(second!, 'answer 29').ids
+    expect(list).toHaveLength(25)
+    expect(list[0]?.text).toBe('answer 29')
+    expect(list[24]?.text).toBe('answer 5')
   })
 
   test('feedback is submitted; Done with nothing to send only logs', async () => {

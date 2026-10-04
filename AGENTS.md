@@ -150,6 +150,7 @@ claude --plugin-dir ./apps/hook
 | `PLANNOTATOR_PASTE_URL` | Base URL of the paste service API for short URL sharing. Default: `https://plannotator-paste.plannotator.workers.dev`. |
 | `PLANNOTATOR_CLAUDE_MOD` | Opt-in switch for the Claude Code mod (non-blocking plan review, annotate, code review and annotate-last, plus Ask this session; see "Claude Code mod"). Set to `1` / `true` / `on` to enable, `0` / `false` / `off` / `disabled` to force off; empty or unrecognized counts as unset. **Default: off**: a Claude Code that runs hooks modules (2.1.287+) loads the plugin's module for everyone, so until the owner makes it the default the module stays inert (every hook passes through, no command or tool is registered, no environment is set) and the classic PermissionRequest hook and `/plannotator-*` skills run exactly as before. Can also be set via `~/.plannotator/config.json` (`{ "claudeCodeMod": true }`, read from the data dir); the env var takes precedence (`resolveClaudeCodeMod` in `packages/shared/config.ts`, mirrored by `apps/hook/hooks/mod/enabled.ts` because a hooks module can import only its own files; `enabled.test.ts` keeps them in step). Read once when Claude Code starts, so a change applies to the next session start. Set it in the shell that starts Claude Code or in Claude Code's `settings.json` `env`. |
 | `PLANNOTATOR_HOST_RESULT_FILE` | Set by a host that starts the CLI detached (the Claude Code mod): when a review, annotate, annotate-last or `claude-mod-plan` session settles, the CLI writes one JSON decision record there atomically (mode 0600), with the agent message composed from the configured prompts. Only a path named `result.json` inside `<data dir>/claude-code-mod/` is accepted (`isAllowedHostResultPath`); anything else is ignored with a stderr warning, so the variable cannot make the CLI create or replace an arbitrary file. Taken at startup and removed from the environment. Stdout is unchanged. See "Claude Code mod". |
+| `PLANNOTATOR_HOST_MESSAGES_FILE` | Set by the Claude Code mod for `annotate-last --stdin` (ignored without `--stdin`): a `messages.json` inside `<data dir>/claude-code-mod/` (`isAllowedHostMessagesPath`; anything else is ignored with a stderr warning) holding `{ v: 1, messages: [{ messageId, text, timestamp? }] }`, newest first, which the CLI shows as the message picker instead of the single stdin message. Validated fail-closed (1..25 entries, string fields, unique ids, 2 MiB per message, 8 MiB file); a malformed file exits 1 with the reason. Taken at startup and removed from the environment. A CLI that predates it ignores it and opens the stdin text. See "Claude Code mod". |
 | `PLANNOTATOR_SESSION_TAG` | Set by the Claude Code mod in its session's environment (`claude-code:<session id>`), so processes the session starts can be matched to it; recorded as `hostSession` in the `sessions/` registry. Not meant to be set by hand. |
 | `PLANNOTATOR_MOD_DEBUG` | Set to `1` before starting Claude Code to have the Claude Code mod write `claude-code-mod/debug.log` in the data dir (launches, results, turns, bridge commands). Default: off. |
 | `PLANNOTATOR_ORIGIN` | Explicit agent-origin override at the top of the detection chain. Valid values: `claude-code`, `amp`, `droid`, `opencode`, `codex`, `copilot-cli`, `gemini-cli`, `kiro-cli`, `mistral-vibe`, `pi`, `oh-my-pi`. Invalid values silently fall through to env-based detection. Unset by default. |
@@ -329,7 +330,8 @@ background with stdin/stdout/stderr on files and returns in milliseconds. The
 launch directory is `${PLANNOTATOR_DATA_DIR or ~/.plannotator}/claude-code-mod/<session id>/<launch id>/`:
 `stdin`, `ready` (`PLANNOTATOR_READY_FILE`), `result.json`
 (`PLANNOTATOR_HOST_RESULT_FILE`), `stdout`, `stderr`, `pid`, `exit` (written
-after the CLI exits), `revision.json` + `.ack` (plan revisions) and
+after the CLI exits), `revision.json` + `.ack` (plan revisions),
+`messages.json` (`PLANNOTATOR_HOST_MESSAGES_FILE`, `last`'s picker list) and
 `feedback.md` (oversized feedback). Waiting inside a hook (for the ready file, a
 revision ack) happens in a `$.process.run` shell loop (`waitForAny`), never a
 `$.clock` wait, which would spend the hook's budget and let the engine run the
@@ -378,12 +380,40 @@ answers the skill's command itself, so the skill's blocking bang line never
 runs; a name nobody holds is registered (`immediate: true`). Arguments are split
 like the skill's shell line (`splitShellWords`: quotes and backslashes, no
 expansion) and passed to the same CLI parsers (`review`, `annotate`; `last`
-runs `annotate-last --stdin` with the last assistant text from
-`$.session.messages()`). The command returns "Opened <subject> in Plannotator ·
-<url>" once the ready file appears (up to 45 s for review, 15 s otherwise), or
-the CLI's own startup error. Under the mod the CLI's tolerant annotate handoff
-(several unresolvable words) is shown to the user as that error, not handed to
-Claude.
+runs `annotate-last --stdin`, see the next paragraph). The command returns
+"Opened <subject> in Plannotator · <url>" once the ready file appears (up to
+45 s for review, 15 s otherwise), or the CLI's own startup error. Under the mod
+the CLI's tolerant annotate handoff (several unresolvable words) is shown to
+the user as that error, not handed to Claude.
+
+**`last` and its message picker.** The classic path reads up to 25 recent
+assistant messages from the transcript file and shows a picker (newest open by
+default). The mod has no transcript file to hand over, so it builds the same
+list from `$.session.messages()` (`recentAssistantTexts` in `launch.ts`: newest
+first, at most 25, text-less rows skipped, consecutive assistant rows joined as
+one response, the way the transcript path groups chunks by message id) and,
+when there is more than one, writes `messages.json` `{ v: 1, messages:
+[{ messageId, text }] }` and sets `PLANNOTATOR_HOST_MESSAGES_FILE` to it. stdin
+still carries the newest text. `$.session.messages()` rows carry no id or
+timestamp, so ids are derived from the text (`cc-` + 16 hex of its SHA-256, a
+`-n` suffix for repeats), stable as newer messages arrive; there is no
+timestamp. The CLI (`apps/hook/server/host-messages.ts`) honors the variable
+only with `--stdin`, only for a `messages.json` under the data dir's
+`claude-code-mod/`, takes it at startup and scrubs it from the env, and
+validates fail-closed (v 1, 1..25 entries, string fields, unique ids, 2 MiB per
+message, 8 MiB file); a malformed file is a startup error (exit 1). Why a
+variable and not a flag: a CLI that predates it ignores the variable and opens
+the stdin text exactly as before, while an unknown flag to `annotate-last` is
+silently ignored (it would fall through to the transcript lookup) and a changed
+`--stdin` payload would be shown as the message. Old mod + new CLI: no
+variable, `--stdin` unchanged. With a picker the subject is "Claude's recent
+messages" (status line, open text, the plugin turn's first line), since the
+feedback may be about an older message; the feedback itself carries an excerpt
+of each message it covers. What `$.session.messages()` returns is the engine's
+live conversation: after `/rewind` that is the rewound conversation (inferred
+from the API docs, not checked live), and after `/compact` only the
+post-compaction messages, so the picker can be shorter there than on the
+classic path, which falls back to the pre-compaction file.
 
 **The `plannotator` tool (agent-initiated opens).** When the user tells Claude
 "open this in plannotator", Claude used to run the CLI through Bash, which
@@ -499,7 +529,10 @@ the bridge), `closing`, or once the review settles.
 in-memory `Host`, delivery, shell words, and `bridge.test.ts` against the REAL
 server half `createPullSessionBridge`), `apps/hook/server/host-result.test.ts`,
 `apps/hook/server/claude-mod-plan.test.ts` (the subcommand as a process:
-revision → tab → approval carries the revised text; answers-only). Engine
+revision → tab → approval carries the revised text; answers-only),
+`apps/hook/server/host-messages.test.ts` (`annotate-last --stdin` as a process:
+the messages file yields the picker, a malformed one exits 1, plain `--stdin`
+unchanged). Engine
 harness: `apps/hook/tests/register.test.ts` via `scripts/test-claude-code-mod.sh`
 (stages the plugin without the CLI, whose bun tests `claude plugin test` would
 otherwise try to load; bun skips `apps/hook/tests/` through `pathIgnorePatterns`).
