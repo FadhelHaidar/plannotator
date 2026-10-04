@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,12 +11,22 @@ afterEach(() => {
 });
 
 describe("createAIRuntime (Bun) with a session bridge", () => {
-  // Runs in a child with a PATH holding no agent CLIs, so no SDK provider can
-  // spawn anything while the bridge is exercised.
-  test("registers the bridge after the SDK providers and detaches it before teardown", async () => {
+  // Runs in a child whose PATH holds only a fake `codex` that never runs (it
+  // records a marker if it does), so without a bridge Claude and Codex would
+  // both be registered.
+  function fakeCodex(dir: string): string {
+    const marker = join(dir, "codex-ran");
+    const codex = join(dir, "codex");
+    writeFileSync(codex, `#!/bin/sh\necho ran > '${marker}'\nexit 1\n`);
+    chmodSync(codex, 0o755);
+    return marker;
+  }
+
+  test("registers ONLY the bridge, refuses other providers, and detaches it before teardown", async () => {
     if (process.platform === "win32") return;
     const dir = mkdtempSync(join(tmpdir(), "plannotator-bridge-runtime-"));
     tempDirs.push(dir);
+    const marker = fakeCodex(dir);
     const runner = join(dir, "runner.ts");
     const runtimeUrl = pathToFileURL(join(import.meta.dir, "ai-runtime.ts")).href;
     writeFileSync(runner, `
@@ -30,8 +40,16 @@ describe("createAIRuntime (Bun) with a session bridge", () => {
       };
       const runtime = await createAIRuntime({ cwd: ${JSON.stringify(dir)}, sessionBridge: bridge, getServerPort: () => 4321 });
       const caps = await (await runtime.endpoints["/api/ai/capabilities"](
-        new Request("http://localhost/api/ai/capabilities"),
+        new Request("http://localhost/api/ai/capabilities?activate=codex-sdk"),
       )).json();
+      const otherProviderStatus = {};
+      for (const providerId of ["codex-sdk", "claude-agent-sdk"]) {
+        otherProviderStatus[providerId] = (await runtime.endpoints["/api/ai/session"](new Request("http://localhost/api/ai/session", {
+          method: "POST",
+          headers: { host: "localhost:4321" },
+          body: JSON.stringify({ providerId, context: { mode: "code-review", review: { patch: "" } } }),
+        }))).status;
+      }
       const createWithHost = (host) => runtime.endpoints["/api/ai/session"](new Request("http://localhost/api/ai/session", {
         method: "POST",
         headers: { host },
@@ -64,9 +82,12 @@ describe("createAIRuntime (Bun) with a session bridge", () => {
       runtime.dispose();
       await new Promise((r) => setTimeout(r, 10));
       const bridgeEntry = caps.providers.find((p) => p.id === "session-bridge");
+      const { existsSync } = await import("node:fs");
       console.log(JSON.stringify({
-        last: caps.providers.at(-1).id,
-        defaultIsBridge: caps.defaultProvider === "session-bridge" && caps.providers.length > 1,
+        providerIds: caps.providers.map((p) => p.id),
+        defaultProvider: caps.defaultProvider,
+        otherProviderStatus,
+        codexRan: existsSync(${JSON.stringify(marker)}),
         label: bridgeEntry.label,
         status: bridgeEntry.sessionBridge.status,
         hostSignalAborted: asks[0].signal.aborted,
@@ -88,8 +109,12 @@ describe("createAIRuntime (Bun) with a session bridge", () => {
     ]);
     expect(exitCode, stderr).toBe(0);
     expect(JSON.parse(stdout.trim().split("\n").at(-1)!)).toEqual({
-      last: "session-bridge",
-      defaultIsBridge: false,
+      // With a host session attached, Ask AI talks to it and nothing else:
+      // no SDK provider is listed, activated, or reachable by id.
+      providerIds: ["session-bridge"],
+      defaultProvider: "session-bridge",
+      otherProviderStatus: { "codex-sdk": 503, "claude-agent-sdk": 503 },
+      codexRan: false,
       label: "Ask this session · OpenCode",
       status: "ready",
       // Teardown (a decision or exit) must not stop a turn the session runs for us.
@@ -107,6 +132,38 @@ describe("createAIRuntime (Bun) with a session bridge", () => {
       },
       reboundStatus: 403,
       asksFromRebound: 1,
+    });
+  }, 15_000);
+
+  test("without a bridge the SDK providers are registered as before", async () => {
+    if (process.platform === "win32") return;
+    const dir = mkdtempSync(join(tmpdir(), "plannotator-nobridge-runtime-"));
+    tempDirs.push(dir);
+    fakeCodex(dir);
+    const runner = join(dir, "runner.ts");
+    const runtimeUrl = pathToFileURL(join(import.meta.dir, "ai-runtime.ts")).href;
+    writeFileSync(runner, `
+      import { createAIRuntime } from ${JSON.stringify(runtimeUrl)};
+      const runtime = await createAIRuntime({ cwd: ${JSON.stringify(dir)}, pullSessionBridge: null, getServerPort: () => 4321 });
+      const caps = await (await runtime.endpoints["/api/ai/capabilities"](new Request("http://localhost/api/ai/capabilities"))).json();
+      runtime.dispose();
+      console.log(JSON.stringify({ providerIds: caps.providers.map((p) => p.id), defaultProvider: caps.defaultProvider }));
+    `);
+    const proc = Bun.spawn([process.execPath, runner], {
+      cwd: import.meta.dir,
+      env: { ...process.env, PATH: `${dir}:/usr/bin:/bin` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    expect(exitCode, stderr).toBe(0);
+    expect(JSON.parse(stdout.trim().split("\n").at(-1)!)).toEqual({
+      providerIds: ["claude-agent-sdk", "codex-sdk"],
+      defaultProvider: "claude-agent-sdk",
     });
   }, 15_000);
 
@@ -137,6 +194,7 @@ describe("createAIRuntime (Bun) with a session bridge", () => {
       runtime.dispose();
       const bridge = caps.providers.find((p) => p.id === "session-bridge");
       console.log(JSON.stringify({
+        providerIds: caps.providers.map((p) => p.id),
         bridge: bridge ? { label: bridge.label, status: bridge.sessionBridge.status } : null,
         statusAfterPoll: after.providers.find((p) => p.id === "session-bridge")?.sessionBridge.status ?? null,
         statuses,
@@ -169,6 +227,7 @@ describe("createAIRuntime (Bun) with a session bridge", () => {
   test("takes a pull bridge from the host's environment, scrubs the token, and guards the endpoints", async () => {
     if (process.platform === "win32") return;
     expect(await runPullRunner({})).toEqual({
+      providerIds: ["session-bridge"],
       bridge: { label: "Ask this session · OpenCode", status: "ready" },
       statusAfterPoll: "busy",
       statuses: { ok: 200, rebinding: 403, badToken: 401 },
@@ -180,6 +239,8 @@ describe("createAIRuntime (Bun) with a session bridge", () => {
     if (process.platform === "win32") return;
     const result = await runPullRunner({ PLANNOTATOR_REMOTE: "1" });
     expect(result.bridge).toBeNull();
+    // No bridge, so Ask AI keeps its usual providers.
+    expect(result.providerIds).toContain("claude-agent-sdk");
     expect(result.statuses.ok).toBe(404);
     expect(result.tokenLeftInEnv).toBeNull();
   }, 15_000);

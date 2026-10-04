@@ -2,6 +2,7 @@ import type React from 'react';
 import { getProviderMeta } from './ProviderIcons';
 import { ModelSourceHint, modelSourceToolForProvider } from './ModelSourceHint';
 import {
+  findSessionBridge,
   getAIProviderSettings,
   resolveAIProviderSelection,
   saveAIProviderSelection,
@@ -60,6 +61,37 @@ export const AISettingsTab: React.FC<AISettingsTabProps> = ({
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
           <span>No AI providers detected. Install the <strong>claude</strong> or <strong>codex</strong> CLI and make sure you're authenticated. <a href="https://plannotator.ai/docs/guides/ai-features/" target="_blank" rel="noopener noreferrer" className="underline hover:text-amber-700 dark:hover:text-amber-300">Setup guide</a></span>
+        </div>
+      </>
+    );
+  }
+
+  // "Ask this session": the session that opened Plannotator answers Ask AI and
+  // nothing else is offered. Nothing here writes a preference, so a saved
+  // provider still applies to sessions that have no attached session.
+  const sessionBridge = findSessionBridge(providers);
+  if (sessionBridge) {
+    const meta = getProviderMeta(sessionBridge.name, sessionBridge.label);
+    const Icon = meta.icon;
+    return (
+      <>
+        <div>
+          <div className="text-sm font-medium">AI Provider</div>
+          <div className="text-xs text-muted-foreground">
+            Ask AI is answered by the agent session that opened Plannotator.
+          </div>
+        </div>
+        <div
+          className="flex items-center gap-3 p-3 rounded-lg border border-primary bg-primary/5"
+          data-ai-settings-session-bridge
+        >
+          <div className="w-6 h-6 rounded-md bg-muted flex items-center justify-center text-muted-foreground">
+            <Icon className="w-4 h-4" />
+          </div>
+          <div className="text-sm font-medium">{meta.label}</div>
+        </div>
+        <div className="text-[10px] text-muted-foreground/70">
+          Your provider choice applies when Plannotator is opened without an attached session.
         </div>
       </>
     );

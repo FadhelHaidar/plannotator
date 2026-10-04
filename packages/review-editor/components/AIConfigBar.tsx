@@ -1,7 +1,7 @@
 import type React from 'react';
 import { useState, useEffect, useRef } from 'react';
 import { getProviderMeta } from '@plannotator/ui/components/ProviderIcons';
-import { type AIProviderOption } from '@plannotator/ui/utils/aiProvider';
+import { findSessionBridge, type AIProviderOption } from '@plannotator/ui/utils/aiProvider';
 import { ModelSourceHint, modelSourceToolForProvider } from '@plannotator/ui/components/ModelSourceHint';
 
 interface AIConfigBarProps {
@@ -16,7 +16,7 @@ interface AIConfigBarProps {
 }
 
 export const AIConfigBar: React.FC<AIConfigBarProps> = ({
-  providers,
+  providers: offeredProviders,
   selectedProviderId,
   selectedModel,
   selectedReasoningEffort,
@@ -25,6 +25,10 @@ export const AIConfigBar: React.FC<AIConfigBarProps> = ({
   onReasoningEffortChange,
   hasSession,
 }) => {
+  // "Ask this session": the session that opened Plannotator is the only thing
+  // Ask AI talks to, so the bar shows just its label (one provider, no models).
+  const sessionBridge = findSessionBridge(offeredProviders);
+  const providers = sessionBridge ? [sessionBridge] : offeredProviders;
   const [showSessionNote, setShowSessionNote] = useState(false);
   const [openMenu, setOpenMenu] = useState<'provider' | 'model' | 'effort' | null>(null);
   const [modelSearch, setModelSearch] = useState('');
@@ -60,7 +64,7 @@ export const AIConfigBar: React.FC<AIConfigBarProps> = ({
     );
   }
 
-  const currentProvider = providers.find(p => p.id === selectedProviderId) ?? providers[0];
+  const currentProvider = sessionBridge ?? providers.find(p => p.id === selectedProviderId) ?? providers[0];
   if (!currentProvider) return null;
   const effectiveProviderId = currentProvider.id;
 

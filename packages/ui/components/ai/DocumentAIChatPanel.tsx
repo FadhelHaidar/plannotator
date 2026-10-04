@@ -20,10 +20,8 @@ interface DocumentAIChatPanelProps {
   aiProviders?: AIProviderOption[];
   aiConfig?: { providerId: string | null; model: string | null; reasoningEffort?: string | null };
   onAIConfigChange?: (config: { providerId?: string | null; model?: string | null; reasoningEffort?: string | null }) => void;
-  /** "Ask this session": the reviewer's choice on a busy/gone/blocked answer. */
+  /** "Ask this session": the reviewer's choice on a busy answer. */
   onSessionAskAction?: (questionId: string, action: SessionAskAction) => void;
-  /** Label of the provider "Ask a separate AI instead" would use; null hides it. */
-  sessionAskFallbackLabel?: string | null;
 }
 
 function truncate(text: string, max = 180): string {
@@ -70,7 +68,6 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
   aiConfig,
   onAIConfigChange,
   onSessionAskAction,
-  sessionAskFallbackLabel,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [generalInput, setGeneralInput] = useState('');
@@ -120,7 +117,6 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
               key={entry.question.id}
               entry={entry}
               onSessionAskAction={onSessionAskAction}
-              sessionAskFallbackLabel={sessionAskFallbackLabel}
             />
           ))}
         </div>
@@ -167,8 +163,7 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
 const DocumentQAPair = memo<{
   entry: AIChatEntry;
   onSessionAskAction?: (questionId: string, action: SessionAskAction) => void;
-  sessionAskFallbackLabel?: string | null;
-}>(({ entry, onSessionAskAction, sessionAskFallbackLabel }) => {
+}>(({ entry, onSessionAskAction }) => {
   const { question, response } = entry;
   const renderedResponse = useMemo(
     () => response.text ? renderChatMarkdown(response.text) : null,
@@ -210,7 +205,6 @@ const DocumentQAPair = memo<{
             <p className={`text-xs ${sessionAskErrorTone(response)}`}>{response.error}</p>
             <SessionAskActions
               response={response}
-              fallbackLabel={sessionAskFallbackLabel}
               onAction={onSessionAskAction ? (action) => onSessionAskAction(question.id, action) : undefined}
             />
           </>

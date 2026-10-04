@@ -17,7 +17,11 @@ export interface PiAIRuntime {
 export interface CreatePiAIRuntimeOptions {
 	cwd?: string;
 	getCwd?: () => string;
-	/** "Ask this session": the in-process bridge to the Pi session that opened this server. */
+	/**
+	 * "Ask this session": the in-process bridge to the Pi session that opened
+	 * this server. With a bridge the runtime registers it ALONE: no SDK
+	 * provider is offered or reachable.
+	 */
 	sessionBridge?: SessionBridge;
 	/**
 	 * The port this server listens on, once bound. Required for the bridge to
@@ -60,88 +64,98 @@ export async function createPiAIRuntime(options: CreatePiAIRuntimeOptions = {}):
 		const discovery = ai.createDeferredModelDiscovery();
 		const deferModelDiscovery = discovery.defer;
 
-		try {
-			await import("../generated/ai/providers/claude-agent-sdk.ts");
-			const claudePath = whichCmd("claude");
-			const provider = await ai.createProvider({
-				type: "claude-agent-sdk",
-				cwd,
-				...(claudePath && { claudeExecutablePath: claudePath }),
-			});
-			const providerId = registry.register(provider);
-			// A Claude session spawns its own `claude`, so it never waits on discovery
-			// (~2s, up to 10s): the first Ask AI answer starts at once.
-			deferModelDiscovery(providerId, provider, { blockSession: false });
-		} catch {
-			// Claude SDK not available.
-		}
-
-		try {
-			await import("../generated/ai/providers/codex-app-server.ts");
-			const codexPath = whichCmd("codex");
-			if (codexPath) {
+		const registerSdkProviders = async (): Promise<void> => {
+			try {
+				await import("../generated/ai/providers/claude-agent-sdk.ts");
+				const claudePath = whichCmd("claude");
 				const provider = await ai.createProvider({
-					type: "codex-sdk",
+					type: "claude-agent-sdk",
 					cwd,
-					...(codexPath ? { codexExecutablePath: codexPath } : {}),
+					...(claudePath && { claudeExecutablePath: claudePath }),
 				});
 				const providerId = registry.register(provider);
-				deferModelDiscovery(providerId, provider);
+				// A Claude session spawns its own `claude`, so it never waits on discovery
+				// (~2s, up to 10s): the first Ask AI answer starts at once.
+				deferModelDiscovery(providerId, provider, { blockSession: false });
+			} catch {
+				// Claude SDK not available.
 			}
-		} catch {
-			// Codex not available.
-		}
 
-		try {
-			await import("../generated/ai/providers/pi-sdk-node.ts");
-			const piPath = whichCmd("pi");
-			if (piPath) {
-				const provider = await ai.createProvider({
-					type: "pi-sdk",
-					cwd,
-					piExecutablePath: piPath,
-				} as any);
-				if (provider && "fetchModels" in provider) {
-					modelDiscovery.push(
-						(provider as { fetchModels: () => Promise<void> })
-							.fetchModels()
-							.catch(() => {}),
-					);
+			try {
+				await import("../generated/ai/providers/codex-app-server.ts");
+				const codexPath = whichCmd("codex");
+				if (codexPath) {
+					const provider = await ai.createProvider({
+						type: "codex-sdk",
+						cwd,
+						...(codexPath ? { codexExecutablePath: codexPath } : {}),
+					});
+					const providerId = registry.register(provider);
+					deferModelDiscovery(providerId, provider);
 				}
-				registry.register(provider);
+			} catch {
+				// Codex not available.
 			}
-		} catch {
-			// Pi not available.
-		}
 
-		try {
-			await import("../generated/ai/providers/opencode-sdk.ts");
-			const opencodePath = whichCmd("opencode");
-			if (opencodePath) {
-				const provider = await ai.createProvider({
-					type: "opencode-sdk",
-					cwd,
-				});
-				const providerId = registry.register(provider);
-				// Deferred like Codex: fetchModels spawns `opencode serve`, so it
-				// must NOT run eagerly at startup — that spawned a server on every
-				// session for every user with opencode installed, and interrupted
-				// sessions orphaned it. The initializer runs on first explicit
-				// activation (?activate= from the model picker) or first opencode
-				// session.
-				deferModelDiscovery(providerId, provider);
+			try {
+				await import("../generated/ai/providers/pi-sdk-node.ts");
+				const piPath = whichCmd("pi");
+				if (piPath) {
+					const provider = await ai.createProvider({
+						type: "pi-sdk",
+						cwd,
+						piExecutablePath: piPath,
+					} as any);
+					if (provider && "fetchModels" in provider) {
+						modelDiscovery.push(
+							(provider as { fetchModels: () => Promise<void> })
+								.fetchModels()
+								.catch(() => {}),
+						);
+					}
+					registry.register(provider);
+				}
+			} catch {
+				// Pi not available.
 			}
-		} catch {
-			// OpenCode not available.
-		}
 
-		// Registered last so the server default is unchanged; the client prefers it.
+			try {
+				await import("../generated/ai/providers/opencode-sdk.ts");
+				const opencodePath = whichCmd("opencode");
+				if (opencodePath) {
+					const provider = await ai.createProvider({
+						type: "opencode-sdk",
+						cwd,
+					});
+					const providerId = registry.register(provider);
+					// Deferred like Codex: fetchModels spawns `opencode serve`, so it
+					// must NOT run eagerly at startup — that spawned a server on every
+					// session for every user with opencode installed, and interrupted
+					// sessions orphaned it. The initializer runs on first explicit
+					// activation (?activate= from the model picker) or first opencode
+					// session.
+					deferModelDiscovery(providerId, provider);
+				}
+			} catch {
+				// OpenCode not available.
+			}
+		};
+
 		const pullBridge = !options.sessionBridge && options.pullSessionBridge
 			? ai.createPullSessionBridge(options.pullSessionBridge)
 			: null;
 		const sessionBridge = options.sessionBridge ?? pullBridge?.bridge;
 		const bridgeProvider = sessionBridge ? new ai.SessionBridgeProvider(sessionBridge) : null;
-		if (bridgeProvider) registry.register(bridgeProvider, ai.SESSION_BRIDGE_PROVIDER_NAME);
+
+		if (bridgeProvider) {
+			// A host session is attached: Ask AI goes to that session and nowhere
+			// else. No SDK provider is registered, so /api/ai/capabilities lists
+			// only the bridge (and it is the default) and /api/ai/session refuses
+			// any other provider id, whatever the client saved.
+			registry.register(bridgeProvider, ai.SESSION_BRIDGE_PROVIDER_NAME);
+		} else {
+			await registerSdkProviders();
+		}
 
 		return {
 			endpoints: ai.createAIEndpoints({

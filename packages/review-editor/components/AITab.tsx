@@ -30,9 +30,8 @@ interface AITabProps {
   aiConfig?: { providerId: string | null; model: string | null; reasoningEffort?: string | null };
   onAIConfigChange?: (config: { providerId?: string | null; model?: string | null; reasoningEffort?: string | null }) => void;
   hasAISession?: boolean;
-  /** "Ask this session": the reviewer's choice on a busy/gone/blocked answer. */
+  /** "Ask this session": the reviewer's choice on a busy answer. */
   onSessionAskAction?: (questionId: string, action: SessionAskAction) => void;
-  sessionAskFallbackLabel?: string | null;
 }
 
 interface FileGroup {
@@ -62,7 +61,6 @@ export const AITab: React.FC<AITabProps> = ({
   onAIConfigChange,
   hasAISession = false,
   onSessionAskAction,
-  sessionAskFallbackLabel,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   // File chat groups default to expanded; this tracks the ones the user has
@@ -225,7 +223,7 @@ export const AITab: React.FC<AITabProps> = ({
               {isExpanded && (
                 <div className="ml-3 border-l border-border/30 pl-2 space-y-2 mt-1">
                   {fileMessages.map(({ question, response }) => (
-                    <QAPair key={question.id} question={question} response={response} onScrollToLines={onScrollToLines} onSessionAskAction={onSessionAskAction} sessionAskFallbackLabel={sessionAskFallbackLabel} />
+                    <QAPair key={question.id} question={question} response={response} onScrollToLines={onScrollToLines} onSessionAskAction={onSessionAskAction} />
                   ))}
                 </div>
               )}
@@ -245,7 +243,7 @@ export const AITab: React.FC<AITabProps> = ({
             )}
             <div className="space-y-2">
               {generalMessages.map(({ question, response }) => (
-                <QAPair key={question.id} question={question} response={response} onScrollToLines={onScrollToLines} onSessionAskAction={onSessionAskAction} sessionAskFallbackLabel={sessionAskFallbackLabel} />
+                <QAPair key={question.id} question={question} response={response} onScrollToLines={onScrollToLines} onSessionAskAction={onSessionAskAction} />
               ))}
             </div>
           </div>
@@ -364,8 +362,7 @@ const QAPair = memo<{
   response: AIChatEntry['response'];
   onScrollToLines: AITabProps['onScrollToLines'];
   onSessionAskAction?: AITabProps['onSessionAskAction'];
-  sessionAskFallbackLabel?: string | null;
-}>(({ question, response, onScrollToLines, onSessionAskAction, sessionAskFallbackLabel }) => {
+}>(({ question, response, onScrollToLines, onSessionAskAction }) => {
   const scope = getQuestionScope(question);
   const renderedResponse = useMemo(
     () => response.text ? renderChatMarkdown(response.text) : null,
@@ -404,7 +401,6 @@ const QAPair = memo<{
             <p className={`text-xs ${sessionAskErrorTone(response)}`}>{response.error}</p>
             <SessionAskActions
               response={response}
-              fallbackLabel={sessionAskFallbackLabel}
               onAction={onSessionAskAction ? (action) => onSessionAskAction(question.id, action) : undefined}
             />
           </>

@@ -56,25 +56,21 @@ describe.if(hasDom)('Ask this session notices in the document chat panel', () =>
     expect(onSessionAskAction.mock.calls).toEqual([['q1', 'wait'], ['q1', 'interrupt']]);
   });
 
-  test('gone: offers the separate-AI fallback only when there is one', () => {
+  // While a session is attached Ask AI has no other provider, so a gone or
+  // blocked session must not offer a switch: only a note, and no buttons.
+  test('gone and blocked: a note that the session cannot be reached, no fallback button', () => {
     const onSessionAskAction = mock((_questionId: string, _action: string) => {});
-    const withFallback = render({
-      messages: [entry({ error: 'gone', errorCode: 'session_gone' })],
-      onSessionAskAction,
-      sessionAskFallbackLabel: 'Pi',
-    });
-    const [fallback] = buttonsIn(withFallback, '[data-session-ask-actions="fallback"]');
-    act(() => fallback.click());
-    expect(onSessionAskAction.mock.calls).toEqual([['q1', 'fallback']]);
-    act(() => root?.unmount());
-    host?.remove();
-
-    const without = render({
-      messages: [entry({ error: 'gone', errorCode: 'session_gone' })],
-      onSessionAskAction,
-      sessionAskFallbackLabel: null,
-    });
-    expect(without.querySelector('[data-session-ask-actions]')).toBeNull();
+    for (const [errorCode, kind] of [['session_gone', 'gone'], ['session_blocked', 'blocked']] as const) {
+      const el = render({ messages: [entry({ error: 'unreachable', errorCode })], onSessionAskAction });
+      expect(el.querySelector(`[data-session-ask-unreachable="${kind}"]`)).not.toBeNull();
+      expect(el.querySelector('[data-session-ask-actions]')).toBeNull();
+      expect(el.querySelectorAll('[data-ai-message] button').length).toBe(0);
+      act(() => root?.unmount());
+      host?.remove();
+      root = null;
+      host = null;
+    }
+    expect(onSessionAskAction).not.toHaveBeenCalled();
   });
 
   test('a host that passes no handler renders no actions, even for a bridge error code', () => {

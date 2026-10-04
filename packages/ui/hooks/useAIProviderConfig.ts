@@ -56,9 +56,9 @@ export function useAIProviderConfig({
     };
   });
 
-  // A provider picked for this page only (the "Ask a separate AI instead"
-  // fallback from "Ask this session"): never written to the cookie, but kept
-  // across capability refreshes so the resolver does not flip back.
+  // A provider picked for this page only (`applyConfigChange(..., { persist:
+  // false })`): never written to the cookie, but kept across capability
+  // refreshes so the resolver does not flip back.
   const sessionPickRef = useRef<string | null>(null);
 
   // Auto-resolve provider/model once capabilities are known.

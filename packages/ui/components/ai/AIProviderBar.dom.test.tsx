@@ -61,3 +61,36 @@ describe.if(hasDom)('AIProviderBar select styling', () => {
     }
   });
 });
+
+describe.if(hasDom)('AIProviderBar with "Ask this session"', () => {
+  // A server with a session bridge offers only the bridge: there is nothing to
+  // choose, so no picker may suggest otherwise (and none can write a cookie).
+  test('renders the bridge label and no provider, model or effort picker', async () => {
+    const { AIProviderBar } = barModule!;
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    const bridge: AIProviderOption = {
+      id: 'session-bridge',
+      name: 'session-bridge',
+      label: 'Ask this session · Claude Code',
+      models: [],
+      sessionBridge: { host: 'claude-code', status: 'ready', modes: { turn: true, transient: false } },
+    };
+    await act(async () =>
+      root!.render(
+        <AIProviderBar
+          providers={[bridge]}
+          selectedProviderId="codex-sdk"
+          selectedModel="gpt-6-sol"
+          onProviderChange={() => {}}
+          onModelChange={() => {}}
+          onReasoningEffortChange={() => {}}
+        />,
+      ),
+    );
+
+    expect(host.querySelectorAll('select').length).toBe(0);
+    expect(host.querySelector('[data-ai-provider-session-bridge]')?.textContent).toContain('Ask this session · Claude Code');
+  });
+});

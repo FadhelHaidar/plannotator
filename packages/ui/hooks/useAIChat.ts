@@ -289,8 +289,8 @@ export function useAIChat({
     return safeAbort(sessionId);
   }, []);
 
-  // The params each question was asked with, so a busy/gone answer can be
-  // re-asked ("Ask when it finishes", "Ask a separate AI instead").
+  // The params each question was asked with, so a busy answer can be
+  // re-asked ("Ask when it finishes", "Interrupt and ask now").
   const paramsByQuestionRef = useRef(new Map<string, AskAIParams>());
 
   const ask = useCallback(async (params: AskAIParams, askOptions?: { providerId?: string }) => {
@@ -498,8 +498,8 @@ export function useAIChat({
 
   /**
    * Re-ask an earlier question in place of its answer: the busy-session choice
-   * ("Ask when it finishes" / "Interrupt and ask now") and the fallback to a
-   * separate AI after "Ask this session" reports the session gone or blocked.
+   * ("Ask when it finishes" / "Interrupt and ask now"). `providerId` re-asks
+   * on another provider for hosts that offer one.
    */
   const retry = useCallback((questionId: string, options: AIRetryOptions = {}) => {
     const original = paramsByQuestionRef.current.get(questionId);

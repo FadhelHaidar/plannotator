@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import {
   resolveAIProviderSelection,
-  resolveSessionBridgeFallback,
   type AIProviderOption,
   type AIProviderSettings,
 } from './utils/aiProvider';
@@ -13,74 +12,64 @@ const settings = (overrides: Partial<AIProviderSettings> = {}): AIProviderSettin
   ...overrides,
 });
 
-const piProviders = (status: 'ready' | 'busy' | 'blocked' | 'gone', transient = false): AIProviderOption[] => [
-  { id: 'claude-local', name: 'claude-agent-sdk', models: [{ id: 'claude-default', label: 'Claude Default', default: true }] },
+const bridge = (status: 'ready' | 'busy' | 'blocked' | 'gone', transient = false): AIProviderOption => ({
+  id: 'session-bridge',
+  name: 'session-bridge',
+  label: 'Ask this session · Claude Code',
+  models: [],
+  sessionBridge: { host: 'claude-code', status, modes: { turn: true, transient } },
+});
+
+const sdkProviders: AIProviderOption[] = [
+  { id: 'claude-agent-sdk', name: 'claude-agent-sdk', models: [{ id: 'opus', label: 'Opus', default: true }] },
+  { id: 'codex-sdk', name: 'codex-sdk', models: [{ id: 'gpt-6-sol', label: 'GPT-6-Sol', default: true }] },
   { id: 'pi-sdk', name: 'pi-sdk', models: [{ id: 'pi-default', label: 'Pi Default', default: true }] },
-  {
-    id: 'session-bridge',
-    name: 'session-bridge',
-    label: 'Ask this session · Pi',
-    models: [],
-    sessionBridge: { host: 'pi', status, modes: { turn: true, transient } },
-  },
 ];
 
-describe('"Ask this session" default and fallback', () => {
-  it('is the default over the origin SDK provider while the session can answer, busy included', () => {
-    for (const status of ['ready', 'busy'] as const) {
-      const selection = resolveAIProviderSelection({ providers: piProviders(status), origin: 'pi', settings: settings() });
+describe('"Ask this session" is the only Ask AI provider when present', () => {
+  // The owner's case: Codex saved as the pick, then a Claude Code session with
+  // the mod attached. The server offers only the bridge, and the saved pick must
+  // not route the question elsewhere, whatever the session's status. (That the
+  // cookie is left alone is pinned in aiProviderConfigPersistence.test.tsx.)
+  it('a bridge-only answer selects the bridge over a saved codex pick, in every status', () => {
+    const saved = settings({ providerId: 'codex-sdk', providerByOrigin: { 'claude-code': 'codex-sdk' } });
+    for (const status of ['ready', 'busy', 'blocked', 'gone'] as const) {
+      const selection = resolveAIProviderSelection({
+        providers: [bridge(status)],
+        origin: 'claude-code',
+        settings: saved,
+        serverDefaultProvider: 'session-bridge',
+      });
       expect(selection).toEqual({ providerId: 'session-bridge', model: null });
     }
   });
 
-  it('a saved per-origin pick still wins', () => {
-    const selection = resolveAIProviderSelection({
-      providers: piProviders('ready'),
-      origin: 'pi',
-      settings: settings({ providerByOrigin: { pi: 'pi-sdk' } }),
-    });
-    expect(selection.providerId).toBe('pi-sdk');
-  });
-
-  it('a saved global pick wins for an origin without its own provider', () => {
-    const selection = resolveAIProviderSelection({
-      providers: piProviders('ready'),
-      origin: 'amp',
-      settings: settings({ providerId: 'claude-local' }),
-    });
-    expect(selection.providerId).toBe('claude-local');
-  });
-
-  it('a gone session, or a blocked one without a transient mode, is not the default', () => {
-    for (const providers of [piProviders('gone'), piProviders('blocked')]) {
-      expect(resolveAIProviderSelection({ providers, origin: 'pi', settings: settings() }).providerId).toBe('pi-sdk');
+  it('even listed beside SDK providers, the bridge wins over saved per-origin and global picks', () => {
+    for (const [origin, saved] of [
+      ['pi', settings({ providerByOrigin: { pi: 'pi-sdk' } })],
+      ['amp', settings({ providerId: 'claude-agent-sdk' })],
+    ] as const) {
+      expect(
+        resolveAIProviderSelection({ providers: [...sdkProviders, bridge('gone')], origin, settings: saved }).providerId,
+      ).toBe('session-bridge');
     }
-    expect(
-      resolveAIProviderSelection({ providers: piProviders('blocked', true), origin: 'pi', settings: settings() }).providerId,
-    ).toBe('session-bridge');
   });
 
   it('without a bridge the existing order is unchanged, even with a stale saved bridge pick', () => {
-    const withoutBridge = piProviders('ready').filter((p) => !p.sessionBridge);
-    expect(resolveAIProviderSelection({ providers: withoutBridge, origin: 'pi', settings: settings() }).providerId).toBe('pi-sdk');
+    expect(resolveAIProviderSelection({ providers: sdkProviders, origin: 'pi', settings: settings() }).providerId).toBe('pi-sdk');
     expect(
       resolveAIProviderSelection({
-        providers: withoutBridge,
+        providers: sdkProviders,
         origin: 'pi',
         settings: settings({ providerByOrigin: { pi: 'session-bridge' } }),
       }).providerId,
     ).toBe('pi-sdk');
-  });
-
-  it('the fallback is what the app would pick without the bridge, even when the bridge was saved', () => {
-    const fallback = resolveSessionBridgeFallback({
-      providers: piProviders('gone'),
-      origin: 'pi',
-      settings: settings({ providerByOrigin: { pi: 'session-bridge' } }),
-      serverDefaultProvider: 'session-bridge',
-    });
-    expect(fallback).toEqual({ providerId: 'pi-sdk', model: 'pi-default' });
-    const bridgeOnly = piProviders('gone').filter((p) => p.sessionBridge);
-    expect(resolveSessionBridgeFallback({ providers: bridgeOnly, origin: 'pi', settings: settings() }).providerId).toBeNull();
+    expect(
+      resolveAIProviderSelection({
+        providers: sdkProviders,
+        origin: 'claude-code',
+        settings: settings({ providerByOrigin: { 'claude-code': 'codex-sdk' } }),
+      }),
+    ).toEqual({ providerId: 'codex-sdk', model: 'gpt-6-sol' });
   });
 });

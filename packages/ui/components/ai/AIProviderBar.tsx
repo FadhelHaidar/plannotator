@@ -1,6 +1,6 @@
 import React from 'react';
 import { getProviderMeta } from '../ProviderIcons';
-import { type AIProviderOption } from '../../utils/aiProvider';
+import { findSessionBridge, type AIProviderOption } from '../../utils/aiProvider';
 import { ModelSourceHint, modelSourceToolForProvider } from '../ModelSourceHint';
 
 interface AIProviderBarProps {
@@ -26,6 +26,23 @@ export const AIProviderBar: React.FC<AIProviderBarProps> = ({
     return (
       <div className="border-t border-border/50 px-2 py-1.5 text-[11px] text-muted-foreground/50">
         No AI providers available
+      </div>
+    );
+  }
+
+  // "Ask this session": the session that opened Plannotator is the only thing
+  // Ask AI talks to, so there is no provider or model to choose. Show its label.
+  const sessionBridge = findSessionBridge(providers);
+  if (sessionBridge) {
+    const bridgeMeta = getProviderMeta(sessionBridge.name, sessionBridge.label);
+    const BridgeIcon = bridgeMeta.icon;
+    return (
+      <div
+        className="border-t border-border/50 px-2 py-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground"
+        data-ai-provider-session-bridge
+      >
+        <BridgeIcon className="w-3.5 h-3.5 flex-shrink-0" />
+        <span className="min-w-0 truncate text-foreground">{bridgeMeta.label}</span>
       </div>
     );
   }

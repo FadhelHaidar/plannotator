@@ -29,8 +29,8 @@ interface CreateAIRuntimeOptions {
   getCwd?: () => string;
   /**
    * "Ask this session": a host that can answer Ask AI from the agent session
-   * that opened Plannotator passes its bridge here. It is registered after the
-   * SDK providers, so the server default is unchanged; the client prefers it.
+   * that opened Plannotator passes its bridge here. With a bridge the runtime
+   * registers it ALONE: no SDK provider is offered or reachable.
    */
   sessionBridge?: SessionBridge;
   /**
@@ -45,7 +45,8 @@ interface CreateAIRuntimeOptions {
    * `/api/ai/bridge/poll` with this token (session-bridge-pull.ts). Defaults to
    * the config the host put in the environment (`PLANNOTATOR_SESSION_BRIDGE_*`),
    * taken once per process and removed from `process.env`. Ignored when an
-   * in-process `sessionBridge` is given, and off in remote mode.
+   * in-process `sessionBridge` is given, and off in remote mode. Like the
+   * in-process bridge, it is then the only Ask AI provider.
    */
   pullSessionBridge?: PullSessionBridgeConfig | null;
 }
@@ -87,76 +88,78 @@ export async function createAIRuntime(options: CreateAIRuntimeOptions = {}): Pro
   const discovery = createDeferredModelDiscovery();
   const deferModelDiscovery = discovery.defer;
 
-  try {
-    await import("@plannotator/ai/providers/claude-agent-sdk");
-    const claudePath = Bun.which("claude");
-    const provider = await createProvider({
-      type: "claude-agent-sdk",
-      cwd,
-      ...(claudePath && { claudeExecutablePath: claudePath }),
-    });
-    const providerId = registry.register(provider);
-    // A Claude session spawns its own `claude`, so it never waits on discovery
-    // (~2s, up to 10s): the first Ask AI answer starts at once.
-    deferModelDiscovery(providerId, provider, { blockSession: false });
-  } catch {
-    // Claude SDK not available.
-  }
-
-  try {
-    await import("@plannotator/ai/providers/codex-app-server");
-    const codexPath = Bun.which("codex");
-    if (codexPath) {
+  const registerSdkProviders = async (): Promise<void> => {
+    try {
+      await import("@plannotator/ai/providers/claude-agent-sdk");
+      const claudePath = Bun.which("claude");
       const provider = await createProvider({
-        type: "codex-sdk",
+        type: "claude-agent-sdk",
         cwd,
-        ...(codexPath ? { codexExecutablePath: codexPath } : {}),
+        ...(claudePath && { claudeExecutablePath: claudePath }),
       });
       const providerId = registry.register(provider);
-      deferModelDiscovery(providerId, provider);
+      // A Claude session spawns its own `claude`, so it never waits on discovery
+      // (~2s, up to 10s): the first Ask AI answer starts at once.
+      deferModelDiscovery(providerId, provider, { blockSession: false });
+    } catch {
+      // Claude SDK not available.
     }
-  } catch {
-    // Codex not available.
-  }
 
-  try {
-    const { PiSDKProvider } = await import("@plannotator/ai/providers/pi-sdk");
-    const rawPiPath = Bun.which("pi");
-    if (rawPiPath) {
-      const piPath = resolveWindowsCommandShim(rawPiPath);
-      const provider = await createProvider({
-        type: "pi-sdk",
-        cwd,
-        piExecutablePath: piPath,
-      } as PiSDKConfig);
-      if (provider instanceof PiSDKProvider) {
-        modelDiscovery.push(provider.fetchModels().catch(() => {}));
+    try {
+      await import("@plannotator/ai/providers/codex-app-server");
+      const codexPath = Bun.which("codex");
+      if (codexPath) {
+        const provider = await createProvider({
+          type: "codex-sdk",
+          cwd,
+          ...(codexPath ? { codexExecutablePath: codexPath } : {}),
+        });
+        const providerId = registry.register(provider);
+        deferModelDiscovery(providerId, provider);
       }
-      registry.register(provider);
+    } catch {
+      // Codex not available.
     }
-  } catch {
-    // Pi not available.
-  }
 
-  try {
-    await import("@plannotator/ai/providers/opencode-sdk");
-    const opencodePath = Bun.which("opencode");
-    if (opencodePath) {
-      const provider = await createProvider({
-        type: "opencode-sdk",
-        cwd,
-      });
-      const providerId = registry.register(provider);
-      // Deferred like Codex: fetchModels spawns `opencode serve`, so it must
-      // NOT run eagerly at startup — that spawned a server on every session
-      // for every user with opencode installed, and interrupted sessions
-      // orphaned it. The initializer runs on first explicit activation
-      // (?activate= from the model picker) or first opencode session.
-      deferModelDiscovery(providerId, provider);
+    try {
+      const { PiSDKProvider } = await import("@plannotator/ai/providers/pi-sdk");
+      const rawPiPath = Bun.which("pi");
+      if (rawPiPath) {
+        const piPath = resolveWindowsCommandShim(rawPiPath);
+        const provider = await createProvider({
+          type: "pi-sdk",
+          cwd,
+          piExecutablePath: piPath,
+        } as PiSDKConfig);
+        if (provider instanceof PiSDKProvider) {
+          modelDiscovery.push(provider.fetchModels().catch(() => {}));
+        }
+        registry.register(provider);
+      }
+    } catch {
+      // Pi not available.
     }
-  } catch {
-    // OpenCode not available.
-  }
+
+    try {
+      await import("@plannotator/ai/providers/opencode-sdk");
+      const opencodePath = Bun.which("opencode");
+      if (opencodePath) {
+        const provider = await createProvider({
+          type: "opencode-sdk",
+          cwd,
+        });
+        const providerId = registry.register(provider);
+        // Deferred like Codex: fetchModels spawns `opencode serve`, so it must
+        // NOT run eagerly at startup — that spawned a server on every session
+        // for every user with opencode installed, and interrupted sessions
+        // orphaned it. The initializer runs on first explicit activation
+        // (?activate= from the model picker) or first opencode session.
+        deferModelDiscovery(providerId, provider);
+      }
+    } catch {
+      // OpenCode not available.
+    }
+  };
 
   // Off in remote mode, in-process or pulled: anyone who can reach the session
   // URL could otherwise type into the agent session (same reasoning as the
@@ -168,7 +171,16 @@ export async function createAIRuntime(options: CreateAIRuntimeOptions = {}): Pro
   const pullBridge = pullConfig ? createPullSessionBridge(pullConfig) : null;
   const sessionBridge = inProcessBridge ?? pullBridge?.bridge;
   const bridgeProvider = sessionBridge ? new SessionBridgeProvider(sessionBridge) : null;
-  if (bridgeProvider) registry.register(bridgeProvider, SESSION_BRIDGE_PROVIDER_NAME);
+
+  if (bridgeProvider) {
+    // A host session is attached: Ask AI goes to that session and nowhere
+    // else. No SDK provider is registered, so /api/ai/capabilities lists only
+    // the bridge (and it is the default) and /api/ai/session refuses any other
+    // provider id, whatever the client saved.
+    registry.register(bridgeProvider, SESSION_BRIDGE_PROVIDER_NAME);
+  } else {
+    await registerSdkProviders();
+  }
 
   const endpoints = createAIEndpoints({
     registry,

@@ -72,8 +72,7 @@ export function useAIChat({
     (params: AskAIParams) => {
       if (sessionBridge) {
         // The session wrote (or can read) the changes; a pasted patch would stay
-        // in its context window for good. A later switch to a separate AI starts
-        // a fresh session, which gets the full context below.
+        // in its context window for good.
         lastSentContextRef.current = undefined;
         const contextPreamble = buildSessionReviewIdentity(identityRef.current);
         return chat.ask({ viewing: viewingRef.current, contextPreamble, ...params });
