@@ -28,6 +28,7 @@ import {
 } from "./integrations";
 import {
   generateSlug,
+  resolvePlanHistorySlug,
   savePlan,
   saveAnnotations,
   saveFinalSnapshot,
@@ -202,7 +203,11 @@ export async function startPlannotatorServer(
   // Set once bound: "Ask this session" answers only a loopback Host with this port.
   let boundPort: number | undefined;
   const aiRuntime = mode !== "archive" && resolveAIEnabled() ? await createAIRuntime({ sessionBridge: options.sessionBridge, getServerPort: () => boundPort }) : null;
+  // Two names for one plan (#1679): `slug` names the dated decision snapshots
+  // in plans/ (today's date, as always); `historySlug` names the version
+  // history chain in history/{project}/, which continues across midnight.
   let slug = mode !== "archive" ? generateSlug(plan) : "";
+  let historySlug = "";
 
   // Lazy cache for in-session archive browsing (plan review sidebar tab)
   let cachedArchivePlans: ReturnType<typeof listArchivedPlans> | null = null;
@@ -234,15 +239,16 @@ export async function startPlannotatorServer(
   if (mode !== "archive") {
     repoInfo = await getRepoInfo();
     project = (await detectProjectName()) ?? "_unknown";
-    const historyResult = saveToHistory(project, slug, plan);
+    historySlug = resolvePlanHistorySlug(project, plan);
+    const historyResult = saveToHistory(project, historySlug, plan);
     currentPlanPath = historyResult.path;
     previousPlan =
       historyResult.version > 1
-        ? getPlanVersion(project, slug, historyResult.version - 1)
+        ? getPlanVersion(project, historySlug, historyResult.version - 1)
         : null;
     versionInfo = {
       version: historyResult.version,
-      totalVersions: getVersionCount(project, slug),
+      totalVersions: getVersionCount(project, historySlug),
       project,
     };
 
@@ -287,11 +293,11 @@ export async function startPlannotatorServer(
       surface: "plan",
       decision,
       target: {
-        slug,
+        slug: historySlug,
         ...(versionInfo.version > 0
           ? {
               planVersion: versionInfo.version,
-              planVersionFile: getPlanVersionPath(project, slug, versionInfo.version) ?? undefined,
+              planVersionFile: getPlanVersionPath(project, historySlug, versionInfo.version) ?? undefined,
             }
           : {}),
       },
@@ -336,7 +342,7 @@ export async function startPlannotatorServer(
             if (isNaN(v) || v < 1) {
               return new Response("Invalid version number", { status: 400 });
             }
-            const content = getPlanVersion(project, slug, v);
+            const content = getPlanVersion(project, historySlug, v);
             if (content === null) {
               return Response.json({ error: "Version not found" }, { status: 404 });
             }
@@ -347,8 +353,8 @@ export async function startPlannotatorServer(
           if (url.pathname === "/api/plan/versions") {
             return Response.json({
               project,
-              slug,
-              versions: listVersions(project, slug),
+              slug: historySlug,
+              versions: listVersions(project, historySlug),
             });
           }
 
@@ -477,7 +483,7 @@ export async function startPlannotatorServer(
                 return Response.json({ error: "Missing baseVersion" }, { status: 400 });
               }
 
-              const basePath = getPlanVersionPath(project, slug, body.baseVersion);
+              const basePath = getPlanVersionPath(project, historySlug, body.baseVersion);
               if (!basePath) {
                 return Response.json({ error: `Version ${body.baseVersion} not found` }, { status: 404 });
               }
@@ -786,11 +792,13 @@ export async function startPlannotatorServer(
       if (mode === "archive" || decisionSettled || decisionClaimed) return null;
       if (next === plan) return { revision: planRevision, version: versionInfo.version, unchanged: true };
       // Same bookkeeping a resubmission gets from a fresh server.
+      // A revision that keeps its heading stays on this session's chain.
       slug = generateSlug(next);
-      const historyResult = saveToHistory(project, slug, next);
+      historySlug = resolvePlanHistorySlug(project, next, { current: historySlug });
+      const historyResult = saveToHistory(project, historySlug, next);
       currentPlanPath = historyResult.path;
-      previousPlan = historyResult.version > 1 ? getPlanVersion(project, slug, historyResult.version - 1) : null;
-      versionInfo = { version: historyResult.version, totalVersions: getVersionCount(project, slug), project };
+      previousPlan = historyResult.version > 1 ? getPlanVersion(project, historySlug, historyResult.version - 1) : null;
+      versionInfo = { version: historyResult.version, totalVersions: getVersionCount(project, historySlug), project };
       plan = next;
       planFile = readPlanFile(planFilePath, plan);
       planRevision += 1;
