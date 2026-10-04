@@ -29,6 +29,21 @@ describe("loadModelCatalog", () => {
     expect(urls).toEqual(["/api/ai/capabilities?activate=codex-sdk"]);
   });
 
+  // A server whose Ask AI is a session bridge lists only the bridge under
+  // `providers` and reports the launcher's SDK catalog under `catalogProviders`.
+  test("reads the discovered list from catalogProviders when Ask AI is bridge-only", async () => {
+    const discovered = [{ id: "opus[1m]", label: "Opus 5.5 (1M)" }, { id: "opus", label: "Opus 5.5 (latest)", default: true }];
+    stubFetch(() =>
+      Response.json({
+        available: true,
+        providers: [{ id: "session-bridge", name: "session-bridge", models: [], sessionBridge: { host: "claude-code", status: "ready", modes: { turn: true, transient: false } } }],
+        defaultProvider: "session-bridge",
+        catalogProviders: [{ id: "claude-agent-sdk", name: "claude-agent-sdk", models: discovered, modelsSource: "discovered" }],
+      }),
+    );
+    expect(await loadModelCatalog("claude")).toEqual(discovered);
+  });
+
   test("falls back to the static list when the request fails or the provider is absent", async () => {
     const urls = stubFetch(() => new Response("nope", { status: 404 }));
     expect(await loadModelCatalog("claude")).toBe(FALLBACK_MODELS.claude);

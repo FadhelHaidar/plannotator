@@ -29,8 +29,9 @@ interface CreateAIRuntimeOptions {
   getCwd?: () => string;
   /**
    * "Ask this session": a host that can answer Ask AI from the agent session
-   * that opened Plannotator passes its bridge here. With a bridge the runtime
-   * registers it ALONE: no SDK provider is offered or reachable.
+   * that opened Plannotator passes its bridge here. With a bridge it is the
+   * ONLY Ask AI provider: SDK providers serve model catalogs to the agent-job
+   * launchers but are never offered or reachable for Ask AI.
    */
   sessionBridge?: SessionBridge;
   /**
@@ -88,7 +89,7 @@ export async function createAIRuntime(options: CreateAIRuntimeOptions = {}): Pro
   const discovery = createDeferredModelDiscovery();
   const deferModelDiscovery = discovery.defer;
 
-  const registerSdkProviders = async (): Promise<void> => {
+  const registerSdkProviders = async (registry: ProviderRegistry): Promise<void> => {
     try {
       await import("@plannotator/ai/providers/claude-agent-sdk");
       const claudePath = Bun.which("claude");
@@ -172,18 +173,19 @@ export async function createAIRuntime(options: CreateAIRuntimeOptions = {}): Pro
   const sessionBridge = inProcessBridge ?? pullBridge?.bridge;
   const bridgeProvider = sessionBridge ? new SessionBridgeProvider(sessionBridge) : null;
 
-  if (bridgeProvider) {
-    // A host session is attached: Ask AI goes to that session and nowhere
-    // else. No SDK provider is registered, so /api/ai/capabilities lists only
-    // the bridge (and it is the default) and /api/ai/session refuses any other
-    // provider id, whatever the client saved.
-    registry.register(bridgeProvider, SESSION_BRIDGE_PROVIDER_NAME);
-  } else {
-    await registerSdkProviders();
-  }
+  // A host session is attached: Ask AI goes to that session and nowhere else.
+  // The bridge is the only Ask AI provider, so /api/ai/capabilities lists only
+  // it (as the default) and /api/ai/session refuses any other provider id,
+  // whatever the client saved. The SDK providers still register, in a
+  // catalog-only registry, so the agent-job launchers keep their discovered
+  // model lists (`?activate=<id>` reports them under `catalogProviders`).
+  const catalogRegistry = bridgeProvider ? new ProviderRegistry() : null;
+  if (bridgeProvider) registry.register(bridgeProvider, SESSION_BRIDGE_PROVIDER_NAME);
+  await registerSdkProviders(catalogRegistry ?? registry);
 
   const endpoints = createAIEndpoints({
     registry,
+    ...(catalogRegistry ? { catalogRegistry } : {}),
     sessionManager,
     getCwd: options.getCwd,
     beforeCapabilities: async () => {
@@ -203,6 +205,7 @@ export async function createAIRuntime(options: CreateAIRuntimeOptions = {}): Pro
       bridgeProvider?.detach();
       sessionManager.disposeAll();
       registry.disposeAll();
+      catalogRegistry?.disposeAll();
       pullBridge?.dispose();
     },
   };

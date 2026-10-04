@@ -94,6 +94,15 @@ export interface AbortRequest {
 export interface AIEndpointDeps {
   /** Provider registry (one per server or shared). */
   registry: ProviderRegistry;
+  /**
+   * Providers registered ONLY so their model catalogs can be served to the
+   * agent-job launchers (Review Agents, Code Tour, Guided Review), used when a
+   * session bridge makes the bridge the sole Ask AI provider. They never take
+   * an Ask AI session and are never listed under `providers`: a
+   * `?activate=<id>` probe naming one runs its discovery and reports it under
+   * `catalogProviders`, which only the launchers' catalog loader reads.
+   */
+  catalogRegistry?: ProviderRegistry;
   /** Session manager instance (one per server). */
   sessionManager: SessionManager;
   /** Resolve the current working directory for new AI sessions. */
@@ -236,6 +245,7 @@ function clampPositiveNumber(value: unknown, max: number): number | undefined {
 export function createAIEndpoints(deps: AIEndpointDeps) {
   const {
     registry,
+    catalogRegistry,
     sessionManager,
     getCwd,
     beforeCapabilities,
@@ -263,27 +273,27 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
       // on load, and activating there would reintroduce the eager launch this
       // deferral exists to prevent.
       const activateId = new URL(req.url).searchParams.get("activate");
-      if (activateId && registry.get(activateId)) {
+      const catalogOnly = activateId && !registry.get(activateId) ? catalogRegistry?.get(activateId) : undefined;
+      if (activateId && (registry.get(activateId) || catalogOnly)) {
         await beforeProviderSession?.(activateId, "activate");
       }
       const defaultEntry = registry.getDefault();
-      const providerDetails = registry.list().map(id => {
-        const p = registry.get(id)!;
-        return {
-          id,
-          name: p.name,
-          capabilities: p.capabilities,
-          models: p.models ?? [],
-          ...(p.modelsSource ? { modelsSource: p.modelsSource } : {}),
-          ...(p.toolVersion ? { toolVersion: p.toolVersion } : {}),
-          ...(p.label ? { label: p.label } : {}),
-          ...(p.sessionBridge ? { sessionBridge: p.sessionBridge } : {}),
-        };
+      const describe = (id: string, p: AIProvider) => ({
+        id,
+        name: p.name,
+        capabilities: p.capabilities,
+        models: p.models ?? [],
+        ...(p.modelsSource ? { modelsSource: p.modelsSource } : {}),
+        ...(p.toolVersion ? { toolVersion: p.toolVersion } : {}),
+        ...(p.label ? { label: p.label } : {}),
+        ...(p.sessionBridge ? { sessionBridge: p.sessionBridge } : {}),
       });
+      const providerDetails = registry.list().map(id => describe(id, registry.get(id)!));
       return Response.json({
         available: !!defaultEntry,
         providers: providerDetails,
         defaultProvider: defaultEntry?.id ?? null,
+        ...(activateId && catalogOnly ? { catalogProviders: [describe(activateId, catalogOnly)] } : {}),
       });
     },
 

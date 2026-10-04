@@ -19,8 +19,9 @@ export interface CreatePiAIRuntimeOptions {
 	getCwd?: () => string;
 	/**
 	 * "Ask this session": the in-process bridge to the Pi session that opened
-	 * this server. With a bridge the runtime registers it ALONE: no SDK
-	 * provider is offered or reachable.
+	 * this server. With a bridge it is the ONLY Ask AI provider: SDK providers
+	 * serve model catalogs to the agent-job launchers but are never offered or
+	 * reachable for Ask AI.
 	 */
 	sessionBridge?: SessionBridge;
 	/**
@@ -64,7 +65,7 @@ export async function createPiAIRuntime(options: CreatePiAIRuntimeOptions = {}):
 		const discovery = ai.createDeferredModelDiscovery();
 		const deferModelDiscovery = discovery.defer;
 
-		const registerSdkProviders = async (): Promise<void> => {
+		const registerSdkProviders = async (registry: InstanceType<typeof ai.ProviderRegistry>): Promise<void> => {
 			try {
 				await import("../generated/ai/providers/claude-agent-sdk.ts");
 				const claudePath = whichCmd("claude");
@@ -147,19 +148,21 @@ export async function createPiAIRuntime(options: CreatePiAIRuntimeOptions = {}):
 		const sessionBridge = options.sessionBridge ?? pullBridge?.bridge;
 		const bridgeProvider = sessionBridge ? new ai.SessionBridgeProvider(sessionBridge) : null;
 
-		if (bridgeProvider) {
-			// A host session is attached: Ask AI goes to that session and nowhere
-			// else. No SDK provider is registered, so /api/ai/capabilities lists
-			// only the bridge (and it is the default) and /api/ai/session refuses
-			// any other provider id, whatever the client saved.
-			registry.register(bridgeProvider, ai.SESSION_BRIDGE_PROVIDER_NAME);
-		} else {
-			await registerSdkProviders();
-		}
+		// A host session is attached: Ask AI goes to that session and nowhere
+		// else. The bridge is the only Ask AI provider, so /api/ai/capabilities
+		// lists only it (as the default) and /api/ai/session refuses any other
+		// provider id, whatever the client saved. The SDK providers still
+		// register, in a catalog-only registry, so the agent-job launchers keep
+		// their discovered model lists (`?activate=<id>` reports them under
+		// `catalogProviders`).
+		const catalogRegistry = bridgeProvider ? new ai.ProviderRegistry() : null;
+		if (bridgeProvider) registry.register(bridgeProvider, ai.SESSION_BRIDGE_PROVIDER_NAME);
+		await registerSdkProviders(catalogRegistry ?? registry);
 
 		return {
 			endpoints: ai.createAIEndpoints({
 				registry,
+				...(catalogRegistry ? { catalogRegistry } : {}),
 				sessionManager,
 				getCwd: options.getCwd,
 				beforeCapabilities: async () => {
@@ -176,6 +179,7 @@ export async function createPiAIRuntime(options: CreatePiAIRuntimeOptions = {}):
 				bridgeProvider?.detach();
 				sessionManager.disposeAll();
 				registry.disposeAll();
+				catalogRegistry?.disposeAll();
 				pullBridge?.dispose();
 			},
 		};

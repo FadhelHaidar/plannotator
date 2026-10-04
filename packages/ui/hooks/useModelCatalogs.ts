@@ -14,7 +14,10 @@ export { effortSelectOptions, modelSelectOptions } from '@plannotator/core/model
  * Claude / Codex model catalogs for the agent launchers (review, Code Tour,
  * Guided Review) — the SAME lists Ask AI shows. Each is the Ask AI provider's
  * discovered list, fetched through `/api/ai/capabilities?activate=<id>` (which
- * runs the provider's server-cached discovery). Nothing is fetched until a
+ * runs the provider's server-cached discovery). When a session bridge makes
+ * Ask AI bridge-only, the server reports these under `catalogProviders`
+ * instead of `providers`, so the launchers keep them while Ask AI cannot
+ * offer them. Nothing is fetched until a
  * surface asks for one engine with `useModelCatalogs(...).load(engine)`, and
  * only when that engine is installed, so opening a launcher spawns only the
  * selected CLI. While a fetch is in flight the static fallback is shown with
@@ -67,7 +70,11 @@ function loadCatalogEntry(engine: CatalogEngine): Promise<LoadedCatalog> {
     load = fetch(`/api/ai/capabilities?activate=${encodeURIComponent(id)}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data): LoadedCatalog => {
-        const provider = data?.providers?.find((p: { id?: string; name?: string }) => p.id === id || p.name === id);
+        // A server whose Ask AI is a session bridge lists the SDK providers
+        // only under `catalogProviders` (never under `providers`, which Ask AI
+        // reads), so the launchers look in both.
+        const matches = (p: { id?: string; name?: string }) => p.id === id || p.name === id;
+        const provider = data?.providers?.find(matches) ?? data?.catalogProviders?.find(matches);
         const models = provider?.models;
         if (!Array.isArray(models) || models.length === 0) return failed();
         // The server answers 200 with its static fallback when discovery

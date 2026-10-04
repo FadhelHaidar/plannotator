@@ -8,6 +8,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { FAKE_CODEX_MODEL, fakeAgentClis } from "../../../tests/test-fixtures/fake-agent-clis.ts";
 
 const tempDirs: string[] = [];
 
@@ -153,22 +154,20 @@ describe("createPiAIRuntime Codex discovery", () => {
 
 describe("createPiAIRuntime with a session bridge", () => {
 	// The Pi session that opened Plannotator answers Ask AI and nothing else:
-	// with a bridge no SDK provider is listed, activated, or reachable by id,
-	// even with Codex installed. Without one, Codex is offered as before.
-	test("registers ONLY the bridge and refuses other providers", async () => {
+	// with a bridge no SDK provider is listed or reachable by id, even with
+	// Codex installed. The agent-job launchers still get the discovered Claude
+	// / Codex catalogs from ?activate=<id> (under `catalogProviders`). Without
+	// a bridge, Codex is offered as before.
+	test("serves only the bridge for Ask AI, keeps launcher catalogs, and refuses other providers", async () => {
 		if (process.platform === "win32") return;
 
 		const dir = mkdtempSync(join(tmpdir(), "plannotator-pi-bridge-only-"));
 		tempDirs.push(dir);
-		const marker = join(dir, "codex-ran");
-		const codex = join(dir, "codex");
-		writeFileSync(codex, `#!/bin/sh\necho ran > '${marker}'\nexit 1\n`);
-		chmodSync(codex, 0o755);
+		fakeAgentClis(dir);
 
 		const runner = join(dir, "runner.ts");
 		const runtimeUrl = pathToFileURL(join(import.meta.dir, "ai-runtime.ts")).href;
 		writeFileSync(runner, `
-			import { existsSync } from "node:fs";
 			import { createPiAIRuntime } from ${JSON.stringify(runtimeUrl)};
 			const bridge = {
 				host: "pi",
@@ -176,13 +175,15 @@ describe("createPiAIRuntime with a session bridge", () => {
 				status: () => "ready",
 				ask: () => {},
 			};
-			const caps = async (runtime) => (await runtime.endpoints["/api/ai/capabilities"](
-				new Request("http://localhost/api/ai/capabilities?activate=codex-sdk"),
+			const caps = async (runtime, query) => (await runtime.endpoints["/api/ai/capabilities"](
+				new Request("http://localhost/api/ai/capabilities" + query),
 			)).json();
 			const withBridge = await createPiAIRuntime({ cwd: ${JSON.stringify(dir)}, sessionBridge: bridge, getServerPort: () => 4321 });
 			const without = await createPiAIRuntime({ cwd: ${JSON.stringify(dir)} });
 			if (!withBridge || !without) throw new Error("Pi AI runtime unavailable");
-			const bridged = await caps(withBridge);
+			const plainBridged = await caps(withBridge, "");
+			const codex = await caps(withBridge, "?activate=codex-sdk");
+			const claude = await caps(withBridge, "?activate=claude-agent-sdk");
 			const sessionStatus = {};
 			for (const providerId of ["codex-sdk", "claude-agent-sdk"]) {
 				sessionStatus[providerId] = (await withBridge.endpoints["/api/ai/session"](
@@ -193,14 +194,23 @@ describe("createPiAIRuntime with a session bridge", () => {
 					}),
 				)).status;
 			}
-			const codexRanWithBridge = existsSync(${JSON.stringify(marker)});
-			const plain = await (await without.endpoints["/api/ai/capabilities"](
-				new Request("http://localhost/api/ai/capabilities"),
-			)).json();
+			const plain = await caps(without, "");
 			console.log(JSON.stringify({
-				bridged: { providerIds: bridged.providers.map((p) => p.id), defaultProvider: bridged.defaultProvider },
+				bridged: {
+					providerIds: plainBridged.providers.map((p) => p.id),
+					defaultProvider: plainBridged.defaultProvider,
+					catalogProviders: plainBridged.catalogProviders ?? null,
+				},
+				codex: {
+					providerIds: codex.providers.map((p) => p.id),
+					catalog: codex.catalogProviders.map((p) => ({ id: p.id, modelIds: p.models.map((m) => m.id), modelsSource: p.modelsSource, toolVersion: p.toolVersion })),
+				},
+				claude: {
+					providerIds: claude.providers.map((p) => p.id),
+					ids: claude.catalogProviders.map((p) => p.id),
+					toolVersion: claude.catalogProviders[0]?.toolVersion ?? null,
+				},
 				sessionStatus,
-				codexRanWithBridge,
 				withoutBridgeHasCodex: plain.providers.some((p) => p.id === "codex-sdk"),
 				withoutBridgeHasBridge: plain.providers.some((p) => p.id === "session-bridge"),
 			}));
@@ -221,11 +231,15 @@ describe("createPiAIRuntime with a session bridge", () => {
 		]);
 		expect(exitCode, stderr).toBe(0);
 		expect(JSON.parse(stdout.trim().split("\n").at(-1)!)).toEqual({
-			bridged: { providerIds: ["session-bridge"], defaultProvider: "session-bridge" },
+			bridged: { providerIds: ["session-bridge"], defaultProvider: "session-bridge", catalogProviders: null },
+			codex: {
+				providerIds: ["session-bridge"],
+				catalog: [{ id: "codex-sdk", modelIds: [FAKE_CODEX_MODEL], modelsSource: "discovered", toolVersion: "0.999.0" }],
+			},
+			claude: { providerIds: ["session-bridge"], ids: ["claude-agent-sdk"], toolVersion: "2.1.999" },
 			sessionStatus: { "codex-sdk": 503, "claude-agent-sdk": 503 },
-			codexRanWithBridge: false,
 			withoutBridgeHasCodex: true,
 			withoutBridgeHasBridge: false,
 		});
-	}, 15_000);
+	}, 30_000);
 });
