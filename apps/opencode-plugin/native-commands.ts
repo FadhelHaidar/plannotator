@@ -73,6 +73,21 @@ export interface CliCommandRequest {
   cwd?: string;
   bridge?: OpenCodeBridgeContext;
   createSessionBridge?: () => DisposableSessionBridge | undefined;
+  onReady?: (url: string) => void;
+  onError?: (message: string) => void;
+  deliverApproval?: boolean;
+}
+
+/**
+ * What a caller other than the slash command adds to a native command run
+ * (an agent's shell call the plugin took over, `shell-takeover.ts`).
+ */
+export interface NativeCommandRunOptions {
+  /** Run in this directory instead of the session's (an explicit `workdir`). */
+  cwd?: string;
+  onReady?: (url: string) => void;
+  onError?: (message: string) => void;
+  deliverApproval?: boolean;
 }
 
 /**
@@ -102,7 +117,7 @@ export interface NativeCommandDeps {
 }
 
 /** Resolve the invocation's working directory, session location first. */
-async function resolveDirectory(ctx: V2ContextLike, sessionID: string): Promise<string> {
+export async function resolveDirectory(ctx: V2ContextLike, sessionID: string): Promise<string> {
   try {
     const session = await ctx.session?.get?.({ sessionID });
     const directory = session?.location?.directory;
@@ -117,6 +132,7 @@ export async function runNativeCommand(
   command: string,
   invocation: V2CommandInvocation,
   deps: NativeCommandDeps,
+  options: NativeCommandRunOptions = {},
 ): Promise<void> {
   const sessionID = invocation.sessionID;
   // The raw argument tail, exactly as OpenCode 1 forwards it. The CLI's own
@@ -135,9 +151,12 @@ export async function runNativeCommand(
       client,
       sessionId: sessionID,
       rawArgs,
-      cwd: await resolveDirectory(deps.ctx, sessionID),
+      cwd: options.cwd ?? await resolveDirectory(deps.ctx, sessionID),
       bridge: await deps.getBridgeContext(),
       createSessionBridge: () => createNativeCommandSessionBridge(deps.ctx, sessionID),
+      ...(options.onReady ? { onReady: options.onReady } : {}),
+      ...(options.onError ? { onError: options.onError } : {}),
+      ...(options.deliverApproval ? { deliverApproval: true } : {}),
     });
   } finally {
     // The client may be watching the host's event stream for its session-URL

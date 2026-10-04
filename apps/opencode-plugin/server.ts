@@ -24,6 +24,7 @@ import {
 } from "./cli-bridge";
 import { switchV2SessionAgent } from "./agent-switch";
 import { registerNativeCommands } from "./native-commands";
+import { registerShellTakeover, type ShellTakeoverContext } from "./shell-takeover";
 import {
   createV2BridgeClient,
   formatSessionUrlNotice,
@@ -109,6 +110,20 @@ const serverPlugin = {
       });
     } catch (error) {
       console.error(`[Plannotator] Could not register the OpenCode 2 slash commands: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    // The agent's own `plannotator annotate|review|last` shell calls open
+    // through the same path as those commands (non-blocking, decision later
+    // as a prompt, Ask AI asks this session). Same failure policy: without it
+    // the shell tool runs the CLI exactly as before.
+    try {
+      await registerShellTakeover({
+        ctx: v2 as ShellTakeoverContext,
+        getAgents,
+        getBridgeContext: () => getBridgeContext(getAgents),
+      });
+    } catch (error) {
+      console.error(`[Plannotator] Could not take over plannotator shell calls: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     if (shouldModifyPrompts(workflowOptions)) {

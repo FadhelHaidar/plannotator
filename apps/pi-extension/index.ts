@@ -25,7 +25,10 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
+import { type AgentOpenOutcome, takeOverBashCommand } from "./agent-command-takeover.ts";
 import { bundledSkillPaths } from "./bundled-skill.ts";
+import type { ParsedAnnotateArgs } from "./generated/annotate-args.ts";
+import { plannotatorToolArgs } from "./generated/plannotator-tool.ts";
 import { buildPromptVariables, formatTodoList, loadPlannotatorConfig, renderTemplate, resolveExecutionMode, resolvePhaseProfile } from "./config.ts";
 import {
 	type ChecklistItem,
@@ -318,6 +321,10 @@ interface PendingPlanReview {
 export interface PlannotatorExtensionDeps {
 	startPlanReview?: typeof startPlanReviewBrowserSession;
 	hasPlanBrowserHtml?: () => boolean;
+	hasReviewBrowserHtml?: () => boolean;
+	startCodeReview?: typeof startCodeReviewBrowserSession;
+	startMarkdownAnnotation?: typeof startMarkdownAnnotationSession;
+	startLastMessageAnnotation?: typeof startLastMessageAnnotationSession;
 }
 
 /** The tool result while a plan waits for the reviewer. Kept in one place so the wording cannot drift. */
@@ -351,6 +358,10 @@ export function approvedPlanSection(filePath: string, approvedPlan: string, file
 export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtensionDeps = {}): void {
 	const startPlanReview = deps.startPlanReview ?? startPlanReviewBrowserSession;
 	const planBrowserHtmlAvailable = deps.hasPlanBrowserHtml ?? hasPlanBrowserHtml;
+	const reviewBrowserHtmlAvailable = deps.hasReviewBrowserHtml ?? hasReviewBrowserHtml;
+	const startCodeReview = deps.startCodeReview ?? startCodeReviewBrowserSession;
+	const startMarkdownAnnotation = deps.startMarkdownAnnotation ?? startMarkdownAnnotationSession;
+	const startLastMessageAnnotation = deps.startLastMessageAnnotation ?? startLastMessageAnnotationSession;
 	const currentPiSession = registerCurrentPiSession(pi);
 	// "Ask this session": Ask AI answered by this Pi session (review, annotate,
 	// last, plan review). Listeners register once here; each command binds a bridge to its ctx.
@@ -773,512 +784,531 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		},
 	});
 
-	pi.registerCommand("plannotator-review", {
-		description: "Open interactive code review for current changes, a directory, or a PR URL; pass --git or --gitbutler to force that provider, --base <ref> / --diff-type <type> to pin the session's opening diff",
-		handler: async (args, ctx) => {
-			if (!hasReviewBrowserHtml()) {
-				ctx.ui.notify(
-					"Code review UI not available. Run 'bun run build' in the pi-extension directory.",
-					"error",
-				);
-				return;
+	/** Notify an open failure exactly as the commands always did, and report it to the caller. */
+	const openFailed = (ctx: ExtensionContext, error: string): AgentOpenOutcome => {
+		ctx.ui.notify(error, "error");
+		return { ok: false, error };
+	};
+
+	/**
+	 * Open code review: `/plannotator-review` (the raw argument string) and an
+	 * agent's taken-over `plannotator review` (its words). The decision arrives
+	 * later as a follow-up message.
+	 */
+	async function openCodeReview(args: string | string[], ctx: ExtensionContext): Promise<AgentOpenOutcome> {
+		if (!reviewBrowserHtmlAvailable()) {
+			return openFailed(ctx, "Code review UI not available. Run 'bun run build' in the pi-extension directory.");
+		}
+
+		currentPiSession.update(ctx);
+		const origin = getPiSessionIdentity(ctx);
+
+		try {
+			const { formatIgnoredReviewWords, parseReviewArgs, resolveReviewTarget, withReviewDirectory } = await import("./generated/review-args.ts");
+			const reviewArgs = parseReviewArgs(args);
+			// Argument-shape failures refuse to start a session (same contract
+			// as the CLI's exit 1), surfaced through Pi's notifier.
+			if (reviewArgs.errors.length > 0) {
+				return openFailed(ctx, `Plannotator: ${reviewArgs.errors.join("; ")}`);
 			}
-
-			currentPiSession.update(ctx);
-			const origin = getPiSessionIdentity(ctx);
-
-			try {
-				const { formatIgnoredReviewWords, parseReviewArgs, resolveReviewTarget, withReviewDirectory } = await import("./generated/review-args.ts");
-				const reviewArgs = parseReviewArgs(args ?? "");
-				// Argument-shape failures refuse to start a session (same contract
-				// as the CLI's exit 1), surfaced through Pi's notifier.
-				if (reviewArgs.errors.length > 0) {
-					ctx.ui.notify(`Plannotator: ${reviewArgs.errors.join("; ")}`, "error");
-					return;
-				}
-				const reviewTarget = resolveReviewTarget(reviewArgs, ctx.cwd);
-				const ignoredNotice = formatIgnoredReviewWords(reviewTarget);
-				if (ignoredNotice) ctx.ui.notify(`Plannotator: ${ignoredNotice}`, "info");
-				const session = await startCodeReviewBrowserSession(ctx, {
-					sessionBridge: sessionBridgeFor(ctx, origin),
-					cwd: reviewTarget.directory,
-					includeReviewDirectory: !!reviewTarget.directory,
-					prUrl: reviewArgs.prUrl,
-					patchFile: reviewArgs.patchFile,
-					vcsType: reviewArgs.vcsType,
-					useLocal: reviewArgs.useLocal,
-					// --base / --diff-type: session-only open state from user flags.
-					// openStateFromFlags turns on strict validation (provider
-					// matrix, base probe) and the explicit/pinned server bits;
-					// programmatic callers omit it and keep the legacy
-					// forward-and-let-it-upgrade behavior.
-					defaultBranch: reviewArgs.base,
-					diffType: reviewArgs.diffType,
-					openStateFromFlags: reviewArgs.base !== undefined || reviewArgs.diffType !== undefined,
-					// `--no-git-remote-check` (#1553): session-only, and only ever a
-					// disable — undefined leaves the env var / config deciding.
-					gitRemoteCheck: reviewArgs.gitRemoteCheck,
-				});
-				ctx.ui.notify(sessionOpenedMessage("Code review opened", session.url), "info");
-				void session
-					.waitForDecision()
-					.then(async (result) => {
-						try {
-							if (result.feedback) result.feedback = withReviewDirectory(result.feedback, result.reviewDirectory);
-							if (result.exit) {
-								safeNotify(ctx, "Code review session closed.", "info", origin);
-								return;
-							}
-							if (result.approved) {
-								// PR5 delivery (spec §6.4, consumer #4): bare approvals send
-								// the approved prompt alone; approvals carrying reviewer notes
-								// send the approved-with-notes framing (non-blocking guidance).
-								const { composeReviewApprovedMessage } = await loadPlannotatorPrompts();
-								sendUserMessageWithCurrentSessionFallback(
-									pi,
-									composeReviewApprovedMessage("pi", result.feedback, loadConfig()),
-									{ deliverAs: "followUp" },
-									"Plannotator code review feedback could not be sent",
-									origin,
-								);
-								return;
-							}
-							if (!result.feedback) {
-								safeNotify(ctx, "Code review closed (no feedback).", "info", origin);
-								return;
-							}
-							// Append the verification-only suffix when the reviewer sent
-							// annotations to act on (PR mode included). Platform PR actions
-							// (approve/comment posted to the host) come back with an empty
-							// annotation set and a status message — don't tell the agent to
-							// "address" a platform action.
-							let reviewFeedback = result.feedback;
-							if ((result.annotations?.length ?? 0) > 0) {
-								const { getReviewDeniedSuffix } = await loadPlannotatorPrompts();
-								reviewFeedback += getReviewDeniedSuffix("pi", loadConfig());
-							}
+			const reviewTarget = resolveReviewTarget(reviewArgs, ctx.cwd);
+			const ignoredNotice = formatIgnoredReviewWords(reviewTarget);
+			if (ignoredNotice) ctx.ui.notify(`Plannotator: ${ignoredNotice}`, "info");
+			const session = await startCodeReview(ctx, {
+				sessionBridge: sessionBridgeFor(ctx, origin),
+				cwd: reviewTarget.directory,
+				includeReviewDirectory: !!reviewTarget.directory,
+				prUrl: reviewArgs.prUrl,
+				patchFile: reviewArgs.patchFile,
+				vcsType: reviewArgs.vcsType,
+				useLocal: reviewArgs.useLocal,
+				// --base / --diff-type: session-only open state from user flags.
+				// openStateFromFlags turns on strict validation (provider
+				// matrix, base probe) and the explicit/pinned server bits;
+				// programmatic callers omit it and keep the legacy
+				// forward-and-let-it-upgrade behavior.
+				defaultBranch: reviewArgs.base,
+				diffType: reviewArgs.diffType,
+				openStateFromFlags: reviewArgs.base !== undefined || reviewArgs.diffType !== undefined,
+				// `--no-git-remote-check` (#1553): session-only, and only ever a
+				// disable — undefined leaves the env var / config deciding.
+				gitRemoteCheck: reviewArgs.gitRemoteCheck,
+			});
+			ctx.ui.notify(sessionOpenedMessage("Code review opened", session.url), "info");
+			void session
+				.waitForDecision()
+				.then(async (result) => {
+					try {
+						if (result.feedback) result.feedback = withReviewDirectory(result.feedback, result.reviewDirectory);
+						if (result.exit) {
+							safeNotify(ctx, "Code review session closed.", "info", origin);
+							return;
+						}
+						if (result.approved) {
+							// PR5 delivery (spec §6.4, consumer #4): bare approvals send
+							// the approved prompt alone; approvals carrying reviewer notes
+							// send the approved-with-notes framing (non-blocking guidance).
+							const { composeReviewApprovedMessage } = await loadPlannotatorPrompts();
 							sendUserMessageWithCurrentSessionFallback(
 								pi,
-								reviewFeedback,
+								composeReviewApprovedMessage("pi", result.feedback, loadConfig()),
 								{ deliverAs: "followUp" },
 								"Plannotator code review feedback could not be sent",
 								origin,
 							);
-						} catch (err) {
-							reportBackgroundError(ctx, "Plannotator code review feedback could not be sent", err, origin);
+							return;
 						}
-					})
-					.catch((err) => {
-						reportBackgroundError(ctx, "Plannotator code review session failed", err, origin);
-					});
-			} catch (err) {
-				ctx.ui.notify(
-					`Failed to start code review UI: ${getStartupErrorMessage(err)}`,
-					"error",
-				);
-			}
+						if (!result.feedback) {
+							safeNotify(ctx, "Code review closed (no feedback).", "info", origin);
+							return;
+						}
+						// Append the verification-only suffix when the reviewer sent
+						// annotations to act on (PR mode included). Platform PR actions
+						// (approve/comment posted to the host) come back with an empty
+						// annotation set and a status message — don't tell the agent to
+						// "address" a platform action.
+						let reviewFeedback = result.feedback;
+						if ((result.annotations?.length ?? 0) > 0) {
+							const { getReviewDeniedSuffix } = await loadPlannotatorPrompts();
+							reviewFeedback += getReviewDeniedSuffix("pi", loadConfig());
+						}
+						sendUserMessageWithCurrentSessionFallback(
+							pi,
+							reviewFeedback,
+							{ deliverAs: "followUp" },
+							"Plannotator code review feedback could not be sent",
+							origin,
+						);
+					} catch (err) {
+						reportBackgroundError(ctx, "Plannotator code review feedback could not be sent", err, origin);
+					}
+				})
+				.catch((err) => {
+					reportBackgroundError(ctx, "Plannotator code review session failed", err, origin);
+				});
+			return { ok: true, url: session.url };
+		} catch (err) {
+			return openFailed(ctx, `Failed to start code review UI: ${getStartupErrorMessage(err)}`);
+		}
+	}
+
+	pi.registerCommand("plannotator-review", {
+		description: "Open interactive code review for current changes, a directory, or a PR URL; pass --git or --gitbutler to force that provider, --base <ref> / --diff-type <type> to pin the session's opening diff",
+		handler: async (args, ctx) => {
+			await openCodeReview(args ?? "", ctx);
 		},
 	});
+
+	/**
+	 * Open annotation of a file, folder, URL or live app: `/plannotator-annotate`
+	 * and an agent's taken-over `plannotator annotate`. `deliverApproval`: a
+	 * bare gated approval is sent to the agent too (the agent opened the gate
+	 * and was told to wait for the sign-off); the command only notifies.
+	 */
+	async function openAnnotation(
+		request: ParsedAnnotateArgs,
+		ctx: ExtensionContext,
+		options: { deliverApproval?: boolean } = {},
+	): Promise<AgentOpenOutcome> {
+		const {
+			FILE_BROWSER_EXCLUDED,
+			hasMarkdownFiles,
+			annotateInputNamesExistingTarget,
+			buildAmbiguousAnnotateArgsMessage,
+			buildUnresolvedAnnotateArgsMessage,
+			probeAnnotateToken,
+			selectAnnotateTokenTarget,
+			resolveAtReference,
+			resolveUserPath,
+			isAnnotatableTextPath,
+			getAnnotatableDocRegex,
+			getAnnotatableExtensionsHint,
+			MAX_ANNOTATABLE_FILE_BYTES,
+		} = await loadAnnotateCommandModules();
+		let { filePath, rawFilePath } = request;
+		const { gate, renderHtml: renderHtmlFlag, renderMarkdown: renderMarkdownFlag, noJina, app: appFlag, static: staticFlag } = request;
+		// Same flag-conflict-first ordering as the Bun CLI.
+		if (appFlag && staticFlag) {
+			return openFailed(ctx, "--app and --static are mutually exclusive");
+		}
+		if (!filePath) {
+			return openFailed(ctx, "Usage: /plannotator-annotate <file.md | file.txt | file.html | https://... | folder/> [--markdown] [--no-jina] [--app] [--static] [--gate] [--json]");
+		}
+
+		// Tolerant fallback (#1182): when the whole argument string names
+		// nothing, probe each token; exactly one existing target proceeds,
+		// several is an error, several unresolvable words get an actionable
+		// message instead of "File not found: the". Bare directory names
+		// only count in the sole-arg pre-pass, and unrecognized
+		// dash-prefixed tokens disable tolerance so a typo'd flag errors
+		// the way it always did.
+		if (!annotateInputNamesExistingTarget(rawFilePath, ctx.cwd)) {
+			const selection = selectAnnotateTokenTarget(rawFilePath, (token: string) =>
+				probeAnnotateToken(token, ctx.cwd, { bareDirectories: false }),
+			);
+			if (selection.kind === "single") {
+				filePath = selection.candidate.value;
+				rawFilePath = selection.candidate.value;
+			} else if (selection.kind === "multiple") {
+				return openFailed(ctx, buildAmbiguousAnnotateArgsMessage(selection.candidates));
+			} else if (selection.kind === "none" && selection.words.length > 1) {
+				// Content flags only; --gate is transport for this
+				// invocation, not a property of the target.
+				const tolerantFlags = [
+					...(renderMarkdownFlag ? ["--markdown"] : []),
+					...(noJina ? ["--no-jina"] : []),
+					...(renderHtmlFlag ? ["--render-html"] : []),
+				];
+				return openFailed(ctx, buildUnresolvedAnnotateArgsMessage({ words: selection.words, flags: tolerantFlags }));
+			}
+			// "flagged" (unrecognized dash tokens) or a single unresolvable
+			// word falls through to the existing pipeline so its specific
+			// errors stay verbatim.
+		}
+		if (!planBrowserHtmlAvailable()) {
+			return openFailed(ctx, "Annotation UI not available. Run 'bun run build' in the pi-extension directory.");
+		}
+
+		let markdown: string;
+		let rawHtml: string | undefined;
+		let absolutePath: string;
+		let folderPath: string | undefined;
+		let mode: "annotate" | "annotate-folder" | "annotate-app" | undefined;
+		let sourceInfo: string | undefined;
+		let sourceConverted = false;
+		let isFolder = false;
+		let liveTargetUrl: string | undefined;
+
+		// --- URL annotation ---
+		const isUrl = /^https?:\/\//i.test(filePath);
+
+		// --app is contracted to fail loudly whenever it cannot apply; a
+		// file or folder target silently swallowing it would hide the
+		// flag's typo'd use (same contract as the Bun CLI).
+		if (!isUrl && appFlag) {
+			const { LIVE_APP_REQUIRES_URL_MESSAGE } = await import("./generated/live-probe.ts");
+			return openFailed(ctx, LIVE_APP_REQUIRES_URL_MESSAGE);
+		}
+
+		if (isUrl) {
+			// --- Live app detection (shared probe: same 3s timeout, same
+			// "< 500 + HTML + same loopback origin" gate as the Bun CLI) ---
+			const {
+				LIVE_APP_REMOTE_MESSAGE,
+				LIVE_APP_REQUIRES_HTTP_MESSAGE,
+				LIVE_APP_REQUIRES_LOOPBACK_MESSAGE,
+				buildForceAppFailureMessage,
+				buildLiveProbeFallbackNotice,
+				classifyLiveAppCandidate,
+				probeLiveAppTarget,
+			} = await import("./generated/live-probe.ts");
+			const { parsed: parsedUrl, loopback } = classifyLiveAppCandidate(filePath);
+
+			if (appFlag && !loopback) {
+				return openFailed(ctx, LIVE_APP_REQUIRES_LOOPBACK_MESSAGE);
+			}
+			if (appFlag && parsedUrl?.protocol === "https:") {
+				// The live proxy is http-only.
+				return openFailed(ctx, LIVE_APP_REQUIRES_HTTP_MESSAGE);
+			}
+
+			if (loopback && parsedUrl?.protocol === "http:" && !staticFlag) {
+				const probe = await probeLiveAppTarget(filePath, parsedUrl);
+				if (probe.liveEligible) {
+					// Remote hard-off (layer 1 of 2; the server throw in
+					// serverAnnotate.ts backstops it): a live proxy relays
+					// the user's authenticated dev app, and a remote Pi
+					// session is reachable beyond loopback.
+					if (isRemoteSession()) {
+						return openFailed(ctx, LIVE_APP_REMOTE_MESSAGE);
+					}
+					liveTargetUrl = filePath;
+					mode = "annotate-app";
+					ctx.ui.notify(`Live app: ${filePath}`, "info");
+				} else if (appFlag) {
+					return openFailed(ctx, buildForceAppFailureMessage(filePath, probe));
+				} else if (probe.probeError !== null) {
+					// A dev server still starting up probes as unreachable;
+					// say so instead of silently downgrading to static.
+					ctx.ui.notify(buildLiveProbeFallbackNotice(filePath, probe.probeError), "info");
+				}
+			}
+
+			if (liveTargetUrl) {
+				markdown = "";
+				absolutePath = filePath;
+				sourceInfo = filePath;
+			} else {
+				const useJina = resolveUseJina(noJina, loadConfig());
+				ctx.ui.notify(`Fetching: ${filePath}${useJina ? " (via Jina Reader)" : " (via fetch+Turndown)"}...`, "info");
+				try {
+					const { isConvertedSource, urlToMarkdown } = await import("./generated/url-to-markdown.ts");
+					const result = await urlToMarkdown(filePath, { useJina });
+					markdown = result.markdown;
+					sourceConverted = isConvertedSource(result.source);
+				} catch (err) {
+					return openFailed(ctx, `Failed to fetch URL: ${err instanceof Error ? err.message : String(err)}`);
+				}
+				absolutePath = filePath;
+				sourceInfo = filePath;
+			}
+		} else {
+			// Pick the interpretation of the user input that actually exists:
+			// stripped form first (reference-mode primary), literal as fallback
+			// for scoped-package-style names. Falls back to the stripped form
+			// for the error message if neither exists.
+			const resolvedCandidate = resolveAtReference(rawFilePath, (c) => {
+				const abs = resolveUserPath(c, ctx.cwd);
+				return existsSync(abs);
+			});
+			if (resolvedCandidate === null) {
+				absolutePath = resolveUserPath(filePath, ctx.cwd);
+				return openFailed(ctx, `File not found: ${absolutePath}`);
+			}
+			absolutePath = resolveUserPath(resolvedCandidate, ctx.cwd);
+
+			try {
+				isFolder = statSync(absolutePath).isDirectory();
+			} catch {
+				return openFailed(ctx, `Cannot access: ${absolutePath}`);
+			}
+
+			if (isFolder) {
+				if (!hasMarkdownFiles(absolutePath, FILE_BROWSER_EXCLUDED, getAnnotatableDocRegex())) {
+					return openFailed(ctx, `No annotatable files (markdown, plain-text, config, or HTML) found in ${absolutePath}`);
+				}
+				markdown = "";
+				folderPath = absolutePath;
+				mode = "annotate-folder";
+				ctx.ui.notify(`Opening annotation UI for folder ${filePath}...`, "info");
+			} else if (/\.html?$/i.test(absolutePath)) {
+				const html = readFileSync(absolutePath, "utf-8");
+				const renderHtmlForFile = !renderMarkdownFlag;
+				if (renderHtmlForFile) {
+					rawHtml = html;
+					markdown = "";
+				} else {
+					const { htmlToMarkdown } = await import("./generated/html-to-markdown.ts");
+					markdown = htmlToMarkdown(html);
+					sourceConverted = true;
+				}
+				sourceInfo = basename(absolutePath);
+				ctx.ui.notify(`Opening annotation UI for ${filePath}...`, "info");
+			} else {
+				if (!isAnnotatableTextPath(absolutePath)) {
+					return openFailed(ctx, `File type not supported. Supported types: ${getAnnotatableExtensionsHint()}`);
+				}
+				if (statSync(absolutePath).size > MAX_ANNOTATABLE_FILE_BYTES) {
+					return openFailed(ctx, `File too large to annotate (max 2MB): ${absolutePath}`);
+				}
+				markdown = readFileSync(absolutePath, "utf-8");
+				ctx.ui.notify(`Opening annotation UI for ${filePath}...`, "info");
+			}
+		}
+
+		currentPiSession.update(ctx);
+		const origin = getPiSessionIdentity(ctx);
+
+		try {
+			const session = await startMarkdownAnnotation(
+				ctx,
+				absolutePath,
+				markdown,
+				mode ?? "annotate",
+				folderPath,
+				sourceInfo,
+				sourceConverted,
+				gate,
+				rawHtml,
+				!!rawHtml,
+				renderMarkdownFlag,
+				undefined,
+				liveTargetUrl,
+				sessionBridgeFor(ctx, origin),
+			);
+			ctx.ui.notify(sessionOpenedMessage("Annotation opened", session.url), "info");
+			void session
+				.waitForDecision()
+				.then(async (result) => {
+					try {
+						const outcome = classifyAnnotateOutcome(result);
+						if (outcome.notification === "closed") {
+							safeNotify(ctx, "Annotation session closed.", "info", origin);
+							return;
+						}
+						if (!outcome.feedback) {
+							if (outcome.notification === "approved") {
+								if (options.deliverApproval) await sendBareApproval(origin);
+								safeNotify(ctx, "Annotation approved.", "info", origin);
+								return;
+							}
+							safeNotify(ctx, "Annotation closed (no feedback).", "info", origin);
+							return;
+						}
+						const {
+							getAnnotateApprovedWithNotesPrompt,
+							getAnnotateFileFeedbackPrompt,
+						} = await loadPlannotatorPrompts();
+						const context = `${isFolder ? "Folder" : "File"}: ${absolutePath}`;
+						const prompt = outcome.promptKind === "approved-with-notes"
+							? getAnnotateApprovedWithNotesPrompt("pi", loadConfig(), {
+									context,
+									feedback: outcome.feedback,
+								})
+							: getAnnotateFileFeedbackPrompt("pi", loadConfig(), {
+									fileHeader: isFolder ? "Folder" : "File",
+									filePath: absolutePath,
+									feedback: outcome.feedback,
+								});
+						sendUserMessageWithCurrentSessionFallback(
+							pi,
+							prompt,
+							{ deliverAs: "followUp" },
+							"Plannotator annotation feedback could not be sent",
+							origin,
+						);
+						if (outcome.notification === "approved") {
+							safeNotify(ctx, "Annotation approved.", "info", origin);
+						}
+					} catch (err) {
+						reportBackgroundError(ctx, "Plannotator annotation feedback could not be sent", err, origin);
+					}
+				})
+				.catch((err) => {
+					reportBackgroundError(ctx, "Plannotator annotation session failed", err, origin);
+				});
+			return { ok: true, url: session.url };
+		} catch (err) {
+			return openFailed(ctx, `Failed to start annotation UI: ${getStartupErrorMessage(err)}`);
+		}
+	}
 
 	pi.registerCommand("plannotator-annotate", {
 		description: "Open markdown file or folder in annotation UI",
 		handler: async (args, ctx) => {
-			const {
-				FILE_BROWSER_EXCLUDED,
-				hasMarkdownFiles,
-				parseAnnotateArgs,
-				annotateInputNamesExistingTarget,
-				buildAmbiguousAnnotateArgsMessage,
-				buildUnresolvedAnnotateArgsMessage,
-				probeAnnotateToken,
-				selectAnnotateTokenTarget,
-				resolveAtReference,
-				resolveUserPath,
-				isAnnotatableTextPath,
-				getAnnotatableDocRegex,
-				getAnnotatableExtensionsHint,
-				MAX_ANNOTATABLE_FILE_BYTES,
-			} = await loadAnnotateCommandModules();
+			const { parseAnnotateArgs } = await import("./generated/annotate-args.ts");
 			// Split known annotate flags from the path. --json is silently
 			// accepted (Pi writes back via sendUserMessage, not stdout).
 			// `rawFilePath` keeps any leading `@` for the literal-@ fallback
 			// (scoped-package-style names). liveFlags: Pi supports live app
 			// sessions, so --app / --static are recognized here.
-			let { filePath, rawFilePath, gate, renderHtml: renderHtmlFlag, renderMarkdown: renderMarkdownFlag, noJina, app: appFlag, static: staticFlag } = parseAnnotateArgs(args ?? "", { liveFlags: true });
-			// Same flag-conflict-first ordering as the Bun CLI.
-			if (appFlag && staticFlag) {
-				ctx.ui.notify("--app and --static are mutually exclusive", "error");
-				return;
-			}
-			if (!filePath) {
-				ctx.ui.notify("Usage: /plannotator-annotate <file.md | file.txt | file.html | https://... | folder/> [--markdown] [--no-jina] [--app] [--static] [--gate] [--json]", "error");
-				return;
-			}
-
-			// Tolerant fallback (#1182): when the whole argument string names
-			// nothing, probe each token; exactly one existing target proceeds,
-			// several is an error, several unresolvable words get an actionable
-			// message instead of "File not found: the". Bare directory names
-			// only count in the sole-arg pre-pass, and unrecognized
-			// dash-prefixed tokens disable tolerance so a typo'd flag errors
-			// the way it always did.
-			if (!annotateInputNamesExistingTarget(rawFilePath, ctx.cwd)) {
-				const selection = selectAnnotateTokenTarget(rawFilePath, (token: string) =>
-					probeAnnotateToken(token, ctx.cwd, { bareDirectories: false }),
-				);
-				if (selection.kind === "single") {
-					filePath = selection.candidate.value;
-					rawFilePath = selection.candidate.value;
-				} else if (selection.kind === "multiple") {
-					ctx.ui.notify(buildAmbiguousAnnotateArgsMessage(selection.candidates), "error");
-					return;
-				} else if (selection.kind === "none" && selection.words.length > 1) {
-					// Content flags only; --gate is transport for this
-					// invocation, not a property of the target.
-					const tolerantFlags = [
-						...(renderMarkdownFlag ? ["--markdown"] : []),
-						...(noJina ? ["--no-jina"] : []),
-						...(renderHtmlFlag ? ["--render-html"] : []),
-					];
-					ctx.ui.notify(buildUnresolvedAnnotateArgsMessage({ words: selection.words, flags: tolerantFlags }), "error");
-					return;
-				}
-				// "flagged" (unrecognized dash tokens) or a single unresolvable
-				// word falls through to the existing pipeline so its specific
-				// errors stay verbatim.
-			}
-			if (!hasPlanBrowserHtml()) {
-				ctx.ui.notify(
-					"Annotation UI not available. Run 'bun run build' in the pi-extension directory.",
-					"error",
-				);
-				return;
-			}
-
-			let markdown: string;
-			let rawHtml: string | undefined;
-			let absolutePath: string;
-			let folderPath: string | undefined;
-			let mode: "annotate" | "annotate-folder" | "annotate-app" | undefined;
-			let sourceInfo: string | undefined;
-			let sourceConverted = false;
-			let isFolder = false;
-			let liveTargetUrl: string | undefined;
-
-			// --- URL annotation ---
-			const isUrl = /^https?:\/\//i.test(filePath);
-
-			// --app is contracted to fail loudly whenever it cannot apply; a
-			// file or folder target silently swallowing it would hide the
-			// flag's typo'd use (same contract as the Bun CLI).
-			if (!isUrl && appFlag) {
-				const { LIVE_APP_REQUIRES_URL_MESSAGE } = await import("./generated/live-probe.ts");
-				ctx.ui.notify(LIVE_APP_REQUIRES_URL_MESSAGE, "error");
-				return;
-			}
-
-			if (isUrl) {
-				// --- Live app detection (shared probe: same 3s timeout, same
-				// "< 500 + HTML + same loopback origin" gate as the Bun CLI) ---
-				const {
-					LIVE_APP_REMOTE_MESSAGE,
-					LIVE_APP_REQUIRES_HTTP_MESSAGE,
-					LIVE_APP_REQUIRES_LOOPBACK_MESSAGE,
-					buildForceAppFailureMessage,
-					buildLiveProbeFallbackNotice,
-					classifyLiveAppCandidate,
-					probeLiveAppTarget,
-				} = await import("./generated/live-probe.ts");
-				const { parsed: parsedUrl, loopback } = classifyLiveAppCandidate(filePath);
-
-				if (appFlag && !loopback) {
-					ctx.ui.notify(LIVE_APP_REQUIRES_LOOPBACK_MESSAGE, "error");
-					return;
-				}
-				if (appFlag && parsedUrl?.protocol === "https:") {
-					// The live proxy is http-only.
-					ctx.ui.notify(LIVE_APP_REQUIRES_HTTP_MESSAGE, "error");
-					return;
-				}
-
-				if (loopback && parsedUrl?.protocol === "http:" && !staticFlag) {
-					const probe = await probeLiveAppTarget(filePath, parsedUrl);
-					if (probe.liveEligible) {
-						// Remote hard-off (layer 1 of 2; the server throw in
-						// serverAnnotate.ts backstops it): a live proxy relays
-						// the user's authenticated dev app, and a remote Pi
-						// session is reachable beyond loopback.
-						if (isRemoteSession()) {
-							ctx.ui.notify(LIVE_APP_REMOTE_MESSAGE, "error");
-							return;
-						}
-						liveTargetUrl = filePath;
-						mode = "annotate-app";
-						ctx.ui.notify(`Live app: ${filePath}`, "info");
-					} else if (appFlag) {
-						ctx.ui.notify(buildForceAppFailureMessage(filePath, probe), "error");
-						return;
-					} else if (probe.probeError !== null) {
-						// A dev server still starting up probes as unreachable;
-						// say so instead of silently downgrading to static.
-						ctx.ui.notify(buildLiveProbeFallbackNotice(filePath, probe.probeError), "info");
-					}
-				}
-
-				if (liveTargetUrl) {
-					markdown = "";
-					absolutePath = filePath;
-					sourceInfo = filePath;
-				} else {
-					const useJina = resolveUseJina(noJina, loadConfig());
-					ctx.ui.notify(`Fetching: ${filePath}${useJina ? " (via Jina Reader)" : " (via fetch+Turndown)"}...`, "info");
-					try {
-						const { isConvertedSource, urlToMarkdown } = await import("./generated/url-to-markdown.ts");
-						const result = await urlToMarkdown(filePath, { useJina });
-						markdown = result.markdown;
-						sourceConverted = isConvertedSource(result.source);
-					} catch (err) {
-						ctx.ui.notify(`Failed to fetch URL: ${err instanceof Error ? err.message : String(err)}`, "error");
-						return;
-					}
-					absolutePath = filePath;
-					sourceInfo = filePath;
-				}
-			} else {
-				// Pick the interpretation of the user input that actually exists:
-				// stripped form first (reference-mode primary), literal as fallback
-				// for scoped-package-style names. Falls back to the stripped form
-				// for the error message if neither exists.
-				const resolvedCandidate = resolveAtReference(rawFilePath, (c) => {
-					const abs = resolveUserPath(c, ctx.cwd);
-					return existsSync(abs);
-				});
-				if (resolvedCandidate === null) {
-					absolutePath = resolveUserPath(filePath, ctx.cwd);
-					ctx.ui.notify(`File not found: ${absolutePath}`, "error");
-					return;
-				}
-				absolutePath = resolveUserPath(resolvedCandidate, ctx.cwd);
-
-				try {
-					isFolder = statSync(absolutePath).isDirectory();
-				} catch {
-					ctx.ui.notify(`Cannot access: ${absolutePath}`, "error");
-					return;
-				}
-
-				if (isFolder) {
-					if (!hasMarkdownFiles(absolutePath, FILE_BROWSER_EXCLUDED, getAnnotatableDocRegex())) {
-						ctx.ui.notify(`No annotatable files (markdown, plain-text, config, or HTML) found in ${absolutePath}`, "error");
-						return;
-					}
-					markdown = "";
-					folderPath = absolutePath;
-					mode = "annotate-folder";
-					ctx.ui.notify(`Opening annotation UI for folder ${filePath}...`, "info");
-				} else if (/\.html?$/i.test(absolutePath)) {
-					const html = readFileSync(absolutePath, "utf-8");
-					const renderHtmlForFile = !renderMarkdownFlag;
-					if (renderHtmlForFile) {
-						rawHtml = html;
-						markdown = "";
-					} else {
-						const { htmlToMarkdown } = await import("./generated/html-to-markdown.ts");
-						markdown = htmlToMarkdown(html);
-						sourceConverted = true;
-					}
-					sourceInfo = basename(absolutePath);
-					ctx.ui.notify(`Opening annotation UI for ${filePath}...`, "info");
-				} else {
-					if (!isAnnotatableTextPath(absolutePath)) {
-						ctx.ui.notify(`File type not supported. Supported types: ${getAnnotatableExtensionsHint()}`, "error");
-						return;
-					}
-					if (statSync(absolutePath).size > MAX_ANNOTATABLE_FILE_BYTES) {
-						ctx.ui.notify(`File too large to annotate (max 2MB): ${absolutePath}`, "error");
-						return;
-					}
-					markdown = readFileSync(absolutePath, "utf-8");
-					ctx.ui.notify(`Opening annotation UI for ${filePath}...`, "info");
-				}
-			}
-
-			currentPiSession.update(ctx);
-			const origin = getPiSessionIdentity(ctx);
-
-			try {
-				const session = await startMarkdownAnnotationSession(
-					ctx,
-					absolutePath,
-					markdown,
-					mode ?? "annotate",
-					folderPath,
-					sourceInfo,
-					sourceConverted,
-					gate,
-					rawHtml,
-					!!rawHtml,
-					renderMarkdownFlag,
-					undefined,
-					liveTargetUrl,
-					sessionBridgeFor(ctx, origin),
-				);
-				ctx.ui.notify(sessionOpenedMessage("Annotation opened", session.url), "info");
-				void session
-					.waitForDecision()
-					.then(async (result) => {
-						try {
-							const outcome = classifyAnnotateOutcome(result);
-							if (outcome.notification === "closed") {
-								safeNotify(ctx, "Annotation session closed.", "info", origin);
-								return;
-							}
-							if (!outcome.feedback) {
-								if (outcome.notification === "approved") {
-									safeNotify(ctx, "Annotation approved.", "info", origin);
-									return;
-								}
-								safeNotify(ctx, "Annotation closed (no feedback).", "info", origin);
-								return;
-							}
-							const {
-								getAnnotateApprovedWithNotesPrompt,
-								getAnnotateFileFeedbackPrompt,
-							} = await loadPlannotatorPrompts();
-							const context = `${isFolder ? "Folder" : "File"}: ${absolutePath}`;
-							const prompt = outcome.promptKind === "approved-with-notes"
-								? getAnnotateApprovedWithNotesPrompt("pi", loadConfig(), {
-										context,
-										feedback: outcome.feedback,
-									})
-								: getAnnotateFileFeedbackPrompt("pi", loadConfig(), {
-										fileHeader: isFolder ? "Folder" : "File",
-										filePath: absolutePath,
-										feedback: outcome.feedback,
-									});
-							sendUserMessageWithCurrentSessionFallback(
-								pi,
-								prompt,
-								{ deliverAs: "followUp" },
-								"Plannotator annotation feedback could not be sent",
-								origin,
-							);
-							if (outcome.notification === "approved") {
-								safeNotify(ctx, "Annotation approved.", "info", origin);
-							}
-						} catch (err) {
-							reportBackgroundError(ctx, "Plannotator annotation feedback could not be sent", err, origin);
-						}
-					})
-					.catch((err) => {
-						reportBackgroundError(ctx, "Plannotator annotation session failed", err, origin);
-					});
-			} catch (err) {
-				ctx.ui.notify(
-					`Failed to start annotation UI: ${getStartupErrorMessage(err)}`,
-					"error",
-				);
-			}
+			await openAnnotation(parseAnnotateArgs(args ?? "", { liveFlags: true }), ctx);
 		},
 	});
+
+	/** A bare gated approval the agent was told to wait for (`deliverApproval`). */
+	async function sendBareApproval(origin: PiSessionIdentity): Promise<void> {
+		const { getAnnotateApprovedPrompt } = await loadPlannotatorPrompts();
+		sendUserMessageWithCurrentSessionFallback(
+			pi,
+			getAnnotateApprovedPrompt("pi", loadConfig()),
+			{ deliverAs: "followUp" },
+			"Plannotator annotation approval could not be sent",
+			origin,
+		);
+	}
+
+	/**
+	 * Annotate the last assistant message: `/plannotator-last` and an agent's
+	 * taken-over `plannotator last`. `deliverApproval` as for `openAnnotation`.
+	 */
+	async function openLastMessageAnnotation(
+		gate: boolean,
+		ctx: ExtensionContext,
+		options: { deliverApproval?: boolean } = {},
+	): Promise<AgentOpenOutcome> {
+		if (!planBrowserHtmlAvailable()) {
+			return openFailed(ctx, "Annotation UI not available. Run 'bun run build' in the pi-extension directory.");
+		}
+
+		currentPiSession.update(ctx);
+		const origin = getPiSessionIdentity(ctx);
+
+		const snapshot = getLastAssistantMessageSnapshot(ctx);
+		if (!snapshot) {
+			return openFailed(ctx, "No assistant message found in session.");
+		}
+
+		const recent = getRecentAssistantMessages(ctx, 25);
+		const pickerMessages = recent.length > 1 ? recent : undefined;
+
+		ctx.ui.notify("Opening annotation UI for last message...", "info");
+
+		try {
+			const session = await startLastMessageAnnotation(
+				ctx,
+				snapshot.text,
+				gate,
+				pickerMessages,
+				sessionBridgeFor(ctx, origin),
+			);
+			ctx.ui.notify(sessionOpenedMessage("Last-message annotation opened", session.url), "info");
+			void session
+				.waitForDecision()
+				.then(async (result) => {
+					try {
+						const outcome = classifyAnnotateOutcome(result);
+						if (outcome.notification === "closed") {
+							safeNotify(ctx, "Annotation session closed.", "info", origin);
+							return;
+						}
+						if (!outcome.feedback) {
+							if (outcome.notification === "approved") {
+								if (options.deliverApproval) await sendBareApproval(origin);
+								safeNotify(ctx, "Message approved.", "info", origin);
+								return;
+							}
+							safeNotify(ctx, "Annotation closed (no feedback).", "info", origin);
+							return;
+						}
+						// Picker may have changed which message the feedback targets; if so,
+						// look that one up in the current branch so the anchor quote matches.
+						const target = result.selectedMessageId && result.selectedMessageId !== snapshot.entryId
+							? findAssistantMessageByEntryId(ctx, result.selectedMessageId) ?? snapshot
+							: snapshot;
+						const feedback = result.feedbackScope !== "messages" && shouldAnchorLastMessageFeedback(ctx, target.entryId, origin)
+								? anchorMessageFeedback(outcome.feedback, target.text)
+								: outcome.feedback;
+						const {
+							getAnnotateApprovedWithNotesPrompt,
+							getAnnotateMessageFeedbackPrompt,
+						} = await loadPlannotatorPrompts();
+						const prompt = outcome.promptKind === "approved-with-notes"
+							? getAnnotateApprovedWithNotesPrompt("pi", loadConfig(), {
+									feedback,
+								})
+							: getAnnotateMessageFeedbackPrompt("pi", loadConfig(), {
+									feedback,
+								});
+						sendUserMessageWithCurrentSessionFallback(
+							pi,
+							prompt,
+							{ deliverAs: "followUp" },
+							"Plannotator message annotation feedback could not be sent",
+							origin,
+						);
+						if (outcome.notification === "approved") {
+							safeNotify(ctx, "Message approved.", "info", origin);
+						}
+					} catch (err) {
+						reportBackgroundError(ctx, "Plannotator message annotation feedback could not be sent", err, origin);
+					}
+				})
+				.catch((err) => {
+					reportBackgroundError(ctx, "Plannotator message annotation session failed", err, origin);
+				});
+			return { ok: true, url: session.url };
+		} catch (err) {
+			return openFailed(ctx, `Failed to start annotation UI: ${getStartupErrorMessage(err)}`);
+		}
+	}
 
 	pi.registerCommand("plannotator-last", {
 		description: "Annotate the last assistant message",
 		handler: async (args, ctx) => {
 			// Support --gate on /plannotator-last for the Stop-hook review gate.
 			const { parseAnnotateArgs } = await import("./generated/annotate-args.ts");
-			const { gate } = parseAnnotateArgs(args ?? "");
-
-			if (!hasPlanBrowserHtml()) {
-				ctx.ui.notify(
-					"Annotation UI not available. Run 'bun run build' in the pi-extension directory.",
-					"error",
-				);
-				return;
-			}
-
-			currentPiSession.update(ctx);
-			const origin = getPiSessionIdentity(ctx);
-
-			const snapshot = getLastAssistantMessageSnapshot(ctx);
-			if (!snapshot) {
-				ctx.ui.notify("No assistant message found in session.", "error");
-				return;
-			}
-
-			const recent = getRecentAssistantMessages(ctx, 25);
-			const pickerMessages = recent.length > 1 ? recent : undefined;
-
-			ctx.ui.notify("Opening annotation UI for last message...", "info");
-
-			try {
-				const session = await startLastMessageAnnotationSession(
-					ctx,
-					snapshot.text,
-					gate,
-					pickerMessages,
-					sessionBridgeFor(ctx, origin),
-				);
-				ctx.ui.notify(sessionOpenedMessage("Last-message annotation opened", session.url), "info");
-				void session
-					.waitForDecision()
-					.then(async (result) => {
-						try {
-							const outcome = classifyAnnotateOutcome(result);
-							if (outcome.notification === "closed") {
-								safeNotify(ctx, "Annotation session closed.", "info", origin);
-								return;
-							}
-							if (!outcome.feedback) {
-								if (outcome.notification === "approved") {
-									safeNotify(ctx, "Message approved.", "info", origin);
-									return;
-								}
-								safeNotify(ctx, "Annotation closed (no feedback).", "info", origin);
-								return;
-							}
-							// Picker may have changed which message the feedback targets; if so,
-							// look that one up in the current branch so the anchor quote matches.
-							const target = result.selectedMessageId && result.selectedMessageId !== snapshot.entryId
-								? findAssistantMessageByEntryId(ctx, result.selectedMessageId) ?? snapshot
-								: snapshot;
-							const feedback = result.feedbackScope !== "messages" && shouldAnchorLastMessageFeedback(ctx, target.entryId, origin)
-									? anchorMessageFeedback(outcome.feedback, target.text)
-									: outcome.feedback;
-							const {
-								getAnnotateApprovedWithNotesPrompt,
-								getAnnotateMessageFeedbackPrompt,
-							} = await loadPlannotatorPrompts();
-							const prompt = outcome.promptKind === "approved-with-notes"
-								? getAnnotateApprovedWithNotesPrompt("pi", loadConfig(), {
-										feedback,
-									})
-								: getAnnotateMessageFeedbackPrompt("pi", loadConfig(), {
-										feedback,
-									});
-							sendUserMessageWithCurrentSessionFallback(
-								pi,
-								prompt,
-								{ deliverAs: "followUp" },
-								"Plannotator message annotation feedback could not be sent",
-								origin,
-							);
-							if (outcome.notification === "approved") {
-								safeNotify(ctx, "Message approved.", "info", origin);
-							}
-						} catch (err) {
-							reportBackgroundError(ctx, "Plannotator message annotation feedback could not be sent", err, origin);
-						}
-					})
-					.catch((err) => {
-						reportBackgroundError(ctx, "Plannotator message annotation session failed", err, origin);
-					});
-			} catch (err) {
-				ctx.ui.notify(
-					`Failed to start annotation UI: ${getStartupErrorMessage(err)}`,
-					"error",
-				);
-			}
+			await openLastMessageAnnotation(parseAnnotateArgs(args ?? "").gate, ctx);
 		},
 	});
 
@@ -1701,6 +1731,38 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	}
 
 	// ── Event Handlers ───────────────────────────────────────────────────
+
+	// An agent running `plannotator annotate|review|last` through bash opens
+	// the same in-process session the slash commands open (non-blocking, Ask
+	// AI answers from this session) instead of the blocking CLI. Commands the
+	// shared parser does not take over, and sessions that cannot open a
+	// browser here, run as written.
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName !== "bash" || !ctx.hasUI) return;
+		return takeOverBashCommand(event.input.command, async (input) => {
+			// Agent-opened gates deliver a bare approval: the agent was told to wait for it.
+			const options = { deliverApproval: input.gate === true };
+			switch (input.action) {
+				case "review":
+					if (!reviewBrowserHtmlAvailable()) return null;
+					return openCodeReview(plannotatorToolArgs(input), ctx);
+				case "annotate": {
+					if (!planBrowserHtmlAvailable()) return null;
+					const { parseAnnotateArgs } = await import("./generated/annotate-args.ts");
+					// The target alone (its `@` and quote handling), with the call's flags.
+					const request = {
+						...parseAnnotateArgs(input.target ?? "", { liveFlags: true }),
+						gate: input.gate === true,
+						renderMarkdown: input.options?.markdown === true,
+					};
+					return openAnnotation(request, ctx, options);
+				}
+				case "last":
+					if (!planBrowserHtmlAvailable()) return null;
+					return openLastMessageAnnotation(false, ctx, options);
+			}
+		});
+	});
 
 	// Gate writes during planning — only markdown files inside cwd.
 	pi.on("tool_call", async (event, ctx) => {

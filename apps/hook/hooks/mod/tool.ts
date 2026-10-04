@@ -26,7 +26,7 @@ export const PLANNOTATOR_TOOL_DESCRIPTION = [
   '- action "annotate": annotate a file (markdown, text, config, HTML), a folder, or a URL; `target` is required. `gate: true` adds an Approve button for an explicit sign-off. `options.markdown: true` converts HTML or a URL to markdown first.',
   '- action "review": review code changes; `target` is an optional repository directory or a GitHub/GitLab/Bitbucket pull request URL (default: the current repository). `options.base` sets the compare branch or ref (git only).',
   '- action "last": annotate your own last assistant message; no target.',
-  'The call only opens the page. The reviewer\'s feedback arrives later as a message from the plannotator plugin, so end your turn after calling this and wait for it. Use this tool instead of running the `plannotator` CLI. Plan review is not done with this tool: it opens by itself when you exit plan mode.',
+  'The call only opens the page. The reviewer\'s feedback arrives later as a message from Plannotator, so end your turn after calling this and wait for it. Use this tool instead of running the `plannotator` CLI. Plan review is not done with this tool: it opens by itself when you exit plan mode.',
 ].join('\n')
 
 export const PLANNOTATOR_TOOL_INPUT_SCHEMA = {
@@ -159,6 +159,33 @@ export function plannotatorToolArgs(input: PlannotatorToolInput): string[] {
   }
 }
 
+/** How a host's result text names what a call opened (`plannotatorToolOpenedText`'s subject). */
+export function plannotatorToolSubject(input: PlannotatorToolInput): string {
+  const target = input.target?.replace(/\/+$/, '')
+  const base = (path: string) => path.slice(path.lastIndexOf('/') + 1) || path
+  switch (input.action) {
+    case 'last':
+      return 'your last message'
+    case 'review': {
+      if (!target) return 'local changes'
+      const pr = /^https?:\/\/[^\s/]+\/.+\/(?:pull|pull-requests|merge_requests)\/(\d+)\b/i.exec(target)
+      if (pr) return /merge_requests/i.test(target) ? `MR !${pr[1]}` : `PR #${pr[1]}`
+      return `changes in ${base(target)}`
+    }
+    case 'annotate': {
+      if (!target) return 'document'
+      if (/^https?:\/\//i.test(target)) {
+        try {
+          return new URL(target).host
+        } catch {
+          return target
+        }
+      }
+      return base(target)
+    }
+  }
+}
+
 /** The tool's result once the session is open (`url`) or still starting (no url). */
 export function plannotatorToolOpenedText(subject: string, url: string | undefined, gate: boolean): string {
   const where = url ? `Opened ${subject} in Plannotator: ${url}` : `Plannotator is starting for ${subject}; it opens in the browser when ready.`
@@ -167,8 +194,166 @@ export function plannotatorToolOpenedText(subject: string, url: string | undefin
     : 'When they send annotations, the feedback arrives. Closing it with nothing to send sends nothing.'
   return [
     where,
-    'The reviewer is looking at it now. End your turn now and wait: their decision arrives later as a message from the plannotator plugin.',
+    'The reviewer is looking at it now. End your turn now and wait: their decision arrives later as a message from Plannotator.',
     outcome,
     'Do not poll, reopen it, or run the plannotator CLI for this session.',
   ].join('\n')
+}
+
+/**
+ * The words of `command` when it is ONE simple command a shell would run
+ * without interpreting anything; null otherwise.
+ *
+ * Quoting follows the slash commands' splitter (`splitShellWords`): whitespace
+ * separates, single quotes are literal, double quotes group (a backslash
+ * escapes `"`, `\`, `$` and a backtick inside them), a backslash outside quotes
+ * escapes the next character. Where that splitter tolerates, this refuses:
+ * anything the shell would expand or treat as syntax makes the result null, so
+ * a word here is exactly the argument the program would have received. That
+ * is: an unquoted operator or redirect (`; & | < > ( )`), a line break, `$`
+ * or a backtick outside single quotes, an unquoted glob or brace (`* ? [ { }`),
+ * a `#` that starts a word (a comment), a `~` that starts a word other than
+ * `~` or `~/...` (the CLIs expand those two themselves), and an unterminated
+ * quote.
+ */
+export function simpleShellCommandWords(command: string): string[] | null {
+  const input = command.trim()
+  const words: string[] = []
+  let word = ''
+  let inWord = false
+  let quote: '"' | "'" | null = null
+
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index] as string
+
+    if (quote === "'") {
+      if (char === "'") quote = null
+      else word += char
+      continue
+    }
+
+    if (quote === '"') {
+      if (char === '"') {
+        quote = null
+      } else if (char === '\\' && index + 1 < input.length && '"\\$`'.includes(input[index + 1] as string)) {
+        word += input[index + 1]
+        index += 1
+      } else if (char === '$' || char === '`') {
+        return null
+      } else {
+        word += char
+      }
+      continue
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char
+      inWord = true
+      continue
+    }
+
+    if (char === '\\' && index + 1 < input.length) {
+      // A backslash before a line break joins lines: not one simple word.
+      if (input[index + 1] === '\n' || input[index + 1] === '\r') return null
+      word += input[index + 1]
+      inWord = true
+      index += 1
+      continue
+    }
+
+    if (char === '\n' || char === '\r') return null
+
+    if (/\s/.test(char)) {
+      if (inWord) {
+        words.push(word)
+        word = ''
+        inWord = false
+      }
+      continue
+    }
+
+    if (';&|<>()$`*?[{}'.includes(char)) return null
+    if (!inWord && char === '#') return null
+    if (!inWord && char === '~') {
+      const after = input[index + 1]
+      if (after !== undefined && after !== '/' && !/\s/.test(after)) return null
+    }
+
+    word += char
+    inWord = true
+  }
+
+  if (quote) return null
+  if (inWord) words.push(word)
+  return words
+}
+
+const COMMAND_ACTIONS: Record<string, PlannotatorToolAction> = {
+  annotate: 'annotate',
+  review: 'review',
+  'annotate-last': 'last',
+  last: 'last',
+}
+
+/**
+ * An agent's shell command (a Bash tool call) as the `plannotator` tool call
+ * that opens the same thing, or null when the command is not one to take over.
+ *
+ * A host that can deliver decisions later answers such a command itself,
+ * through the same launch as the tool, instead of running the blocking CLI:
+ * the agent gets the tool's experience (the page opens, the turn ends, the
+ * decision arrives as a message, Ask AI asks this session) even when it reached
+ * for the CLI.
+ *
+ * Taken over: one simple command (see `simpleShellCommandWords`) whose first
+ * word is `plannotator` or a path ending in `/plannotator`, with subcommand
+ * `annotate`, `review`, `annotate-last` or `last`, carrying only what the tool
+ * represents: annotate `<target>` plus `--gate` and `--markdown`; review
+ * `[target]` plus `--base <ref>`; last with no arguments. `--json` is accepted
+ * and dropped (the decision arrives as a message, not on stdout). The result
+ * passes `parsePlannotatorToolInput`.
+ *
+ * Everything else is null and runs as written: other subcommands, any other
+ * flag (`--require-approval`, `--result-file`, `--hook`, `--tailscale`,
+ * `--static`, `--app`, `--no-jina`, `--help`, ...), a repeated flag, more than
+ * one target, an environment prefix, and any shell syntax (`cd x && ...`,
+ * pipes, redirects, substitutions), so scripted strict gates keep the CLI.
+ */
+export function plannotatorCommandToToolInput(command: string): PlannotatorToolInput | null {
+  const words = simpleShellCommandWords(command)
+  if (!words || words.length < 2) return null
+  const program = words[0] as string
+  if (program !== 'plannotator' && !program.endsWith('/plannotator')) return null
+  const action = COMMAND_ACTIONS[words[1] as string]
+  if (!action) return null
+
+  const seen = new Set<string>()
+  const targets: string[] = []
+  const call: Record<string, unknown> = { action }
+  const options: Record<string, unknown> = {}
+  const rest = words.slice(2)
+  for (let index = 0; index < rest.length; index += 1) {
+    const word = rest[index] as string
+    if (!word.startsWith('-')) {
+      targets.push(word)
+      continue
+    }
+    if (seen.has(word)) return null
+    seen.add(word)
+    if (word === '--json') continue
+    if (word === '--gate' && action === 'annotate') call.gate = true
+    else if (word === '--markdown' && action === 'annotate') options.markdown = true
+    else if (word === '--base' && action === 'review') {
+      const value = rest[index + 1]
+      if (value === undefined || value.startsWith('-')) return null
+      options.base = value
+      index += 1
+    } else return null
+  }
+
+  if (targets.length > 1) return null
+  if (targets.length === 1) call.target = targets[0]
+  if (Object.keys(options).length > 0) call.options = options
+  const parsed = parsePlannotatorToolInput(call)
+  return parsed.ok ? parsed.input : null
 }

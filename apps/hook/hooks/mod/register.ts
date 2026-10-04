@@ -30,6 +30,9 @@
  * - The `plannotator` tool (`$.tool.register`, tool.ts): when Claude itself is
  *   asked to open something in Plannotator it calls this tool instead of the
  *   CLI; the call goes through the same detached launch and returns at once.
+ *   A Bash call that runs the CLI in a form the tool can represent
+ *   (`plannotator annotate|review|last ...`, take-over.ts) is answered the
+ *   same way instead of running.
  * - "Ask this session": each launched server gets a pull-bridge token; the
  *   mod polls it and runs the reviewer's questions as turns (bridge.ts).
  * - `PLANNOTATOR_SESSION_TAG=claude-code:<session id>` in the environment
@@ -45,6 +48,7 @@ import { resolveClaudeModEnabled } from './enabled'
 import type { Host } from './host'
 import { COMMANDS, dataDirOf, isModCommand, waitArgv } from './launch'
 import { PLAN_TOOL } from './plan'
+import { answerShellCall, SHELL_TOOL, shellTakeOver, SUBAGENT_LAST_DENY } from './take-over'
 import { PLANNOTATOR_TOOL_DESCRIPTION, PLANNOTATOR_TOOL_INPUT_SCHEMA, PLANNOTATOR_TOOL_NAME } from './tool'
 
 // Minimal local types: the engine's declarations are written by `/plugin-types`
@@ -252,13 +256,20 @@ export function register(on: On) {
     if (allowed && toolName && e.tool === toolName) {
       const instance = await currentMod($)
       if (!instance) return { deny: 'Plannotator is not available in this session; run the plannotator CLI instead.' }
-      // `last` reads the main session's transcript, so from a subagent it
-      // would annotate a message the subagent never wrote.
-      if (e.agentId && e.action === 'last') {
-        return { deny: 'Invalid plannotator call: action "last" annotates the main session\'s last message and is not available to a subagent.' }
-      }
+      if (e.agentId && e.action === 'last') return { deny: SUBAGENT_LAST_DENY }
       const answer = await instance.runTool(toolArgsOf(e))
       return 'deny' in answer ? { deny: answer.deny } : { result: answer.text }
+    }
+    // Claude running `plannotator annotate|review|last` in Bash: the same
+    // launch and result as the tool (take-over.ts); anything the tool cannot
+    // represent runs as written.
+    if (allowed && e.tool === SHELL_TOOL) {
+      const takeOver = shellTakeOver(e.command, !!e.agentId)
+      if (!takeOver) return next(e)
+      if ('deny' in takeOver) return { deny: takeOver.deny }
+      const instance = await currentMod($)
+      if (!instance) return next(e)
+      return answerShellCall(instance, takeOver.input)
     }
     // Only the main loop's ExitPlanMode: a subagent's keeps the classic flow.
     if (!allowed || e.tool !== PLAN_TOOL || e.agentId) return next(e)

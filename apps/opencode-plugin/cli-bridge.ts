@@ -14,6 +14,7 @@ import { parseAnnotateArgs, type ParsedAnnotateArgs } from "@plannotator/shared/
 import { parseReviewArgs, resolveReviewTarget } from "@plannotator/shared/review-args";
 import {
   composeReviewApprovedMessage,
+  getAnnotateApprovedPrompt,
   getAnnotateApprovedWithNotesPrompt,
   getAnnotateFileFeedbackPrompt,
   getAnnotateMessageFeedbackPrompt,
@@ -98,6 +99,8 @@ interface RunCliOptions {
    * in its environment, and once it is listening this process long-polls it.
    */
   sessionBridge?: SessionBridge;
+  /** The server is listening at `url` (from the ready file). Called once per url. */
+  onReady?: (url: string) => void;
 }
 
 interface RunCliResult {
@@ -347,7 +350,7 @@ function logReadyFile(
   readyLabel: string,
   loggedUrls: Set<string>,
   toastedUrls: Set<string>,
-  onServer?: (metadata: { port: number; isRemote: boolean }) => void,
+  onServer?: (metadata: { url: string; port?: number; isRemote: boolean }) => void,
 ): void {
   if (!existsSync(readyFile)) return;
 
@@ -357,9 +360,11 @@ function logReadyFile(
     try {
       const metadata = JSON.parse(line) as { url?: string; port?: unknown; isRemote?: unknown };
       if (!metadata.url || loggedUrls.has(metadata.url)) continue;
-      if (typeof metadata.port === "number") {
-        onServer?.({ port: metadata.port, isRemote: metadata.isRemote === true });
-      }
+      onServer?.({
+        url: metadata.url,
+        ...(typeof metadata.port === "number" ? { port: metadata.port } : {}),
+        isRemote: metadata.isRemote === true,
+      });
       loggedUrls.add(metadata.url);
       log(client, "info", `[Plannotator] Open ${readyLabel}: ${metadata.url}`);
       toastPlannotatorUrl(client, `Open ${readyLabel}: ${metadata.url}`, toastedUrls);
@@ -409,9 +414,10 @@ async function runPlannotatorCli(options: RunCliOptions): Promise<RunCliResult> 
   const bridgeClient = new AbortController();
   let bridgeClientStarted = false;
   // The server is up: start answering its "Ask this session" questions.
-  const onServer = ({ port, isRemote }: { port: number; isRemote: boolean }) => {
+  const onServer = ({ url, port, isRemote }: { url: string; port?: number; isRemote: boolean }) => {
+    options.onReady?.(url);
     // The server keeps the bridge off in remote mode; nothing to poll there.
-    if (!sessionBridge || !bridgeToken || bridgeClientStarted || isRemote) return;
+    if (port === undefined || !sessionBridge || !bridgeToken || bridgeClientStarted || isRemote) return;
     bridgeClientStarted = true;
     void runPullSessionBridgeClient({
       baseUrl: `http://127.0.0.1:${port}`,
@@ -762,8 +768,27 @@ export async function handleCliCommand(input: {
    * once the command is about to open a Plannotator UI; disposed when it ends.
    */
   createSessionBridge?: () => DisposableSessionBridge | undefined;
+  /**
+   * The Plannotator server is listening at `url`. Lets a caller that runs the
+   * command in the background (an agent's shell call the plugin took over,
+   * `shell-takeover.ts`) answer as soon as the page is open.
+   */
+  onReady?: (url: string) => void;
+  /** The command failed before or instead of a decision; `message` says why. */
+  onError?: (message: string) => void;
+  /**
+   * Annotate only: a bare approval still reaches the session, as the approved
+   * prompt. Set for gated sessions an agent opened itself and was told to wait
+   * for the sign-off; a slash command's bare approval stays silent.
+   */
+  deliverApproval?: boolean;
 }): Promise<void> {
   const cwd = input.cwd ?? process.cwd();
+  const fail = (message: string, toast = false) => {
+    input.onError?.(message);
+    if (toast) logAndToastError(input.client, message);
+    else log(input.client, "error", message);
+  };
   let ownedBridge: DisposableSessionBridge | undefined;
   const sessionBridge = (): SessionBridge | undefined => {
     if (!ownedBridge) {
@@ -788,7 +813,7 @@ export async function handleCliCommand(input: {
       try {
         directoryTarget = resolveReviewTarget(parsed, cwd).directory;
       } catch (error) {
-        logAndToastError(input.client, `[Plannotator] ${error instanceof Error ? error.message : String(error)}`);
+        fail(`[Plannotator] ${error instanceof Error ? error.message : String(error)}`, true);
         return;
       }
       const command = directoryTarget ? "opencode-review-directory" : "opencode-review";
@@ -814,13 +839,16 @@ export async function handleCliCommand(input: {
         readyLabel: "code review",
         bridge: input.bridge,
         sessionBridge: sessionBridge(),
+        onReady: input.onReady,
       });
       if (result.exitCode !== 0) {
-        log(input.client, "error", result.stderr.trim() || `Plannotator CLI exited with code ${result.exitCode}`);
         // >= 0.27.11 answers "Unknown command"; older binaries fall into the
         // plan hook path and answer "No plan content in hook event".
         if (directoryTarget && /unknown (?:subcommand|command)|no plan content in hook event/i.test(result.stderr)) {
-          logAndToastError(input.client, "Update the Plannotator CLI to review a directory from OpenCode.");
+          log(input.client, "error", result.stderr.trim());
+          fail("Update the Plannotator CLI to review a directory from OpenCode.", true);
+        } else {
+          fail(result.stderr.trim() || `Plannotator CLI exited with code ${result.exitCode}`);
         }
         return;
       }
@@ -844,11 +872,11 @@ export async function handleCliCommand(input: {
     if (input.command === "plannotator-annotate") {
       const parsed = parseAnnotateArgs(input.rawArgs);
       if (!parsed.filePath) {
-        log(input.client, "error", "Usage: /plannotator-annotate <file.md | file.txt | file.html | https://... | folder/> [--markdown] [--no-jina] [--gate] [--json]");
+        fail("Usage: /plannotator-annotate <file.md | file.txt | file.html | https://... | folder/> [--markdown] [--no-jina] [--gate] [--json]");
         return;
       }
       if (!canLaunchGatedAnnotate(parsed, input.sessionId)) {
-        log(input.client, "error", "No active session.");
+        fail("No active session.");
         return;
       }
 
@@ -859,9 +887,10 @@ export async function handleCliCommand(input: {
         readyLabel: "annotation UI",
         bridge: input.bridge,
         sessionBridge: sessionBridge(),
+        onReady: input.onReady,
       });
       if (result.exitCode !== 0) {
-        log(input.client, "error", result.stderr.trim() || `Plannotator CLI exited with code ${result.exitCode}`);
+        fail(result.stderr.trim() || `Plannotator CLI exited with code ${result.exitCode}`);
         return;
       }
 
@@ -871,7 +900,9 @@ export async function handleCliCommand(input: {
         kind: "file",
         fileHeader: getAnnotateFileHeader(parsed.filePath, input.cwd),
         filePath: parsed.filePath,
-      });
+      }) ?? (input.deliverApproval && parsed.gate && outcome.decision === "approved"
+        ? getAnnotateApprovedPrompt("opencode")
+        : null);
       if (prompt && input.sessionId) {
         // No annotated message here: the agent the user is talking to reads
         // the feedback, not OpenCode's default agent (#1612).
@@ -892,13 +923,13 @@ export async function handleCliCommand(input: {
 
     if (input.command === "plannotator-last") {
       if (!input.sessionId) {
-        log(input.client, "error", "No active session.");
+        fail("No active session.");
         return;
       }
 
       const recentMessages = await getRecentAssistantMessages(input.client, input.sessionId);
       if (recentMessages.length === 0) {
-        log(input.client, "error", "No assistant message found in session.");
+        fail("No assistant message found in session.");
         return;
       }
 
@@ -915,9 +946,10 @@ export async function handleCliCommand(input: {
         readyLabel: "annotation UI",
         bridge: input.bridge,
         sessionBridge: sessionBridge(),
+        onReady: input.onReady,
       });
       if (result.exitCode !== 0) {
-        log(input.client, "error", result.stderr.trim() || `Plannotator CLI exited with code ${result.exitCode}`);
+        fail(result.stderr.trim() || `Plannotator CLI exited with code ${result.exitCode}`);
         return;
       }
 
@@ -945,7 +977,7 @@ export async function handleCliCommand(input: {
     }
 
   } catch (error) {
-    log(input.client, "error", `[Plannotator] ${error instanceof Error ? error.message : String(error)}`);
+    fail(`[Plannotator] ${error instanceof Error ? error.message : String(error)}`);
     if (isOpenCodePromptDeliveryError(error)) throw error;
   } finally {
     ownedBridge?.dispose?.();

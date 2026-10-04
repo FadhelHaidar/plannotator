@@ -29,6 +29,7 @@
   },
   "files": [
     "index.ts",
+    "agent-command-takeover.ts",
     "bundled-skill.ts",
     "annotate-outcome.ts",
     "assistant-message.ts",
