@@ -1740,24 +1740,43 @@ if defined IFL (set "IFL=!IFL!,"%~1"") else (set "IFL="%~1"")
 goto :eof
 
 REM ======================================================================
-REM Print the PATH-setup hint if INSTALL_DIR isn't already on PATH. Called by
-REM both the --minimal early exit and the normal flow (mirrors install.sh's
-REM print_path_advice).
+REM If INSTALL_DIR isn't on this session's PATH, add it to the USER PATH (as
+REM install.ps1's Show-PathAdvice does) and print how to pick it up. The
+REM Claude Code plugin hooks run bare `plannotator`, so the binary has to be
+REM on PATH. Called by both the --minimal early exit and the normal flow.
+REM
+REM The PowerShell one-liner edits HKCU\Environment\Path through the registry
+REM API, read unexpanded and written back with its own kind (REG_EXPAND_SZ on
+REM most systems) so %VARS% in other entries survive, the same way
+REM `plannotator uninstall` removes the entry again. It appends only when no
+REM entry already names INSTALL_DIR (raw or expanded, case-insensitive,
+REM trailing backslash ignored), so re-running the installer never duplicates
+REM it. The directory travels in PLN_PATH_DIR, never interpolated into the
+REM command, and the command carries no double quote, percent sign,
+REM exclamation mark, caret, ampersand or redirect for cmd.exe to parse (its
+REM one pipe is inside the quotes); the DllImport quotes for the settings
+REM broadcast are built from [char]34. The call sits outside any parenthesized
+REM block. Best effort: a failure prints the manual command instead and never
+REM fails the install.
 REM ======================================================================
 :PrintPathAdvice
 echo !PATH! | findstr /i /c:"!INSTALL_DIR!" >nul
-if !ERRORLEVEL! neq 0 (
-    echo.
-    echo !INSTALL_DIR! is not in your PATH.
-    echo.
-    echo Add it permanently with:
+if !ERRORLEVEL! equ 0 goto :PathAdviceTail
+echo.
+echo !INSTALL_DIR! is not in your PATH. Adding it to your user PATH...
+set "PLN_PATH_DIR=!INSTALL_DIR!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $d=$env:PLN_PATH_DIR.Trim().TrimEnd('\'); $k=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment'); $p=$k.GetValue('Path',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); $kind=[Microsoft.Win32.RegistryValueKind]::ExpandString; if($null -ne $p){$kind=$k.GetValueKind('Path')}; $p=[string]$p; $has=@($p -split ';' | Where-Object { $e=$_.Trim().TrimEnd('\'); ($e -ine '') -and (($e -ieq $d) -or ([Environment]::ExpandEnvironmentVariables($e).TrimEnd('\') -ieq $d)) }); if($has.Count -gt 0){$k.Close(); Write-Output 'It is already in your user PATH; open a new terminal to pick it up.'; exit 0}; if($p.Trim() -eq ''){$n=$d}else{$n=$p.TrimEnd(';') + ';' + $d}; $k.SetValue('Path',$n,$kind); $k.Close(); Write-Output 'Added. Restart your terminal for the change to take effect.'; $q=[char]34; $sig='[DllImport('+$q+'user32.dll'+$q+',CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd,uint msg,UIntPtr wParam,string lParam,uint flags,uint timeout,out UIntPtr result);'; try{Add-Type -Namespace Plannotator -Name PathBroadcast -MemberDefinition $sig; $r=[UIntPtr]::Zero; [void][Plannotator.PathBroadcast]::SendMessageTimeout([IntPtr]0xffff,0x1A,[UIntPtr]::Zero,'Environment',0x2,1000,[ref]$r)}catch{}; exit 0"
+if errorlevel 1 (
+    echo Could not update your user PATH automatically. Add it permanently with:
     echo.
     echo   setx PATH "%%PATH%%;!INSTALL_DIR!"
-    echo.
-    echo Or add it for this session only:
-    echo.
-    echo   set PATH=%%PATH%%;!INSTALL_DIR!
 )
+set "PLN_PATH_DIR="
+echo.
+echo Or add it for this session only:
+echo.
+echo   set PATH=%%PATH%%;!INSTALL_DIR!
+:PathAdviceTail
 echo.
 echo To uninstall later: plannotator uninstall
 goto :eof

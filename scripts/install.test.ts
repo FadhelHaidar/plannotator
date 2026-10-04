@@ -1022,6 +1022,82 @@ describe("install.cmd", () => {
     expect(printPathAdvice).toBeGreaterThan(0);
   });
 
+  // The Claude Code plugin hooks run bare `plannotator` (#1689), so the
+  // binary's directory has to be on the user PATH, which install.ps1 already
+  // writes. install.cmd used to only print advice.
+  describe(":PrintPathAdvice adds INSTALL_DIR to the user PATH", () => {
+    const start = script.indexOf("\n:PrintPathAdvice\n");
+    const end = script.indexOf("goto :eof", start);
+    const body = script.slice(start, end);
+    const psLine = body.split("\n").find((line) => line.startsWith("powershell ")) ?? "";
+    const command = psLine.slice(psLine.indexOf('-Command "') + '-Command "'.length, psLine.lastIndexOf('"'));
+
+    test("runs one top-level PowerShell call, outside any parenthesized block", () => {
+      expect(start).toBeGreaterThan(0);
+      expect(psLine).toStartWith("powershell -NoProfile -ExecutionPolicy Bypass -Command \"");
+      expect(psLine.endsWith('"')).toBe(true);
+      // No enclosing `(` block: every line before it at column 0 or a label.
+      const before = body.slice(0, body.indexOf(psLine));
+      expect(before.split("(").length).toBe(before.split(")").length);
+    });
+
+    test("the command carries nothing cmd.exe would reinterpret", () => {
+      expect(command.length).toBeGreaterThan(100);
+      // Delayed expansion is on: `!` would be eaten; `%` expands; the quote
+      // would end the argument; `^`, `&`, `<`, `>` are cmd operators.
+      for (const ch of ['"', "%", "!", "^", "&", "<", ">"]) {
+        expect(command.includes(ch), `install.cmd PATH command contains ${ch}`).toBe(false);
+      }
+    });
+
+    test("passes the directory through the environment, never interpolated", () => {
+      expect(body).toContain('set "PLN_PATH_DIR=!INSTALL_DIR!"');
+      expect(command).toContain("$env:PLN_PATH_DIR");
+      expect(command).not.toContain("INSTALL_DIR");
+      expect(body).toContain('set "PLN_PATH_DIR="');
+    });
+
+    test("edits the user PATH through the registry, unexpanded, keeping its kind, without duplicates", () => {
+      expect(command).toContain("[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')");
+      expect(command).toContain("DoNotExpandEnvironmentNames");
+      expect(command).toContain("$k.GetValueKind('Path')");
+      expect(command).toContain("$k.SetValue('Path',$n,$kind)");
+      // Idempotent: an existing entry (raw or expanded, case-insensitive,
+      // trailing backslash ignored) exits before any write.
+      expect(command).toContain("-ieq $d");
+      expect(command).toContain("ExpandEnvironmentVariables");
+      expect(command.indexOf("if($has.Count -gt 0)")).toBeLessThan(command.indexOf("$k.SetValue("));
+      // Not the 1024-char-truncating setx, and not the machine PATH.
+      expect(command).not.toContain("setx");
+      expect(command).not.toContain("LocalMachine");
+    });
+
+    test("keeps the printed note and falls back to manual advice when PowerShell fails", () => {
+      expect(body).toContain("is not in your PATH. Adding it to your user PATH...");
+      expect(body).toContain("if errorlevel 1 (");
+      expect(body).toContain('echo   setx PATH "%%PATH%%;!INSTALL_DIR!"');
+      expect(body).toContain("echo   set PATH=%%PATH%%;!INSTALL_DIR!");
+      expect(script.slice(end)).toStartWith("goto :eof");
+    });
+
+    const powershell = Bun.which("pwsh") ?? Bun.which("powershell") ?? Bun.which("powershell.exe");
+    test.skipIf(!powershell)("the command parses cleanly in a real PowerShell (parse only, no registry access)", async () => {
+      const proc = Bun.spawn(
+        [
+          powershell!,
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "$errors=$null; [void][System.Management.Automation.Language.Parser]::ParseInput($env:PLANNOTATOR_TEST_SCRIPT,[ref]$null,[ref]$errors); if($errors.Count -gt 0){$errors | ForEach-Object { Write-Output $_.Message }; exit 1}; exit 0",
+        ],
+        { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, PLANNOTATOR_TEST_SCRIPT: command } },
+      );
+      const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+      expect(stdout.trim()).toBe("");
+      expect(exitCode).toBe(0);
+    }, 60_000);
+  });
+
   test("per-agent skip opt-outs: flags, env vars, config keys, precedence (#1178)", () => {
     expect(script).toContain('if /i "%~1"=="--skip-codex"');
     expect(script).toContain('if /i "%~1"=="--skip-gemini"');
