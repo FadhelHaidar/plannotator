@@ -909,6 +909,38 @@ construction. `@plannotator/ui` exposes no first-run-suppression seam on
 `configurePlannotatorUI`; a host that wants the announcement off installs its
 own `storageBackend` (the documented escape hatch) and pre-seeds the key.
 
+### First-run "Ask this session" announcement
+
+A one-time panel for 0.28.0's integrated sessions: Ask AI answered by the agent session that opened
+Plannotator, and reviews that no longer hold that session. Same shape as the terminal-tools
+announcement above: `packages/ui/components/AskSessionAnnouncementDialog.tsx` (portal, `z-[100]`,
+Escape / Tab wrap / focus restore, backdrop dismiss, capture-phase keydown that swallows
+`Mod+Enter`, `data-ask-session-announcement-dialog`) and `packages/ui/utils/askSessionAnnouncement.ts`
+(one plain cookie, `plannotator-announce-ask-session-seen` = `'1'`, shared by every surface; not a
+settings-registry entry, for the same seeding reason).
+
+**Who sees it:** plan review, annotate and code review sessions whose origin is `claude-code`, `pi`
+or `opencode` (`askSessionAgentForOrigin`), once `/api/ai/capabilities` has answered with Ask AI
+available. Other origins, `PLANNOTATOR_AI=disabled`, archive / shared / no-server sessions, the
+compact touch shell and the initial load never show it and never consume the cookie. The headline
+names the host; the footer says "This session is connected" when the server offers the session
+bridge (`hasSessionBridge`), and otherwise one short line on what gets it (Claude Code 2.1.287+ and
+the latest plugin; `pi update --extensions`; OpenCode 2 and the installer). OpenCode's copy says
+"code review and annotate no longer hold the session" because its plan review still does.
+
+**Ordering:** after the terminal-tools announcement and never on the same load
+(`askSessionAnnouncementPendingThisLoad` is false while that cookie is unset), so a fresh browser
+sees terminal tools first and this one on the next load; behind every chain dialog in both apps
+(the permission-mode setup included). Code review's destination spotlight, auto-viewed toast and
+history-shortcut guard defer behind it like they do behind terminal tools.
+
+**Media:** real footage, hosted like the terminal-tools demos:
+`apps/marketing/public/assets/ask-this-session-demo.{mp4,webm}` + `ask-this-session-poster.jpg`
+(1280x800, ~35 s). Recorded from a real Claude Code 2.1.289 session (real plugin and mod, real
+compiled CLI, real review app) whose model calls went to a scripted local stand-in for the
+Messages API, so the question, the Read tool call and the streamed answer are real traffic with
+scripted model text. Offline it says the video could not load; reduced motion waits on the poster.
+
 ### Review drafts and PR pushes (#1590)
 
 Code-review drafts (`/api/draft`) are keyed by `contentHash(rawPatch)`, so a local review whose diff changes still starts without its old draft (unchanged, out of scope). **PR mode only** additionally stores the draft under a stable target key, `prDraftTargetKey(meta, scope)` = `pr-` + hash of platform + host + repo (`owner/repo` or GitLab `projectPath`, lower-cased) + PR number + diff scope (`layer` / `full-stack` are different patches). All of it lives in `packages/shared/review-draft.ts` (vendored to Pi); both review servers hold one `createReviewDraftSession()` and route `/api/draft`, `/api/feedback` and `/api/exit` through it (without a target key every call is the plain `draft.ts` call, including the historical always-`ok` save response).

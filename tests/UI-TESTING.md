@@ -12,6 +12,7 @@ steps to ensure your changes work correctly.
 5. [Decision Control Manual Checklist](#decision-control-manual-checklist)
 6. [WebMCP Manual Checklist](#webmcp-manual-checklist)
 7. [Terminal-Tools Announcement Manual Checklist](#terminal-tools-announcement-manual-checklist)
+   - [Ask This Session Announcement Manual Checklist](#ask-this-session-announcement-manual-checklist)
 8. [HTML Sibling-Link Manual Checklist](#html-sibling-link-manual-checklist)
 9. [Cross-File Annotations Manual Checklist](#cross-file-annotations-manual-checklist)
 
@@ -509,6 +510,27 @@ not hand the turn to an earlier dialog.
 8. **Theme and width.** Toggle light/dark: the panel chrome follows the active palette around
    the dark footage. At ~400px wide the video spans the panel, the headline, switch and actions
    wrap without horizontal overflow, and "Got it" stays reachable.
+
+## Ask This Session Announcement Manual Checklist
+
+Not CI. The gate is one cookie, `plannotator-announce-ask-session-seen`. Seed
+`plannotator-announce-tui-herdr-seen=1` (and the other first-run keys) so the chain reaches it.
+
+1. **Who sees it.** Open a review from Claude Code (`/plannotator-review`), Pi or OpenCode: the
+   announcement opens, its headline names that agent, and the footer says the session is connected
+   (green dot) when Ask AI shows "Ask this session". Open one with `PLANNOTATOR_ORIGIN=codex`: no
+   announcement, cookie still unset. With `PLANNOTATOR_AI=disabled`: none either, cookie unset.
+2. **Not connected yet.** A Claude Code / Pi / OpenCode session without the bridge (older plugin,
+   `PLANNOTATOR_CLAUDE_MOD=0`) shows the one-line "Needs …" setup hint instead of the green dot.
+3. **One announcement per load.** Clear both announcement cookies: the terminal-tools one shows;
+   dismiss it, and this one does NOT follow on the same load. Reload: now this one shows.
+4. **Exits and keyboard.** Got it, `Escape` and a click on the backdrop all close it and write the
+   cookie. `Tab` wraps inside it; `Mod+Enter` approves nothing and posts nothing.
+5. **Suppressed, not consumed.** Archive, `#share` links and the compact touch shell never show it
+   and leave the cookie unset.
+6. **Video.** Muted, looping autoplay from `https://plannotator.ai/assets/ask-this-session-demo.*`;
+   with "Reduce motion" the poster waits behind a play button; offline the frame keeps its place
+   and says the video could not load. On a short window (e.g. 1280x640) the whole panel fits.
 
 ## HTML Sibling-Link Manual Checklist
 
