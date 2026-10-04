@@ -261,8 +261,8 @@ describe('register', () => {
     expect(w.runs.some((argv) => argv[3] === 'plannotator-launch')).toBe(false)
   })
 
-  test('knob off: a Bash plannotator command runs as written', async ($: any, on: any) => {
-    const w = world(on, { enabled: false })
+  test('knob off (PLANNOTATOR_CLAUDE_MOD=0): a Bash plannotator command runs as written', async ($: any, on: any) => {
+    const w = world(on, { modEnv: '0' })
     on('tool.call', () => ({ result: { stdout: 'the command ran', stderr: '', interrupted: false } }))
     await $.session.start(SESSION)
 
