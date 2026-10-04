@@ -3,6 +3,12 @@ import { useEffect, useState } from 'react';
 /** How long after the initial load an announcement may still open. */
 export const FIRST_RUN_ANNOUNCEMENT_WINDOW_MS = 4000;
 
+/**
+ * How long after the initial load a window blur is still taken for the app's
+ * own startup (a viewer focusing its iframe) rather than the reader.
+ */
+export const FIRST_RUN_ANNOUNCEMENT_BLUR_GRACE_MS = 1000;
+
 type Phase = 'waiting' | 'shown' | 'missed';
 
 function isEditable(element: Element | null): boolean {
@@ -15,6 +21,15 @@ function isEditable(element: Element | null): boolean {
   return !['button', 'checkbox', 'radio', 'submit', 'reset', 'range', 'color', 'file', 'image'].includes(type);
 }
 
+/**
+ * The reader is in something the parent cannot see into: a text field, or an
+ * iframe (the raw-HTML and live-app annotate surfaces), where their typing
+ * never reaches this document's listeners.
+ */
+function isWorkingIn(element: Element | null): boolean {
+  return isEditable(element) || element instanceof HTMLIFrameElement;
+}
+
 interface Options {
   /** The announcement has not been seen (latched at mount). */
   readonly pending: boolean;
@@ -23,6 +38,7 @@ interface Options {
   /** The initial payload has loaded; the window's clock starts here. */
   readonly armed: boolean;
   readonly windowMs?: number;
+  readonly blurGraceMs?: number;
 }
 
 /**
@@ -39,6 +55,7 @@ export function useFirstRunAnnouncementWindow({
   eligible,
   armed,
   windowMs = FIRST_RUN_ANNOUNCEMENT_WINDOW_MS,
+  blurGraceMs = FIRST_RUN_ANNOUNCEMENT_BLUR_GRACE_MS,
 }: Options): boolean {
   const [phase, setPhase] = useState<Phase>('waiting');
 
@@ -59,6 +76,23 @@ export function useFirstRunAnnouncementWindow({
     };
   }, [phase, pending]);
 
+  // Work inside an iframe (raw-HTML or live-app annotate) never reaches the
+  // listeners above, but moving into it blurs this window. Counted only after
+  // the app's own startup, which may focus a viewer iframe by itself.
+  useEffect(() => {
+    if (phase !== 'waiting' || !pending || !armed) return;
+    const miss = () => setPhase((current) => (current === 'waiting' ? 'missed' : current));
+    let listening = false;
+    const grace = setTimeout(() => {
+      listening = true;
+      window.addEventListener('blur', miss);
+    }, blurGraceMs);
+    return () => {
+      clearTimeout(grace);
+      if (listening) window.removeEventListener('blur', miss);
+    };
+  }, [phase, pending, armed, blurGraceMs]);
+
   // So does time, counted from the end of the initial load.
   useEffect(() => {
     if (phase !== 'waiting' || !pending || !armed) return;
@@ -68,11 +102,12 @@ export function useFirstRunAnnouncementWindow({
     return () => clearTimeout(timer);
   }, [phase, pending, armed, windowMs]);
 
-  // Open while the window is still open. Never over a field the reader is in
-  // (a comment composer, a search box), even an autofocused one.
+  // Open while the window is still open. Never over a field or a framed page
+  // the reader is in (a comment composer, a search box, a raw-HTML page), even
+  // an autofocused one.
   useEffect(() => {
     if (phase !== 'waiting' || !pending || !eligible) return;
-    setPhase(isEditable(document.activeElement) ? 'missed' : 'shown');
+    setPhase(isWorkingIn(document.activeElement) ? 'missed' : 'shown');
   }, [phase, pending, eligible]);
 
   return pending && phase === 'shown';

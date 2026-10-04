@@ -933,7 +933,9 @@ its plan review still does.
 
 **Timing:** `useFirstRunAnnouncementWindow` (`packages/ui/hooks/`) lets it open only before the
 reader's first pointer press, key press or focus into a text field, within 4 s of the initial load,
-and never while a text field (a comment composer) has focus. Capabilities can answer late (model
+and never while a text field (a comment composer) or an iframe has focus. Work inside the raw-HTML
+and live-app iframes never reaches the parent's listeners, so a window `blur` after the first
+second (the viewer's own startup may focus its iframe) also closes the window. Capabilities can answer late (model
 discovery), and a dialog that opened then would take focus mid-comment and be dismissed unread by
 the next Space or Enter; instead it misses the load, cookie unwritten. Once open it stays until
 dismissed.

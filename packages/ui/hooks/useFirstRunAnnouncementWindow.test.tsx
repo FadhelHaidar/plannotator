@@ -12,10 +12,11 @@ interface Props {
   readonly eligible?: boolean;
   readonly armed?: boolean;
   readonly windowMs?: number;
+  readonly blurGraceMs?: number;
 }
 
-function Probe({ pending = true, eligible = false, armed = true, windowMs = 10_000 }: Props) {
-  const visible = useFirstRunAnnouncementWindow({ pending, eligible, armed, windowMs });
+function Probe({ pending = true, eligible = false, armed = true, windowMs = 10_000, blurGraceMs = 1000 }: Props) {
+  const visible = useFirstRunAnnouncementWindow({ pending, eligible, armed, windowMs, blurGraceMs });
   return <div data-probe={visible ? 'shown' : 'hidden'} />;
 }
 
@@ -83,6 +84,34 @@ describe('useFirstRunAnnouncementWindow', () => {
     textarea.focus();
     await render({ eligible: true });
     expect(state()).toBe('hidden');
+  });
+
+  test.skipIf(!hasDom)('never opens while the reader is inside a framed page', async () => {
+    // Raw-HTML and live-app annotate: typing in the iframe never reaches this
+    // document, and the iframe is what the parent sees as focused.
+    const frame = document.createElement('iframe');
+    frame.tabIndex = 0;
+    document.body.appendChild(frame);
+    frame.focus();
+    expect(document.activeElement).toBe(frame);
+    await render({ eligible: true });
+    expect(state()).toBe('hidden');
+  });
+
+  test.skipIf(!hasDom)('leaving the window (into a framed page) after startup closes the window', async () => {
+    await render({ eligible: false, blurGraceMs: 10 });
+    await wait(30);
+    await act(async () => { window.dispatchEvent(new FocusEvent('blur')); });
+    await render({ eligible: true, blurGraceMs: 10 });
+    expect(state()).toBe('hidden');
+  });
+
+  test.skipIf(!hasDom)("a blur during the app's own startup does not count", async () => {
+    // A viewer that focuses its iframe while loading is not the reader working.
+    await render({ eligible: false, blurGraceMs: 200 });
+    await act(async () => { window.dispatchEvent(new FocusEvent('blur')); });
+    await render({ eligible: true, blurGraceMs: 200 });
+    expect(state()).toBe('shown');
   });
 
   test.skipIf(!hasDom)('conditions that arrive after the window (a slow capabilities answer) miss this load', async () => {
