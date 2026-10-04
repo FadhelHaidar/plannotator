@@ -148,7 +148,7 @@ claude --plugin-dir ./apps/hook
 | `PLANNOTATOR_SHARE` | Set to `disabled` to turn off URL sharing entirely, including Guided Review share links (the review UI hides "Create share link", `POST /api/guide/:jobId/share` answers `403 { error: "sharing disabled" }`, and `plannotator guide share` refuses with exit 1). Default: enabled. Can also be set via `~/.plannotator/config.json` (`{ "share": "disabled" }`); the env var takes precedence. |
 | `PLANNOTATOR_SHARE_URL` | Custom base URL for share links (self-hosted portal). Default: `https://share.plannotator.ai`. |
 | `PLANNOTATOR_PASTE_URL` | Base URL of the paste service API for short URL sharing. Default: `https://plannotator-paste.plannotator.workers.dev`. |
-| `PLANNOTATOR_CLAUDE_MOD` | Opt-in switch for the Claude Code mod (non-blocking plan review, annotate, code review and annotate-last, plus Ask this session; see "Claude Code mod"). Set to `1` / `true` / `on` to enable, `0` / `false` / `off` / `disabled` to force off; empty or unrecognized counts as unset. **Default: off**: a Claude Code that runs hooks modules (2.1.287+) loads the plugin's module for everyone, so until the owner makes it the default the module stays inert (every hook passes through, no command or tool is registered, no environment is set) and the classic PermissionRequest hook and `/plannotator-*` skills run exactly as before. Can also be set via `~/.plannotator/config.json` (`{ "claudeCodeMod": true }`, read from the data dir); the env var takes precedence (`resolveClaudeCodeMod` in `packages/shared/config.ts`, mirrored by `apps/hook/hooks/mod/enabled.ts` because a hooks module can import only its own files; `enabled.test.ts` keeps them in step). Read once when Claude Code starts, so a change applies to the next session start. Set it in the shell that starts Claude Code or in Claude Code's `settings.json` `env`. |
+| `PLANNOTATOR_CLAUDE_MOD` | Switch for the Claude Code mod (non-blocking plan review, annotate, code review and annotate-last, plus Ask this session; see "Claude Code mod"). **Default: on** wherever Claude Code runs hooks modules (2.1.287+, interactive CLI sessions; the mod still stands down by itself in `-p` / SDK sessions and where `/bin/sh` is missing, i.e. Windows). Set to `0` / `false` / `off` / `disabled` to turn it off, which leaves the module inert (every hook passes through, no command or tool is registered, no environment is set) so the classic PermissionRequest hook and `/plannotator-*` skills run exactly as before; `1` / `true` / `on` force it on, and empty or unrecognized counts as unset (on). Can also be turned off via `~/.plannotator/config.json` (`{ "claudeCodeMod": false }`, read from the data dir); the env var takes precedence (`resolveClaudeCodeMod` in `packages/shared/config.ts`, mirrored by `apps/hook/hooks/mod/enabled.ts` because a hooks module can import only its own files; `enabled.test.ts` keeps them in step). Read once when Claude Code starts, so a change applies to the next session start. Set it in the shell that starts Claude Code or in Claude Code's `settings.json` `env`. The plugin installs from the repo and the `plannotator` binary updates separately, so the mod also runs against older binaries; see "Version skew" in the mod section for what degrades. |
 | `PLANNOTATOR_HOST_RESULT_FILE` | Set by a host that starts the CLI detached (the Claude Code mod): when a review, annotate, annotate-last or `claude-mod-plan` session settles, the CLI writes one JSON decision record there atomically (mode 0600), with the agent message composed from the configured prompts. Only a path named `result.json` inside `<data dir>/claude-code-mod/` is accepted (`isAllowedHostResultPath`); anything else is ignored with a stderr warning, so the variable cannot make the CLI create or replace an arbitrary file. Taken at startup and removed from the environment. Stdout is unchanged. See "Claude Code mod". |
 | `PLANNOTATOR_HOST_MESSAGES_FILE` | Set by the Claude Code mod for `annotate-last --stdin` (ignored without `--stdin`): a `messages.json` inside `<data dir>/claude-code-mod/` (`isAllowedHostMessagesPath`; anything else is ignored with a stderr warning) holding `{ v: 1, messages: [{ messageId, text, timestamp? }] }`, newest first, which the CLI shows as the message picker instead of the single stdin message. Validated fail-closed (1..25 entries, string fields, unique ids, 2 MiB per message, 8 MiB file); a malformed file exits 1 with the reason. Taken at startup and removed from the environment. A CLI that predates it ignores it and opens the stdin text. See "Claude Code mod". |
 | `PLANNOTATOR_SESSION_TAG` | Set by the Claude Code mod in its session's environment (`claude-code:<session id>`), so processes the session starts can be matched to it; recorded as `hostSession` in the `sessions/` registry. Not meant to be set by hand. |
@@ -293,14 +293,14 @@ as a message from the `plannotator` plugin). UX spec:
 questions are not answered yet, and the conservative choices below are the
 ones taken).
 
-**Opt-in (`PLANNOTATOR_CLAUDE_MOD=1` or `{ "claudeCodeMod": true }`).** On
-current Claude Code hooks modules load even with `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`
-unset, so shipping the module would otherwise switch every 2.1.287+ user to the
-non-blocking flows on the next release. With the knob off (the default)
-`session.start` stops before doing anything (no `$.command.register` or `$.tool.register`, no
-`$.env.set`, no `$.store`, no process) and every other hook passes straight
-through with `next(e)`, so the classic PermissionRequest hook and the
-`/plannotator-*` skills run as they do without mods. See the env table row.
+**On by default; opt out with `PLANNOTATOR_CLAUDE_MOD=0` or `{ "claudeCodeMod": false }`.**
+The owner's call: every Claude Code that runs hooks modules (current Claude Code
+loads them even with `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` unset) gets the
+non-blocking flows. With the knob off `session.start` stops before doing
+anything (no `$.command.register` or `$.tool.register`, no `$.env.set`, no
+`$.store`, no process) and every other hook passes straight through with
+`next(e)`, so the classic PermissionRequest hook and the `/plannotator-*`
+skills run as they do without mods. See the env table row.
 
 **Inert without mods.** Checked live: Claude Code 2.1.150 (no hooks modules)
 validates and loads the plugin with the `modules` key, ignores it, and runs the
@@ -366,11 +366,36 @@ approved-with-notes prompts OpenCode and Pi use; plan: `composePlanDeniedMessage
 unchanged for every caller. `noop` marks what never starts a turn: Done with
 nothing to send, review LGTM, Close, and a review posted straight to the PR
 platform (`platform: true`, logged plus a `$.prompt.suggest` to address the
-comments). The plugin and the binary update separately, so the mod copes with
-a CLI that predates both: an old CLI has no `claude-mod-plan` (the ExitPlanMode
-call falls back to the classic flow) and writes no result record (a review or
-annotate that exits 0 is delivered from its stdout, the text the skill would
-have shown Claude; `legacyResult` in `delivery.ts`).
+comments).
+
+**Version skew.** The plugin installs from the repo's main branch and the
+binary updates separately, so with the mod on by default it routinely runs
+against an older CLI. Verified by running the real mod controller against the
+released 0.27.25 and 0.27.10 binaries as processes:
+- ExitPlanMode: an old CLI has no `claude-mod-plan` (0.27.11+ prints `Unknown
+  command: claude-mod-plan`; older CLIs read the unknown subcommand as the
+  classic hook and print `No plan content in hook event`), exit 1 within
+  ~0.3 s. The mod recognizes either (`cliLacksModPlan` in `plan.ts`), lets the
+  call through to Claude Code's own flow, where the plugin's classic
+  PermissionRequest hook runs the familiar blocking review, logs ONE line
+  telling the user to update the CLI, removes the launch directory, and sends
+  every later ExitPlanMode of that session straight to the classic flow
+  without probing again. Any other startup failure also falls back, with the
+  CLI's error logged. Plan review is therefore blocking, not broken.
+- Review, annotate, last and the `plannotator` tool: work. The old CLI writes
+  the ready file (0.19.24+) and no result record; a decision that exits 0 is
+  delivered from its stdout (`legacyResult` in `delivery.ts`), with the default
+  review approval prompt read as an LGTM (logged, no turn) and the
+  approved-with-notes prompt as "Approved with notes" (a user-customized
+  approved prompt cannot be told apart and arrives as feedback). Close and an
+  empty Done log only.
+- `last`: the old CLI ignores `PLANNOTATOR_HOST_MESSAGES_FILE` and opens the
+  newest message from stdin (no picker), though the command line still says
+  "N messages, newest first".
+- Ask this session: the old server answers `404` on `/api/ai/bridge/poll`, the
+  mod's bridge stops, and Ask AI offers only its providers.
+- A CLI before 0.19.24 writes no ready file: commands wait their full 45 s /
+  15 s and say "Starting…", and decisions still arrive at exit.
 
 **Commands.** `/plannotator-review`, `/plannotator-annotate` and
 `/plannotator-last` keep their names (spec open question 7, conservative): when
@@ -424,7 +449,7 @@ classic path, which falls back to the pre-compaction file.
 blocks and gives Ask AI a separate AI. The mod registers a real tool instead:
 `$.tool.register({ name: "plannotator", description, inputSchema })` at
 `session.start`, right after the commands, and only when the mod is on (the
-opt-in knob, an interactive session, `/bin/sh` present); with the switch off,
+knob not turned off, an interactive session, `/bin/sh` present); with the switch off,
 in `-p`/SDK runs and on Windows nothing is registered and Claude keeps the CLI
 through the `plannotator` skill. The engine names it `mcp__plannotator__plannotator`
 (the register call returns the full name, which `register.ts` keeps) and serves

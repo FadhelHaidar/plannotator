@@ -231,11 +231,10 @@ export interface PlannotatorConfig {
    */
   autoUpdate?: boolean;
   /**
-   * Turn on the Claude Code mod (apps/hook/hooks/mod/): non-blocking plan
-   * review, annotate, code review and annotate-last, plus "Ask this session",
-   * where Claude Code runs hooks modules. Opt-in while the owner decides
-   * whether it becomes the default; PLANNOTATOR_CLAUDE_MOD wins over this key.
-   * Default: false.
+   * The Claude Code mod (apps/hook/hooks/mod/): non-blocking plan review,
+   * annotate, code review and annotate-last, plus "Ask this session", where
+   * Claude Code runs hooks modules. On by default; `false` turns it off.
+   * PLANNOTATOR_CLAUDE_MOD wins over this key. Default: true.
    */
   claudeCodeMod?: boolean;
   /**
@@ -811,10 +810,10 @@ export function resolveAutoUpdate(
 }
 
 /**
- * Resolve whether the Claude Code mod is on (opt-in).
+ * Resolve whether the Claude Code mod is on (default on; this is the opt-out).
  *
  * Priority (highest wins):
- *   PLANNOTATOR_CLAUDE_MOD env var  →  config.claudeCodeMod  →  default false
+ *   PLANNOTATOR_CLAUDE_MOD env var  →  config.claudeCodeMod  →  default true
  *
  * Env `1` / `true` / `on` turn it on and `0` / `false` / `off` / `disabled`
  * turn it off; an empty or unrecognized value counts as unset. The mod is a
@@ -828,7 +827,7 @@ export function resolveClaudeCodeMod(
   const v = env.PLANNOTATOR_CLAUDE_MOD?.trim().toLowerCase();
   if (v === "1" || v === "true" || v === "on") return true;
   if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
-  return coerceConfigBoolean(config.claudeCodeMod, false);
+  return coerceConfigBoolean(config.claudeCodeMod, true);
 }
 
 /** The PLANNOTATOR_AUTO_UPDATE override, or undefined when it does not decide. */

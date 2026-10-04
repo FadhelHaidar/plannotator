@@ -13,7 +13,7 @@ const TOOL_PREFIX = 'mcp__plugin_plannotator_tools__'
 const TOOL = `${TOOL_PREFIX}plannotator`
 
 /** The world beneath the mod: a session, a file map, and a CLI that comes up at once. */
-function world(on: any, options: { files?: Map<string, string>; enabled?: boolean } = {}) {
+function world(on: any, options: { files?: Map<string, string>; modEnv?: string; cliStderr?: string } = {}) {
   const files = options.files ?? new Map<string, string>()
   const runs: string[][] = []
   const submits: string[] = []
@@ -31,8 +31,8 @@ function world(on: any, options: { files?: Map<string, string>; enabled?: boolea
     tools.push({ name: e.name, inputSchema: e.inputSchema })
     return { value: { tool: `${TOOL_PREFIX}${e.name}` } }
   })
-  // The mod is opt-in; most tests turn it on through the env knob.
-  mock.env(on, options.enabled === false ? { HOME: '/home/me' } : { HOME: '/home/me', PLANNOTATOR_CLAUDE_MOD: '1' })
+  // The mod is on by default: no knob set unless a test opts out.
+  mock.env(on, options.modEnv === undefined ? { HOME: '/home/me' } : { HOME: '/home/me', PLANNOTATOR_CLAUDE_MOD: options.modEnv })
   const env = new Map<string, string | undefined>()
   on('env.set', ($: any, e: any) => {
     env.set(e.name, e.value)
@@ -49,7 +49,11 @@ function world(on: any, options: { files?: Map<string, string>; enabled?: boolea
   on('process.run', ($: any, e: any) => {
     const argv: string[] = [...e.argv]
     runs.push(argv)
-    if (argv[3] === 'plannotator-launch') {
+    if (argv[3] === 'plannotator-launch' && options.cliStderr !== undefined) {
+      // A CLI that refuses the subcommand and exits at once.
+      files.set(`${argv[4]}/stderr`, options.cliStderr)
+      files.set(`${argv[4]}/exit`, '1\n')
+    } else if (argv[3] === 'plannotator-launch') {
       files.set(`${argv[4]}/ready`, `${JSON.stringify({ url: 'http://localhost:4321', isRemote: false, port: 4321 })}\n`)
     }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
@@ -109,8 +113,8 @@ describe('register', () => {
     expect(w.runs.some((argv) => argv.includes('review'))).toBe(true)
   })
 
-  test('knob off: inert. ExitPlanMode and the skills reach the classic flow; nothing is registered or set', async ($: any, on: any) => {
-    const w = world(on, { enabled: false })
+  test('knob off (PLANNOTATOR_CLAUDE_MOD=0): inert. ExitPlanMode and the skills reach the classic flow; nothing is registered or set', async ($: any, on: any) => {
+    const w = world(on, { modEnv: '0' })
     on('tool.call', () => ({ result: 'the classic flow ran' }))
     on('command.run', () => ({ text: 'the skill ran' }))
     await $.session.start(SESSION)
@@ -174,15 +178,34 @@ describe('register', () => {
     expect(w.submits[0]).toContain('fix line 3')
   })
 
-  test('knob on through config.json in the data dir', async ($: any, on: any) => {
-    const files = new Map<string, string>([['/home/me/.plannotator', ''], ['/home/me/.plannotator/config.json', '{"claudeCodeMod": true}']])
-    const w = world(on, { enabled: false, files })
+  test('knob off through config.json in the data dir', async ($: any, on: any) => {
+    const files = new Map<string, string>([['/home/me/.plannotator', ''], ['/home/me/.plannotator/config.json', '{"claudeCodeMod": false}']])
+    const w = world(on, { files })
+    on('tool.call', () => ({ result: 'the classic flow ran' }))
     await $.session.start(SESSION)
 
     const answer = await $.tool.call({ tool: 'ExitPlanMode', plan: '# Plan\n\n1. Ship.\n' })
 
-    expect(answer.deny).toContain('NOT approved')
-    expect(w.runs.some((argv) => argv[3] === 'plannotator-launch')).toBe(true)
+    expect(answer.result).toBe('the classic flow ran')
+    expect(w.runs).toEqual([])
+    expect(w.tools).toEqual([])
+  })
+
+  // Version skew: the plugin updates from main, the binary on its own. A CLI
+  // with no claude-mod-plan (0.27.25 prints this) must leave plan review to the
+  // classic flow, every time, instead of failing the call.
+  test('a CLI without claude-mod-plan: ExitPlanMode reaches the classic flow, with one line saying why', async ($: any, on: any) => {
+    const w = world(on, { cliStderr: "Unknown command: claude-mod-plan\n\nRun 'plannotator --help' for the list of commands.\n" })
+    on('tool.call', () => ({ result: 'the classic flow ran' }))
+    await $.session.start(SESSION)
+
+    const first = await $.tool.call({ tool: 'ExitPlanMode', plan: '# Plan\n\n1. Ship.\n' })
+    const second = await $.tool.call({ tool: 'ExitPlanMode', plan: '# Plan\n\n1. Ship.\n2. Test.\n' })
+
+    expect(first.result).toBe('the classic flow ran')
+    expect(second.result).toBe('the classic flow ran')
+    expect(w.runs.filter((argv) => argv[3] === 'plannotator-launch')).toHaveLength(1)
+    expect(w.logs.filter((line) => line.includes('classic review'))).toHaveLength(1)
   })
 
   test('a -p session keeps the classic flow: ExitPlanMode is not touched', async ($: any, on: any) => {

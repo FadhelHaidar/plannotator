@@ -2,8 +2,8 @@
  * The Plannotator mod: non-blocking plan review, annotate, code review and
  * annotate-last for Claude Code, plus "Ask this session".
  *
- * OPT-IN (enabled.ts): with neither `PLANNOTATOR_CLAUDE_MOD=1` nor
- * `{ "claudeCodeMod": true }` in config.json, every hook below passes straight
+ * ON BY DEFAULT (enabled.ts). With `PLANNOTATOR_CLAUDE_MOD=0` (or
+ * `{ "claudeCodeMod": false }` in config.json) every hook below passes straight
  * through and nothing is registered or set, so the classic hook and skills
  * run exactly as they do without mods.
  *
@@ -155,7 +155,7 @@ async function currentMod($: Engine): Promise<PlannotatorMod | null> {
   }
 }
 
-/** Whether the user turned the mod on (opt-in) and where its data dir is; null: stay inert. */
+/** Whether the mod runs here (on unless the user turned it off) and where its data dir is; null: stay inert. */
 async function resolveAllowed($: Engine, e: { isInteractive?: unknown }): Promise<Allowed | null> {
   // A person at the prompt is what makes a later plugin turn mean anything;
   // `-p` and SDK runs keep the classic, blocking flows.
@@ -169,7 +169,7 @@ async function resolveAllowed($: Engine, e: { isInteractive?: unknown }): Promis
     legacyExists: home ? await $.fs.exists(`${String(home).replace(/\/+$/, '')}/.plannotator`) : false,
   })
   if (!dataDir) return null
-  // Opt-in: nothing happens unless the user turned the mod on.
+  // On by default; nothing happens when the user turned the mod off.
   const configText = await $.fs.read(`${dataDir}/config.json`).catch(() => null)
   if (!resolveClaudeModEnabled(await $.env.get('PLANNOTATOR_CLAUDE_MOD'), typeof configText === 'string' ? configText : null)) {
     return null

@@ -5,7 +5,7 @@ import { resolveClaudeModEnabled } from './enabled'
 // The mod cannot import packages/shared, so it mirrors resolveClaudeCodeMod.
 // The failure this guards: the two drift, and the CLI docs/settings say the
 // mod is off while the mod turns itself on (or the reverse).
-describe('opt-in knob', () => {
+describe('on/off knob', () => {
   const envs = [undefined, '', '1', 'true', 'ON', ' on ', '0', 'false', 'off', 'disabled', 'yes', 'garbage']
   const configs: unknown[] = [undefined, true, false, 'true', 'false', '1', '0', 'yes', 1, null]
 
@@ -19,10 +19,21 @@ describe('opt-in knob', () => {
     }
   })
 
-  test('off by default, including an unreadable config file', () => {
-    expect(resolveClaudeModEnabled(undefined, null)).toBe(false)
-    expect(resolveClaudeModEnabled(undefined, '{ not json')).toBe(false)
+  // The owner's decision: on for everyone who has not opted out. A regression
+  // here silently returns every user to the blocking flows.
+  test('on by default: no setting, an empty or unrecognized env value, an unreadable config file', () => {
+    expect(resolveClaudeModEnabled(undefined, null)).toBe(true)
+    expect(resolveClaudeModEnabled('', '{}')).toBe(true)
+    expect(resolveClaudeModEnabled('garbage', null)).toBe(true)
+    expect(resolveClaudeModEnabled(undefined, '{ not json')).toBe(true)
+    expect(resolveClaudeCodeMod({}, {})).toBe(true)
+  })
+
+  test('the opt-out: an off env value or claudeCodeMod false; the env wins over the file', () => {
+    for (const off of ['0', 'false', 'off', 'disabled', ' OFF ']) expect(resolveClaudeModEnabled(off, null)).toBe(false)
+    expect(resolveClaudeModEnabled(undefined, '{"claudeCodeMod":false}')).toBe(false)
+    expect(resolveClaudeModEnabled(undefined, '{"claudeCodeMod":"0"}')).toBe(false)
+    expect(resolveClaudeModEnabled('1', '{"claudeCodeMod":false}')).toBe(true)
     expect(resolveClaudeModEnabled('0', '{"claudeCodeMod":true}')).toBe(false)
-    expect(resolveClaudeModEnabled('1', null)).toBe(true)
   })
 })

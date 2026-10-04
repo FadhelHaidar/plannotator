@@ -1,12 +1,14 @@
 /**
- * Whether the mod is switched on. It is OPT-IN: a Claude Code that runs hooks
- * modules loads this plugin's module for everyone, so until the owner makes
- * the non-blocking flows the default the mod stays inert (every hook passes
- * straight through, nothing is registered, no environment is set) unless the
- * user asks for it:
+ * Whether the mod is switched on. It is ON BY DEFAULT wherever Claude Code
+ * runs hooks modules (register.ts still stands down in `-p` / SDK sessions
+ * and where there is no `/bin/sh`). The user turns it off with:
  *
- *   PLANNOTATOR_CLAUDE_MOD=1            (env; wins over the config file)
- *   { "claudeCodeMod": true }           (config.json in the data dir)
+ *   PLANNOTATOR_CLAUDE_MOD=0            (env; also false/off/disabled; wins over the config file)
+ *   { "claudeCodeMod": false }          (config.json in the data dir)
+ *
+ * Off, the mod is inert: every hook passes straight through, nothing is
+ * registered, no environment is set, and the classic PermissionRequest hook
+ * and `/plannotator-*` skills run exactly as they do without mods.
  *
  * Mirrors `resolveClaudeCodeMod` in packages/shared/config.ts (a hooks module
  * may import only its own files); `enabled.test.ts` keeps the two in step.
@@ -20,21 +22,26 @@ export function parseClaudeModEnv(value: string | undefined): boolean | undefine
   return undefined
 }
 
-/** config.json's `claudeCodeMod`, coerced like the CLI's other boolean keys; default false. */
+/**
+ * config.json's `claudeCodeMod`, coerced like the CLI's other boolean keys
+ * (`coerceConfigBoolean`): a boolean, or the strings true/1 and false/0.
+ * Anything else, a missing key, or an unreadable file is the default: on.
+ */
 export function parseClaudeModConfig(configText: string | null | undefined): boolean {
-  if (!configText) return false
+  if (!configText) return true
   let value: unknown
   try {
     value = (JSON.parse(configText) as Record<string, unknown> | null)?.claudeCodeMod
   } catch {
-    return false
+    return true
   }
   if (typeof value === 'boolean') return value
   if (typeof value === 'string') {
     const v = value.trim().toLowerCase()
     if (v === 'true' || v === '1') return true
+    if (v === 'false' || v === '0') return false
   }
-  return false
+  return true
 }
 
 export function resolveClaudeModEnabled(envValue: string | undefined, configText: string | null | undefined): boolean {
