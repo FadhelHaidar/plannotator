@@ -3299,7 +3299,12 @@ describe("Windows installers clear the OpenCode 2 plugin cache (source scan)", (
   test("install.ps1 roots the cache at XDG_CACHE_HOME and removes only opencode@* under npm\\@plannotator", () => {
     const script = readScript("install.ps1");
     expect(script).toContain(
-      '$opencodeCacheDir = if ($env:XDG_CACHE_HOME) { Join-Path $env:XDG_CACHE_HOME "opencode" } else { "$env:USERPROFILE\\.cache\\opencode" }',
+      '$opencodeCacheDir = if ($env:XDG_CACHE_HOME) { "$env:XDG_CACHE_HOME\\opencode" } else { "$env:USERPROFILE\\.cache\\opencode" }',
+    );
+    // Join-Path throws under ErrorActionPreference=Stop when the drive is not mapped;
+    // a string cannot, so an unusual XDG_CACHE_HOME never aborts the install.
+    expect(script).not.toContain(
+      'Join-Path $env:XDG_CACHE_HOME',
     );
     expect(script).toContain('$opencodeNpmScope = "$opencodeCacheDir\\npm\\@plannotator"');
     expect(script).toContain("Where-Object { $_.Name -like 'opencode@*' }");
