@@ -139,6 +139,8 @@ let advertiseApprovalNotes = false;
 /** Extra fields merged into the /api/diff payload — a PR session is entered by
  *  shipping `prMetadata` (+ `platformUser`) exactly the way the server does. */
 let prDiffExtras: Record<string, unknown> | null = null;
+/** What /api/ai/capabilities answers; Ask AI is off unless a test says so. */
+let aiCapabilities: Record<string, unknown> = { available: false, providers: [] };
 
 /** GithubPRMetadata shape the diff payload carries in PR mode. */
 const PR_METADATA = {
@@ -218,7 +220,7 @@ function makeFetch(): typeof fetch {
       return Response.json({ ok: true, submission: { status: "complete" } });
     }
     if (url.pathname === "/api/diff/fresh") return Response.json({ fresh: true });
-    if (url.pathname === "/api/ai/capabilities") return Response.json({ available: false, providers: [] });
+    if (url.pathname === "/api/ai/capabilities") return Response.json(aiCapabilities);
     if (url.pathname === "/api/draft") return Response.json({ error: "Not found" }, { status: 404 });
     if (url.pathname === "/api/feedback") {
       submissions.push({
@@ -343,6 +345,7 @@ afterEach(async () => {
   failFeedbackPosts = 0;
   advertiseApprovalNotes = false;
   prDiffExtras = null;
+  aiCapabilities = { available: false, providers: [] };
   seededExternalAnnotations = [];
   memory.clear();
   resetStorageBackend();
@@ -655,6 +658,51 @@ describe.if(hasDom)("review decision control (agent mode)", () => {
     expect(document.querySelector(DIALOG)).toBeNull();
     expect(memory.get("plannotator-announce-tui-herdr-seen")).toBe("1");
     expect(submissions).toHaveLength(0);
+  });
+
+  test("the Ask this session announcement takes the last turn, and Mod+Enter cannot post behind it", async () => {
+    const DIALOG = "[data-ask-session-announcement-dialog]";
+    aiCapabilities = {
+      available: true,
+      providers: [{
+        id: "session-bridge",
+        name: "session-bridge",
+        label: "Ask this session · Claude Code",
+        capabilities: {},
+        models: [],
+        sessionBridge: { host: "claude-code", status: "ready", modes: { turn: true, transient: false } },
+      }],
+      defaultProvider: null,
+    };
+    await mount(() => document.querySelector(DIALOG), () => {
+      seedFirstRunSeen();
+      memory.set("plannotator-token-hover-announcement-seen", "1");
+    });
+
+    expect(document.querySelector(DIALOG)?.getAttribute("data-ask-session-agent")).toBe("claude-code");
+    expect(document.querySelector(`${DIALOG} [data-ask-session-status="connected"]`)).not.toBeNull();
+
+    const gotIt = Array.from(document.querySelectorAll<HTMLButtonElement>(`${DIALOG} button`))
+      .find((button) => button.textContent?.trim() === "Got it");
+    if (!gotIt) throw new Error("Dismiss action did not render");
+    await act(async () => {
+      gotIt.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    });
+    await settle();
+    expect(submissions).toHaveLength(0);
+
+    await act(async () => gotIt.click());
+    await settle();
+    expect(document.querySelector(DIALOG)).toBeNull();
+    expect(memory.get("plannotator-announce-ask-session-seen")).toBe("1");
+    expect(submissions).toHaveLength(0);
+  });
+
+  test("the Ask this session announcement never shares a load with the terminal-tools one", async () => {
+    aiCapabilities = { available: true, providers: [], defaultProvider: null };
+    await mount(() => document.querySelector("[data-terminal-tools-announcement-dialog]"), seedFirstRunSeenExceptTerminalTools);
+    expect(document.querySelector("[data-ask-session-announcement-dialog]")).toBeNull();
+    expect(memory.has("plannotator-announce-ask-session-seen")).toBe(false);
   });
 
   test("compact touch offers a positive decision row at zero and it posts", async () => {

@@ -57,6 +57,13 @@ import {
   needsTerminalToolsAnnouncement,
   terminalToolsAnnouncementCanShow,
 } from '@plannotator/ui/utils/terminalToolsAnnouncement';
+import { AskSessionAnnouncementDialog } from '@plannotator/ui/components/AskSessionAnnouncementDialog';
+import {
+  askSessionAgentForOrigin,
+  askSessionAnnouncementCanShow,
+  askSessionAnnouncementPendingThisLoad,
+  markAskSessionAnnouncementSeen,
+} from '@plannotator/ui/utils/askSessionAnnouncement';
 import { CodeAnnotation, CodeAnnotationType, SelectedLineRange, TokenAnnotationMeta, ConventionalLabel, ConventionalDecoration, Annotation, CommentAnnotation, AgentJobInfo, type ArtifactAnnotationMeta, type CallFlowAnnotationTarget } from '@plannotator/ui/types';
 import type { CommentAskAIHandler } from '@plannotator/ui/components/CommentPopover';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
@@ -1239,6 +1246,15 @@ const ReviewApp: React.FC = () => {
     markTerminalToolsAnnouncementSeen();
     setTerminalToolsIntroPending(false);
   }, []);
+  // One-time "Ask this session" announcement, after the terminal-tools one
+  // (never on the same load). Latched at mount for the same reason.
+  const [askSessionIntroPending, setAskSessionIntroPending] = useState(
+    askSessionAnnouncementPendingThisLoad,
+  );
+  const dismissAskSessionIntro = useCallback(() => {
+    markAskSessionAnnouncementSeen();
+    setAskSessionIntroPending(false);
+  }, []);
   const aiChat = useAIChat({
     patch: diffData?.rawPatch ?? '',
     diffType,
@@ -1701,6 +1717,24 @@ const ReviewApp: React.FC = () => {
       || showLookAndFeel
       || editModeIntroVisible
       || tokenHoverIntroVisible,
+  });
+  // After the terminal-tools announcement: only for reviews opened by a host
+  // that has "Ask this session" (Claude Code, Pi, OpenCode), once the server
+  // has said Ask AI is available.
+  const askSessionAgent = askSessionAgentForOrigin(origin);
+  const askSessionIntroVisible = askSessionAnnouncementCanShow({
+    announcementPending: askSessionIntroPending,
+    isLoading,
+    origin,
+    aiAvailable,
+    readOnlySession: false,
+    compact: isCompactTouchLayout,
+    otherFirstRunDialogVisible:
+      guideIntroVisible
+      || showLookAndFeel
+      || editModeIntroVisible
+      || tokenHoverIntroVisible
+      || terminalToolsIntroVisible,
   });
   const hoveredTokenSymbol = tokenHover.hover?.request.symbol;
   const startTokenHover = tokenHover.onTokenHoverEnter;
@@ -2670,7 +2704,7 @@ const ReviewApp: React.FC = () => {
     // (not lost) behind the guide takeover or a first-run dialog — the file
     // still marks and the next auto-view retries the toast.
     if (!needsAutoViewedNotice()) return;
-    if (guideOpen || guideIntroVisible || showLookAndFeel || editModeIntroVisible || tokenHoverIntroVisible || terminalToolsIntroVisible) return;
+    if (guideOpen || guideIntroVisible || showLookAndFeel || editModeIntroVisible || tokenHoverIntroVisible || terminalToolsIntroVisible || askSessionIntroVisible) return;
     markAutoViewedNoticeSeen();
     toast('Files are marked viewed as you scroll', {
       description: "Scroll past a file or move on to the next and it's checked off. Turn this off in Settings → Git, or from the gear above the file list.",
@@ -2690,7 +2724,7 @@ const ReviewApp: React.FC = () => {
         },
       },
     });
-  }, [guideOpen, guideIntroVisible, showLookAndFeel, editModeIntroVisible, tokenHoverIntroVisible, terminalToolsIntroVisible]);
+  }, [guideOpen, guideIntroVisible, showLookAndFeel, editModeIntroVisible, tokenHoverIntroVisible, terminalToolsIntroVisible, askSessionIntroVisible]);
   const { handleReadingFileChange: handleAutoViewReadingFile, handleFileScrolledPast } = useAutoViewed({
     enabled: autoViewedEnabled,
     // Rule 4 — only the review target. The guide takeover CSS-hides the dock
@@ -4430,7 +4464,7 @@ const ReviewApp: React.FC = () => {
     if (event.defaultPrevented || isNativeHistoryOwner(event)) return false;
     if (submitted || isSendingFeedback || isApproving || isExiting || isPlatformActioning || isLoadingDiff) return false;
     if (guideOpen || openSettingsMenu || showDestinationMenu || platformCommentDialog || showExportModal || showWorktreeDialog || showNoAnnotationsDialog || showExitWarning) return false;
-    if (showLookAndFeel || showGuideIntro || editModeIntroVisible || tokenHoverIntroVisible || terminalToolsIntroVisible || tourDialogJobId) return false;
+    if (showLookAndFeel || showGuideIntro || editModeIntroVisible || tokenHoverIntroVisible || terminalToolsIntroVisible || askSessionIntroVisible || tourDialogJobId) return false;
     return !hasActiveHistoryOverlay(document);
   }, [
     guideOpen,
@@ -4442,6 +4476,7 @@ const ReviewApp: React.FC = () => {
     editModeIntroVisible,
     tokenHoverIntroVisible,
     terminalToolsIntroVisible,
+    askSessionIntroVisible,
     openSettingsMenu,
     platformCommentDialog,
     showDestinationMenu,
@@ -5848,12 +5883,24 @@ const ReviewApp: React.FC = () => {
           <TerminalToolsAnnouncementDialog isOpen onDismiss={dismissTerminalToolsIntro} />
         )}
 
+        {/* One-time "Ask this session" announcement. LAST in the dialog chain,
+            and never on the same load as the terminal-tools one
+            (askSessionAnnouncementPendingThisLoad). */}
+        {askSessionIntroVisible && askSessionAgent && (
+          <AskSessionAnnouncementDialog
+            isOpen
+            agent={askSessionAgent}
+            connected={hasSessionBridge}
+            onDismiss={dismissAskSessionIntro}
+          />
+        )}
+
         {/* One-time PR feedback-destination spotlight. Strictly AFTER the
             first-run dialog chain (guide intro → look-and-feel → edit mode →
-            token hover → terminal tools): it only mounts once none of the five
-            is showing, so it never stacks with them. PR mode only — the
+            token hover → terminal tools → Ask this session): it only mounts
+            once none of the six is showing, so it never stacks with them. PR mode only — the
             switcher it points at doesn't render otherwise. */}
-        {showDestSpotlight && !isCompactTouchLayout && !!prMetadata && !isLoading && !showLookAndFeel && !guideIntroVisible && !editModeIntroVisible && !tokenHoverIntroVisible && !terminalToolsIntroVisible && (
+        {showDestSpotlight && !isCompactTouchLayout && !!prMetadata && !isLoading && !showLookAndFeel && !guideIntroVisible && !editModeIntroVisible && !tokenHoverIntroVisible && !terminalToolsIntroVisible && !askSessionIntroVisible && (
           <DestinationSpotlight
             targetRef={destToggleRef}
             platformLabel={platformLabel}

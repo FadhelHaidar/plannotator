@@ -72,6 +72,13 @@ import {
   needsTerminalToolsAnnouncement,
   terminalToolsAnnouncementCanShow,
 } from '@plannotator/ui/utils/terminalToolsAnnouncement';
+import { AskSessionAnnouncementDialog } from '@plannotator/ui/components/AskSessionAnnouncementDialog';
+import {
+  askSessionAgentForOrigin,
+  askSessionAnnouncementCanShow,
+  askSessionAnnouncementPendingThisLoad,
+  markAskSessionAnnouncementSeen,
+} from '@plannotator/ui/utils/askSessionAnnouncement';
 import { buildDefaultPrompt, useAIChat } from '@plannotator/ui/hooks/useAIChat';
 import { getUIPreferences, type UIPreferences, type PlanWidth } from '@plannotator/ui/utils/uiPreferences';
 import { getEditorMode, saveEditorMode } from '@plannotator/ui/utils/editorMode';
@@ -783,6 +790,11 @@ const App: React.FC = () => {
   const [terminalToolsIntroPending, setTerminalToolsIntroPending] = useState(
     needsTerminalToolsAnnouncement,
   );
+  // One-time "Ask this session" announcement, after the terminal-tools one
+  // (never on the same load). Latched at mount for the same reason.
+  const [askSessionIntroPending, setAskSessionIntroPending] = useState(
+    askSessionAnnouncementPendingThisLoad,
+  );
   const isMobile = useIsMobile();
   const isBelowAgentTerminalBreakpoint = useIsMobile(AGENT_TERMINAL_LG_BREAKPOINT);
   const isCompactTouchLayout = useCompactTouchLayout();
@@ -1145,6 +1157,11 @@ const App: React.FC = () => {
   const dismissTerminalToolsAnnouncement = useCallback(() => {
     markTerminalToolsAnnouncementSeen();
     setTerminalToolsIntroPending(false);
+  }, []);
+
+  const dismissAskSessionAnnouncement = useCallback(() => {
+    markAskSessionAnnouncementSeen();
+    setAskSessionIntroPending(false);
   }, []);
 
   const dismissLookAndFeelAnnouncement = useCallback(() => {
@@ -6214,6 +6231,23 @@ const App: React.FC = () => {
     otherFirstRunDialogVisible:
       shouldShowLookAndFeelAnnouncement || goalSetupMode || showPermissionModeSetup,
   });
+  // After the terminal-tools announcement: only for sessions opened by a host
+  // that has "Ask this session" (Claude Code, Pi, OpenCode), and only once the
+  // server has said Ask AI is available. Same deferrals as the one above.
+  const askSessionAgent = askSessionAgentForOrigin(origin);
+  const shouldShowAskSessionAnnouncement = askSessionAnnouncementCanShow({
+    announcementPending: askSessionIntroPending,
+    isLoading,
+    origin,
+    aiAvailable,
+    readOnlySession: isSharedSession || archive.archiveMode || !isApiMode,
+    compact: isCompactTouchLayout,
+    otherFirstRunDialogVisible:
+      shouldShowLookAndFeelAnnouncement
+      || goalSetupMode
+      || showPermissionModeSetup
+      || shouldShowTerminalToolsAnnouncement,
+  });
   const compactNavigatorTabs: SidebarTab[] = [
     ...(hasTocEntries ? ['toc' as const] : []),
     ...(!isHtmlSurface && activeDiffVersionInfo !== null && activeDiffVersionInfo.totalVersions > 1
@@ -7430,6 +7464,16 @@ const App: React.FC = () => {
           <TerminalToolsAnnouncementDialog
             isOpen
             onDismiss={dismissTerminalToolsAnnouncement}
+          />
+        )}
+
+        {/* One-time "Ask this session" announcement, last in the chain. */}
+        {shouldShowAskSessionAnnouncement && askSessionAgent && (
+          <AskSessionAnnouncementDialog
+            isOpen
+            agent={askSessionAgent}
+            connected={hasSessionBridge}
+            onDismiss={dismissAskSessionAnnouncement}
           />
         )}
 

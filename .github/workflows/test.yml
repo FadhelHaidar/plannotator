@@ -204,6 +204,8 @@ jobs:
           packages/review-editor/App.decisionControl.test.tsx
           packages/ui/components/TerminalToolsAnnouncementDialog.test.tsx
           packages/editor/App.terminalToolsAnnouncement.test.tsx
+          packages/ui/components/AskSessionAnnouncementDialog.test.tsx
+          packages/editor/App.askSessionAnnouncement.test.tsx
           packages/review-editor/components/ReviewSidebar.generalComment.test.tsx
           packages/review-editor/components/ReviewSidebar.outdated.test.tsx
           packages/ui/components/HtmlSurfaceControls.test.tsx
