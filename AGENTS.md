@@ -319,7 +319,7 @@ closures; `controller.ts` (`PlannotatorMod`) is the per-session state machine;
 `launch.ts` (detached launcher, launch-directory layout, command table, copy),
 `delivery.ts` (turn vs log, 12 KB inline limit), `plan.ts` (ExitPlanMode
 decisions and deny copy), `turns.ts` and `bridge.ts` (Ask this session),
-`shell-words.ts` (argument splitting), `tool.ts` (the `plannotator` tool contract, a copy of `packages/shared/plannotator-tool.ts`). The mod is self-contained: a plugin
+`shell-words.ts` (argument splitting), `tool.ts` (the `plannotator` tool contract, a copy of `packages/shared/plannotator-tool.ts`), `take-over.ts` (agent-run Bash `plannotator` commands answered through the tool). The mod is self-contained: a plugin
 installed from the marketplace is only `apps/hook/`, and a hooks module may
 import only its own files.
 
@@ -452,13 +452,46 @@ description, validation, argument mapping, result text) lives once in
 copy of its CONTRACT section in `hooks/mod/tool.ts` and `tool.test.ts` fails
 when they differ (edit the shared file, then paste). The core `plannotator`
 skill carries one host-neutral line: use a `plannotator` tool when the agent has
-one. Direct CLI runs are unchanged, including gated `--json` runs an agent
-makes on purpose (nothing intercepts Bash `plannotator` commands); plan review
-stays on ExitPlanMode. Checked live on 2.1.288: the tool is DEFERRED behind tool
+one. Plan review stays on ExitPlanMode. Checked live on 2.1.288: the tool is DEFERRED behind tool
 search (no `alwaysLoad` is possible through `$.tool.register`), so Claude sees
 only its name until it searches; with the updated skill it searched and called
 the tool for "open notes.md in plannotator", while a profile still holding the
 older installed skill text loaded that skill and ran the CLI instead.
+
+**Agent-run CLI commands are taken over (Bash).** Because the tool is deferred
+and the skill also documents the CLI, Claude sometimes runs
+`plannotator annotate x.html --gate --json` in Bash anyway; that blocked the
+session and started a server with no bridge token, so Ask AI offered separate
+SDK agents instead of "Ask this session". With the mod on, the `tool.call` hook
+on the MAIN LOOP's `Bash` parses the command with the host-neutral
+`plannotatorCommandToToolInput` (CONTRACT section of
+`packages/shared/plannotator-tool.ts`, so it is in the mod's copy too) and, when
+it returns a tool input, answers the call itself through the SAME `runTool` →
+`open` launch the tool uses (`hooks/mod/take-over.ts`): the command never runs,
+the Bash result is the Bash tool's own record `{ stdout: <the tool's opened
+text>, stderr: "", interrupted: false }` (a startup error is a `deny`), and a
+gated take-over delivers its bare approval as a turn exactly like a gated tool
+call. A subagent's Bash command always runs as written: a subagent may work in
+its own cwd or worktree, while the mod launches in the session's cwd, so its
+`review` or `annotate notes.md` would open the wrong diff or file. Taken over: ONE simple command (no
+`; & | < > ( )`, line break, `$`, backtick, unquoted glob/brace, comment, `~user`, unterminated
+quote; quoting follows `splitShellWords`, nothing is expanded) whose program is
+exactly `plannotator` (the binary on PATH; a path such as `./plannotator` or
+`/tmp/dev/plannotator` is a dev build and runs for real), subcommand
+`annotate` (one target, `--gate`, `--markdown`), `review` (at most one target, `--base <ref>`),
+or `annotate-last` / `last` (no arguments); `--json` is accepted and dropped
+(the decision arrives as a message), and the result must pass
+`parsePlannotatorToolInput`. Everything else runs as written: other
+subcommands, every other flag (`--require-approval`, `--result-file`, `--hook`,
+`--tailscale`, `--static`, `--app`, `--no-jina`, `--render-html`,
+`--diff-type`, `--local`, `--patch-file`, `--stdin`, `--help`, ...), repeated
+flags, several targets, environment prefixes, and any compound command
+(`cd x && plannotator ...`, pipes, redirects, substitutions), so scripted
+strict gates keep the real CLI and its exit codes. With the mod off, in `-p`/SDK
+runs and on Windows nothing is taken over. The CLI the mod launches runs in the
+session's cwd (`$.process.run`'s default), the same as for the tool. Pi and
+OpenCode do not take over shell runs: there an agent-run `plannotator` command
+still runs the CLI.
 
 **Plan review.** The `tool.call` hook on the main loop's ExitPlanMode resolves
 the plan (the plan file when it is an absolute `.md` regular file within the

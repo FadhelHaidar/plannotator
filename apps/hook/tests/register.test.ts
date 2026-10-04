@@ -196,4 +196,56 @@ describe('register', () => {
     // No plannotator tool either: a later plugin turn would have nowhere to land.
     expect(w.tools).toEqual([])
   })
+
+  test('Claude running the CLI through Bash gets the tool: answered at once, the command never runs', async ($: any, on: any) => {
+    const w = world(on)
+    const ran: string[] = []
+    on('tool.call', ($: any, e: any) => {
+      ran.push(e.command)
+      return { result: { stdout: 'the command ran', stderr: '', interrupted: false } }
+    })
+    await $.session.start(SESSION)
+
+    const answer = await $.tool.call({ tool: 'Bash', command: 'plannotator annotate /work/INDEX.html --gate --json' })
+
+    expect(ran).toEqual([])
+    expect(answer.result.stdout).toContain('http://localhost:4321')
+    expect(answer.result.stdout).toContain('End your turn')
+    const launch = w.runs.find((argv) => argv[3] === 'plannotator-launch')
+    expect(launch?.slice(5)).toEqual(['plannotator', 'annotate', '/work/INDEX.html', '--gate'])
+  })
+
+  test('Bash commands the tool cannot represent run as written', async ($: any, on: any) => {
+    const w = world(on)
+    const ran: string[] = []
+    on('tool.call', ($: any, e: any) => {
+      ran.push(e.command)
+      return { result: { stdout: 'the command ran', stderr: '', interrupted: false } }
+    })
+    await $.session.start(SESSION)
+    const commands = [
+      'plannotator annotate a.md --gate --json --require-approval',
+      'plannotator annotate a.md --gate --json | jq .decision',
+      'cd docs && plannotator annotate a.md',
+      './plannotator review',
+    ]
+
+    for (const command of commands) await $.tool.call({ tool: 'Bash', command })
+    // A subagent may work in its own cwd/worktree: its command runs for real.
+    await $.tool.call({ tool: 'Bash', agentId: 'sub-1', command: 'plannotator review' })
+
+    expect(ran).toEqual([...commands, 'plannotator review'])
+    expect(w.runs.some((argv) => argv[3] === 'plannotator-launch')).toBe(false)
+  })
+
+  test('knob off: a Bash plannotator command runs as written', async ($: any, on: any) => {
+    const w = world(on, { enabled: false })
+    on('tool.call', () => ({ result: { stdout: 'the command ran', stderr: '', interrupted: false } }))
+    await $.session.start(SESSION)
+
+    const answer = await $.tool.call({ tool: 'Bash', command: 'plannotator annotate a.md --gate --json' })
+
+    expect(answer.result.stdout).toBe('the command ran')
+    expect(w.runs).toEqual([])
+  })
 })

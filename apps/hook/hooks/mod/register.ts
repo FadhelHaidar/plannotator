@@ -30,6 +30,9 @@
  * - The `plannotator` tool (`$.tool.register`, tool.ts): when Claude itself is
  *   asked to open something in Plannotator it calls this tool instead of the
  *   CLI; the call goes through the same detached launch and returns at once.
+ *   A main-loop Bash call that runs the CLI in a form the tool can represent
+ *   (`plannotator annotate|review|last ...`, take-over.ts) is answered the
+ *   same way instead of running.
  * - "Ask this session": each launched server gets a pull-bridge token; the
  *   mod polls it and runs the reviewer's questions as turns (bridge.ts).
  * - `PLANNOTATOR_SESSION_TAG=claude-code:<session id>` in the environment
@@ -45,6 +48,7 @@ import { resolveClaudeModEnabled } from './enabled'
 import type { Host } from './host'
 import { COMMANDS, dataDirOf, isModCommand, waitArgv } from './launch'
 import { PLAN_TOOL } from './plan'
+import { answerShellCall, SHELL_TOOL, shellTakeOver } from './take-over'
 import { PLANNOTATOR_TOOL_DESCRIPTION, PLANNOTATOR_TOOL_INPUT_SCHEMA, PLANNOTATOR_TOOL_NAME } from './tool'
 
 // Minimal local types: the engine's declarations are written by `/plugin-types`
@@ -259,6 +263,16 @@ export function register(on: On) {
       }
       const answer = await instance.runTool(toolArgsOf(e))
       return 'deny' in answer ? { deny: answer.deny } : { result: answer.text }
+    }
+    // Claude running `plannotator annotate|review|last` in Bash on the main
+    // loop: the same launch and result as the tool (take-over.ts); anything
+    // the tool cannot represent, and every subagent's command, runs as written.
+    if (allowed && e.tool === SHELL_TOOL) {
+      const input = shellTakeOver(e.command, !!e.agentId)
+      if (!input) return next(e)
+      const instance = await currentMod($)
+      if (!instance) return next(e)
+      return answerShellCall(instance, input)
     }
     // Only the main loop's ExitPlanMode: a subagent's keeps the classic flow.
     if (!allowed || e.tool !== PLAN_TOOL || e.agentId) return next(e)
