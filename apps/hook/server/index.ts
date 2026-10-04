@@ -77,21 +77,21 @@
  */
 
 import {
-  startPlannotatorServer,
+  startPlannotatorServer as startPlannotatorServerUnguarded,
   handleServerReady,
 } from "@plannotator/server";
 import {
-  startReviewServer,
+  startReviewServer as startReviewServerUnguarded,
   handleReviewServerReady,
 } from "@plannotator/server/review";
 import { runGuideCli } from "@plannotator/server/guide-cli";
 import {
-  startAnnotateServer,
+  startAnnotateServer as startAnnotateServerUnguarded,
   handleAnnotateServerReady,
   isRemoteSession,
 } from "@plannotator/server/annotate";
 import {
-  startGoalSetupServer,
+  startGoalSetupServer as startGoalSetupServerUnguarded,
   handleGoalSetupServerReady,
 } from "@plannotator/server/goal-setup";
 import { type DiffType, detectManagedVcs, prepareLocalReviewDiff, gitRuntime } from "@plannotator/server/vcs";
@@ -124,6 +124,7 @@ import {
   takeHostResultPath,
 } from "./host-result";
 import { readHostMessages, takeHostMessagesPath } from "./host-messages";
+import { exitOnPortInUse } from "./port-in-use";
 import { parseModPlanInput, readModPlanRevision, writeModPlanRevisionAck } from "./claude-mod-plan";
 import { LIVE_APP_REMOTE_MESSAGE } from "@plannotator/shared/live-probe";
 // Bridge sources for live app sessions: the CLI supplies them so
@@ -260,6 +261,18 @@ const resultFile = parsedStrictAnnotateOptions.resultFile
       process.env.PLANNOTATOR_CWD || process.cwd(),
     )
   : undefined;
+
+// An occupied port (remote mode's fixed 19432, or PLANNOTATOR_PORT) is a
+// startup failure: one clean stderr line, no stack. Exit 2 under a strict
+// annotate gate, 1 otherwise, like every other startup failure.
+function exitPortInUse(message: string): never {
+  process.stderr.write(`${message}\n`);
+  process.exit(annotateStartupFailureExitCode({ requireApproval: requireApprovalFlag, resultFile }));
+}
+const startPlannotatorServer = exitOnPortInUse(startPlannotatorServerUnguarded, exitPortInUse);
+const startReviewServer = exitOnPortInUse(startReviewServerUnguarded, exitPortInUse);
+const startAnnotateServer = exitOnPortInUse(startAnnotateServerUnguarded, exitPortInUse);
+const startGoalSetupServer = exitOnPortInUse(startGoalSetupServerUnguarded, exitPortInUse);
 
 // Global flag: --browser <name>
 const browserIdx = args.indexOf("--browser");
