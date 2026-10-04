@@ -136,10 +136,10 @@ Same precedence: flag over environment variable over config file. The installer 
 
 To update, run the install command again. It installs the latest release over the old one, and a Plannotator session that is open while it runs keeps working. It also clears cached OpenCode plugin versions (OpenCode 1 and OpenCode 2), so OpenCode loads the latest `@plannotator/opencode` after a restart.
 
-The install script does not update the Claude Code plugin or the Pi extension. Update those in the agent:
+The install script does not update the Claude Code plugin. It updates the Pi extension only when the `pi` command is on your PATH while it runs. Otherwise update them in the agent:
 
-- **Claude Code:** refreshing the marketplace alone does not update an installed plugin. Run `claude plugin marketplace update plannotator`, then `claude plugin update plannotator@plannotator`, then restart Claude Code (or run `/reload-plugins`). Inside Claude Code you can run `/plugin marketplace update plannotator`, then open `/plugin`, go to **Installed**, select **plannotator** and choose **Update now**.
-- **Pi:** run `pi update --extensions` (or `pi update npm:@plannotator/pi-extension`). A plain `pi update` updates only Pi itself.
+- **Claude Code:** refreshing the marketplace alone does not update an installed plugin. Run `claude plugin marketplace update plannotator`, then `claude plugin update plannotator@plannotator`, then restart Claude Code. Inside Claude Code you can run `/plugin marketplace update plannotator`, then open `/plugin`, go to **Installed**, select **plannotator** and choose **Update now**.
+- **Pi:** run `pi update --extensions`. A plain `pi update` updates only Pi itself.
 
 ### Automatic updates (opt-in)
 

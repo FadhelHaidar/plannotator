@@ -80,7 +80,7 @@ Start Pi in plan mode:
 pi --plan
 ```
 
-Or toggle it during a session with `/plannotator-plan-mode` or `Ctrl+Alt+P`. The command accepts an optional file path argument (`/plannotator-plan-mode plans/auth.md`) or prompts you to choose one interactively.
+Or toggle it during a session with `/plannotator-plan-mode` or `Ctrl+Alt+P`.
 
 In plan mode the agent is restricted — destructive commands are blocked, writes are limited to the plan file. It explores your codebase, then writes a plan using markdown checklists:
 

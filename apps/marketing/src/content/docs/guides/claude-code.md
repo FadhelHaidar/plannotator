@@ -163,4 +163,4 @@ claude plugin update plannotator@plannotator
 
 Or inside Claude Code: run `/plugin marketplace update plannotator`, then open `/plugin`, go to **Installed**, select **plannotator** and choose **Update now**.
 
-Then restart Claude Code (or run `/reload-plugins`). To update the `plannotator` binary and the slash commands, run the [install script](/docs/getting-started/installation/#updating) again.
+Then restart Claude Code. To update the `plannotator` binary and the slash commands, run the [install script](/docs/getting-started/installation/#updating) again.

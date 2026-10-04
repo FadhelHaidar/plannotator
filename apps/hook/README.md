@@ -49,7 +49,7 @@ claude plugin marketplace update plannotator
 claude plugin update plannotator@plannotator
 ```
 
-Or inside Claude Code: run `/plugin marketplace update plannotator`, then open `/plugin`, go to **Installed**, select **plannotator** and choose **Update now**. Then restart Claude Code (or run `/reload-plugins`). Run the install script again to update the `plannotator` binary.
+Or inside Claude Code: run `/plugin marketplace update plannotator`, then open `/plugin`, go to **Installed**, select **plannotator** and choose **Update now**. Then restart Claude Code. Run the install script again to update the `plannotator` binary.
 
 ## Manual Installation (Hooks)
 
