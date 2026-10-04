@@ -58,7 +58,6 @@ export async function createPiAIRuntime(options: CreatePiAIRuntimeOptions = {}):
 		const cwd = options.cwd ?? process.cwd();
 		const registry = new ai.ProviderRegistry();
 		const sessionManager = new ai.SessionManager();
-		const modelDiscovery: Promise<void>[] = [];
 		// Model discovery spawns the provider's CLI, so it runs on first explicit
 		// activation (?activate= from a model picker) or the first session — never
 		// at startup.
@@ -107,14 +106,12 @@ export async function createPiAIRuntime(options: CreatePiAIRuntimeOptions = {}):
 						cwd,
 						piExecutablePath: piPath,
 					} as any);
-					if (provider && "fetchModels" in provider) {
-						modelDiscovery.push(
-							(provider as { fetchModels: () => Promise<void> })
-								.fetchModels()
-								.catch(() => {}),
-						);
-					}
-					registry.register(provider);
+					const providerId = registry.register(provider);
+					// Deferred like Codex: fetchModels spawns `pi` (up to 10s), and
+					// done eagerly it held every plain /api/ai/capabilities answer
+					// until it finished. A Pi session spawns its own `pi` and runs on
+					// Pi's default model when none is picked, so it never waits either.
+					deferModelDiscovery(providerId, provider, { blockSession: false });
 				}
 			} catch {
 				// Pi not available.
@@ -165,9 +162,6 @@ export async function createPiAIRuntime(options: CreatePiAIRuntimeOptions = {}):
 				...(catalogRegistry ? { catalogRegistry } : {}),
 				sessionManager,
 				getCwd: options.getCwd,
-				beforeCapabilities: async () => {
-					await Promise.allSettled(modelDiscovery);
-				},
 				beforeProviderSession: discovery.beforeProviderSession,
 				authorizeSessionBridgeRequest: (req: Request) =>
 					isLoopbackHostHeader(req.headers.get("host"), options.getServerPort?.()),

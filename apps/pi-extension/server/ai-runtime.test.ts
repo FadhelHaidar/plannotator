@@ -152,6 +152,71 @@ describe("createPiAIRuntime Codex discovery", () => {
 	}, 15_000);
 });
 
+describe("createPiAIRuntime Pi discovery", () => {
+	// Pi's model discovery spawns `pi` and waits up to 10s; it must not hold a
+	// plain capabilities answer, only an explicit ?activate= (or a session).
+	test("plain capabilities answers at once without spawning a slow pi; ?activate= spawns it", async () => {
+		if (process.platform === "win32") return;
+
+		const dir = mkdtempSync(join(tmpdir(), "plannotator-pi-lazy-pi-"));
+		tempDirs.push(dir);
+		const marker = join(dir, "pi-ran");
+		const pi = join(dir, "pi");
+		writeFileSync(pi, `#!/bin/sh\necho ran >> '${marker}'\nsleep 5\n`);
+		chmodSync(pi, 0o755);
+
+		const runner = join(dir, "runner.ts");
+		const runtimeUrl = pathToFileURL(join(import.meta.dir, "ai-runtime.ts")).href;
+		writeFileSync(runner, `
+			import { existsSync } from "node:fs";
+			import { createPiAIRuntime } from ${JSON.stringify(runtimeUrl)};
+			const runtime = await createPiAIRuntime({ cwd: ${JSON.stringify(dir)} });
+			if (!runtime) throw new Error("Pi AI runtime unavailable");
+			const startedAt = Date.now();
+			const capabilities = await runtime.endpoints["/api/ai/capabilities"](
+				new Request("http://localhost/api/ai/capabilities"),
+			);
+			const elapsedMs = Date.now() - startedAt;
+			const data = await capabilities.json();
+			const afterCapabilities = existsSync(${JSON.stringify(marker)});
+			void runtime.endpoints["/api/ai/capabilities"](
+				new Request("http://localhost/api/ai/capabilities?activate=pi-sdk"),
+			);
+			let afterActivate = false;
+			for (let i = 0; i < 60 && !afterActivate; i++) {
+				await new Promise((resolve) => setTimeout(resolve, 50));
+				afterActivate = existsSync(${JSON.stringify(marker)});
+			}
+			console.log(JSON.stringify({
+				hasPi: data.providers.some((provider) => provider.id === "pi-sdk"),
+				fast: elapsedMs < 2000,
+				afterCapabilities,
+				afterActivate,
+			}));
+			process.exit(0);
+		`);
+
+		const proc = Bun.spawn([process.execPath, runner], {
+			cwd: import.meta.dir,
+			env: { ...process.env, PATH: `${dir}:/usr/bin:/bin` },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		expect(JSON.parse(stdout.trim())).toEqual({
+			hasPi: true,
+			fast: true,
+			afterCapabilities: false,
+			afterActivate: true,
+		});
+	}, 15_000);
+});
+
 describe("createPiAIRuntime with a session bridge", () => {
 	// The Pi session that opened Plannotator answers Ask AI and nothing else:
 	// with a bridge no SDK provider is listed or reachable by id, even with

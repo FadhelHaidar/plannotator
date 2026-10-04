@@ -82,7 +82,6 @@ export async function createAIRuntime(options: CreateAIRuntimeOptions = {}): Pro
   const cwd = options.cwd ?? process.cwd();
   const registry = new ProviderRegistry();
   const sessionManager = new SessionManager();
-  const modelDiscovery: Promise<void>[] = [];
   // Model discovery spawns the provider's CLI, so it runs on first explicit
   // activation (?activate= from a model picker) or the first session — never
   // at startup.
@@ -123,7 +122,7 @@ export async function createAIRuntime(options: CreateAIRuntimeOptions = {}): Pro
     }
 
     try {
-      const { PiSDKProvider } = await import("@plannotator/ai/providers/pi-sdk");
+      await import("@plannotator/ai/providers/pi-sdk");
       const rawPiPath = Bun.which("pi");
       if (rawPiPath) {
         const piPath = resolveWindowsCommandShim(rawPiPath);
@@ -132,10 +131,13 @@ export async function createAIRuntime(options: CreateAIRuntimeOptions = {}): Pro
           cwd,
           piExecutablePath: piPath,
         } as PiSDKConfig);
-        if (provider instanceof PiSDKProvider) {
-          modelDiscovery.push(provider.fetchModels().catch(() => {}));
-        }
-        registry.register(provider);
+        const providerId = registry.register(provider);
+        // Deferred like Codex: fetchModels spawns `pi` (up to 10s), and done
+        // eagerly it held every plain /api/ai/capabilities answer until it
+        // finished, even when a session bridge replaced the SDK providers. A
+        // Pi session spawns its own `pi` and runs on Pi's default model when
+        // none is picked, so it never waits on discovery either.
+        deferModelDiscovery(providerId, provider, { blockSession: false });
       }
     } catch {
       // Pi not available.
@@ -188,9 +190,6 @@ export async function createAIRuntime(options: CreateAIRuntimeOptions = {}): Pro
     ...(catalogRegistry ? { catalogRegistry } : {}),
     sessionManager,
     getCwd: options.getCwd,
-    beforeCapabilities: async () => {
-      await Promise.allSettled(modelDiscovery);
-    },
     beforeProviderSession: discovery.beforeProviderSession,
     authorizeSessionBridgeRequest: (req) =>
       isLoopbackHostHeader(req.headers.get("host"), options.getServerPort?.()),
