@@ -1363,48 +1363,65 @@ NODE
     fi
 fi
 
-# Validate plugin hooks.json if plugin is already installed
-PLUGIN_HOOKS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/marketplaces/plannotator/apps/hook/hooks/hooks.json"
-if [ -f "$PLUGIN_HOOKS" ]; then
-    cat > "$PLUGIN_HOOKS" << 'HOOKS_EOF'
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "EnterPlanMode",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "plannotator improve-context",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PermissionRequest": [
-      {
-        "matcher": "ExitPlanMode",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "plannotator",
-            "timeout": 345600
-          }
-        ]
-      }
-    ]
-  }
+# Claude Code plugin: repair the marketplace clone, never rewrite it.
+#
+# ${CLAUDE_CONFIG_DIR:-~/.claude}/plugins/marketplaces/plannotator is Claude
+# Code's own git clone of this repository; installing or updating the plugin
+# copies apps/hook from it into the plugin cache. Installers used to overwrite
+# its apps/hook/hooks/hooks.json with a hard-coded copy (added in #230 to fix
+# a stale 1800s timeout, extended in #267 to pin the Windows exe path). That
+# copy drifted from the repo file twice: #689 found it dropping the
+# EnterPlanMode hook, and it later dropped "modules" (the Claude Code mod).
+# The clone's own file is the source of truth, so nothing writes it now.
+#
+# An earlier installer's rewrite can still be sitting in the clone as a local
+# edit, and a plugin installed or updated from it loses the mod. Restore the
+# file from the clone's HEAD, but only when it differs from HEAD AND its
+# content (whitespace removed) is exactly one of the shapes those installers
+# wrote, so a user's own edit is never discarded. Needs git; without it this
+# is a no-op. install.ps1 / install.cmd carry the same pattern as a .NET
+# regex (keep the three in step).
+PLUGIN_MARKETPLACE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/marketplaces/plannotator"
+PLUGIN_HOOKS="$PLUGIN_MARKETPLACE_DIR/apps/hook/hooks/hooks.json"
+LEGACY_PLUGIN_HOOKS_RE='^\{"hooks":\{("PreToolUse":\[\{"matcher":"EnterPlanMode","hooks":\[\{"type":"command","command":"(\\")?[^"\\]*plannotator(\.exe)?(\\")?improve-context","timeout":5\}\]\}\],)?"PermissionRequest":\[\{"matcher":"ExitPlanMode","hooks":\[\{"type":"command","command":"(\\")?[^"\\]*plannotator(\.exe)?(\\")?","timeout":345600\}\]\}\]\}\}$'
+
+repair_legacy_plugin_hooks() {
+    _clone="$1"
+    _rel="apps/hook/hooks/hooks.json"
+    [ -f "$_clone/$_rel" ] || return 0
+    command -v git >/dev/null 2>&1 || return 0
+    # Only a git clone that tracks the file...
+    git -C "$_clone" cat-file -e "HEAD:$_rel" 2>/dev/null || return 0
+    # ...and only while it differs from HEAD (exit 1; 0 is clean, >1 an error).
+    _diff_rc=0
+    git -C "$_clone" diff --quiet HEAD -- "$_rel" 2>/dev/null || _diff_rc=$?
+    [ "$_diff_rc" -eq 1 ] || return 0
+    _compact=$(tr -d ' \t\r\n' < "$_clone/$_rel" 2>/dev/null) || return 0
+    printf '%s' "$_compact" | grep -Eq "$LEGACY_PLUGIN_HOOKS_RE" || return 0
+    if git -C "$_clone" checkout -q -- "$_rel" 2>/dev/null; then
+        echo "Restored ${_clone}/${_rel} from its git checkout (an earlier installer had rewritten it)."
+    fi
 }
-HOOKS_EOF
-    echo "Updated plugin hooks at ${PLUGIN_HOOKS}"
-fi
+repair_legacy_plugin_hooks "$PLUGIN_MARKETPLACE_DIR" || true
 
 # Clear any cached OpenCode plugin to force fresh download on next run.
-# An OpenCode opt-out (#1178) leaves OpenCode's own cache directory alone;
-# the Bun package cache is a shared cache, not OpenCode's home, and is
-# always cleared.
+# Both OpenCode generations root their cache at ${XDG_CACHE_HOME:-~/.cache}/opencode:
+#   OpenCode 1: node_modules/@plannotator and packages/@plannotator
+#   OpenCode 2: npm/<name>@<spec>/<generation>/ (packages/util/src/npm.ts),
+#               so our plugin is npm/@plannotator/opencode@<spec>
+#               (opencode@latest for the documented config entry).
+# Only our own package's entries are removed. An OpenCode opt-out (#1178)
+# leaves OpenCode's own cache directory alone; the Bun package cache is a
+# shared cache, not OpenCode's home, and is always cleared.
 if [ "$skip_opencode" -eq 0 ]; then
-    rm -rf "$HOME/.cache/opencode/node_modules/@plannotator" "$HOME/.cache/opencode/packages/@plannotator" 2>/dev/null || true
+    OPENCODE_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/opencode"
+    rm -rf "$OPENCODE_CACHE_DIR/node_modules/@plannotator" "$OPENCODE_CACHE_DIR/packages/@plannotator" 2>/dev/null || true
+    for _oc_entry in "$OPENCODE_CACHE_DIR"/npm/@plannotator/opencode@*; do
+        [ -e "$_oc_entry" ] || [ -L "$_oc_entry" ] || continue
+        rm -rf "$_oc_entry" 2>/dev/null || true
+    done
+    # The scope directory goes only when nothing else is left in it.
+    rmdir "$OPENCODE_CACHE_DIR/npm/@plannotator" 2>/dev/null || true
 fi
 rm -rf "$HOME/.bun/install/cache/@plannotator" 2>/dev/null || true
 

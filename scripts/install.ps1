@@ -754,45 +754,52 @@ Install-CallFlowRuntime
 
 Show-PathAdvice
 
-# Validate plugin hooks.json if plugin is already installed
-$pluginHooks = if ($env:CLAUDE_CONFIG_DIR) { "$env:CLAUDE_CONFIG_DIR\plugins\marketplaces\plannotator\apps\hook\hooks\hooks.json" } else { "$env:USERPROFILE\.claude\plugins\marketplaces\plannotator\apps\hook\hooks\hooks.json" }
-if (Test-Path $pluginHooks) {
-    # Use full path on Windows so the hook works without PATH being set in the shell
-    $exePath = "$installDir\plannotator.exe"
-    # Convert backslashes to forward slashes and escape for JSON
-    $exePathJson = $exePath.Replace('\', '/')
-    @"
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "EnterPlanMode",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$exePathJson\" improve-context",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PermissionRequest": [
-      {
-        "matcher": "ExitPlanMode",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$exePathJson\"",
-            "timeout": 345600
-          }
-        ]
-      }
-    ]
-  }
+# Claude Code plugin: repair the marketplace clone, never rewrite it.
+#
+# <claude config>\plugins\marketplaces\plannotator is Claude Code's own git
+# clone of this repository; installing or updating the plugin copies
+# apps/hook from it into the plugin cache. Installers used to overwrite its
+# apps/hook/hooks/hooks.json with a hard-coded copy (#230 stale timeout, #267
+# Windows exe path). That copy drifted from the repo file (#689 dropped the
+# EnterPlanMode hook; later it dropped "modules", the Claude Code mod), so
+# nothing writes it now: the clone's own file is the source of truth.
+#
+# An earlier installer's rewrite can still be sitting in the clone as a local
+# edit. Restore the file from the clone's HEAD, but only when it differs from
+# HEAD AND its content (whitespace removed) is exactly one of the shapes those
+# installers wrote, so a user's own edit is never discarded. Needs git. Same
+# pattern as LEGACY_PLUGIN_HOOKS_RE in install.sh and install.cmd (keep the
+# three in step); written with \x22 / \x5c and \A / \z so it carries no
+# quote, pipe, percent or exclamation mark and cmd.exe can carry it verbatim.
+$pluginMarketplaceDir = if ($env:CLAUDE_CONFIG_DIR) { "$env:CLAUDE_CONFIG_DIR\plugins\marketplaces\plannotator" } else { "$env:USERPROFILE\.claude\plugins\marketplaces\plannotator" }
+$pluginHooks = "$pluginMarketplaceDir\apps\hook\hooks\hooks.json"
+$legacyPluginHooksRe = '\A\{\x22hooks\x22:\{(\x22PreToolUse\x22:\[\{\x22matcher\x22:\x22EnterPlanMode\x22,\x22hooks\x22:\[\{\x22type\x22:\x22command\x22,\x22command\x22:\x22(\x5c\x22)?[^\x22\x5c]*plannotator(\.exe)?(\x5c\x22)?improve-context\x22,\x22timeout\x22:5\}\]\}\],)?\x22PermissionRequest\x22:\[\{\x22matcher\x22:\x22ExitPlanMode\x22,\x22hooks\x22:\[\{\x22type\x22:\x22command\x22,\x22command\x22:\x22(\x5c\x22)?[^\x22\x5c]*plannotator(\.exe)?(\x5c\x22)?\x22,\x22timeout\x22:345600\}\]\}\]\}\}\z'
+
+function Repair-LegacyPluginHooks {
+    param([string]$Clone)
+    $rel = "apps/hook/hooks/hooks.json"
+    $file = Join-Path $Clone "apps\hook\hooks\hooks.json"
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return }
+    # $ErrorActionPreference=Stop would turn git's stderr into a terminating
+    # error under Windows PowerShell 5.1; every step here is best effort.
+    $local:ErrorActionPreference = 'Continue'
+    # Only a git clone that tracks the file...
+    & git -C $Clone cat-file -e "HEAD:$rel" 2>$null
+    if ($LASTEXITCODE -ne 0) { return }
+    # ...and only while it differs from HEAD (exit 1; 0 is clean, >1 an error).
+    & git -C $Clone diff --quiet HEAD -- $rel 2>$null
+    if ($LASTEXITCODE -ne 1) { return }
+    $raw = Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $raw) { return }
+    $compact = $raw -replace '[\s\uFEFF]', ''
+    if ($compact -notmatch $legacyPluginHooksRe) { return }
+    & git -C $Clone checkout -q -- $rel 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Restored $file from its git checkout (an earlier installer had rewritten it)."
+    }
 }
-"@ | Set-Content -Path $pluginHooks
-    Write-Host "Updated plugin hooks at $pluginHooks"
-}
+try { Repair-LegacyPluginHooks -Clone $pluginMarketplaceDir } catch { }
 
 # Codex hooks on Windows are still experimental upstream. Do not mutate
 # the Codex home automatically from the Windows installer until that
@@ -907,12 +914,27 @@ if ($vibeAvailable -and $skipVibeResolved) {
     Write-Host "/plannotator-last is not supported for Vibe on Windows yet."
 }
 
-# Clear OpenCode plugin cache. An OpenCode opt-out (#1178) leaves OpenCode's
-# own cache directory alone; the Bun package cache is a shared cache, not
-# OpenCode's home, and is always cleared.
+# Clear OpenCode plugin cache. Both OpenCode generations root their cache at
+# $env:XDG_CACHE_HOME\opencode, else $env:USERPROFILE\.cache\opencode (on
+# Windows too: OpenCode uses XDG paths off os.homedir(), not %LOCALAPPDATA%).
+#   OpenCode 1: node_modules\@plannotator and packages\@plannotator
+#   OpenCode 2: npm\<name>@<spec>\<generation>\ (packages/util/src/npm.ts), so
+#               our plugin is npm\@plannotator\opencode@<spec>.
+# Only our own package's entries are removed. An OpenCode opt-out (#1178)
+# leaves OpenCode's own cache directory alone; the Bun package cache is a
+# shared cache, not OpenCode's home, and is always cleared.
 if (-not $skipOpencodeResolved) {
-    Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\opencode\node_modules\@plannotator" -ErrorAction SilentlyContinue
-    Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\opencode\packages\@plannotator" -ErrorAction SilentlyContinue
+    $opencodeCacheDir = if ($env:XDG_CACHE_HOME) { Join-Path $env:XDG_CACHE_HOME "opencode" } else { "$env:USERPROFILE\.cache\opencode" }
+    Remove-Item -Recurse -Force -LiteralPath "$opencodeCacheDir\node_modules\@plannotator" -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force -LiteralPath "$opencodeCacheDir\packages\@plannotator" -ErrorAction SilentlyContinue
+    $opencodeNpmScope = "$opencodeCacheDir\npm\@plannotator"
+    Get-ChildItem -LiteralPath $opencodeNpmScope -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'opencode@*' } |
+        ForEach-Object { Remove-Item -Recurse -Force -LiteralPath $_.FullName -ErrorAction SilentlyContinue }
+    # The scope directory goes only when nothing else is left in it.
+    if ((Test-Path -LiteralPath $opencodeNpmScope) -and -not (Get-ChildItem -LiteralPath $opencodeNpmScope -Force -ErrorAction SilentlyContinue)) {
+        Remove-Item -Force -LiteralPath $opencodeNpmScope -ErrorAction SilentlyContinue
+    }
 }
 Remove-Item -Recurse -Force "$env:USERPROFILE\.bun\install\cache\@plannotator" -ErrorAction SilentlyContinue
 

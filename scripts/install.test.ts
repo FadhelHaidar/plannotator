@@ -38,23 +38,13 @@ const CORE_SKILLS = [
 describe("install.sh", () => {
   const script = readScript("install.sh");
 
-  test("hooks.json heredoc is valid JSON", () => {
-    // Extract the JSON between the HOOKS_EOF heredoc markers
-    const match = script.match(/cat > "\$PLUGIN_HOOKS" << 'HOOKS_EOF'\n([\s\S]*?)\nHOOKS_EOF/);
-    expect(match).toBeTruthy();
-    const json = JSON.parse(match![1]);
-    expect(json.hooks.PermissionRequest).toBeArray();
-    expect(json.hooks.PermissionRequest[0].matcher).toBe("ExitPlanMode");
-    expect(json.hooks.PermissionRequest[0].hooks[0].type).toBe("command");
-    expect(json.hooks.PermissionRequest[0].hooks[0].command).toBe("plannotator");
-    expect(json.hooks.PermissionRequest[0].hooks[0].timeout).toBe(345600);
-    // EnterPlanMode hook drives the compound-skill improvement-hook injection.
-    // It must be re-emitted on every install — see apps/hook/hooks/hooks.json.
-    expect(json.hooks.PreToolUse).toBeArray();
-    expect(json.hooks.PreToolUse[0].matcher).toBe("EnterPlanMode");
-    expect(json.hooks.PreToolUse[0].hooks[0].type).toBe("command");
-    expect(json.hooks.PreToolUse[0].hooks[0].command).toBe("plannotator improve-context");
-    expect(json.hooks.PreToolUse[0].hooks[0].timeout).toBe(5);
+  test("never writes the Claude Code marketplace clone's hooks.json", () => {
+    // The clone is Claude Code's own checkout of this repo, and its hooks.json
+    // is the source of truth. A hard-coded rewrite dropped keys twice (#689
+    // the EnterPlanMode hook, then "modules", the Claude Code mod).
+    expect(script).not.toMatch(/>\s*"\$PLUGIN_HOOKS"/);
+    expect(script).not.toContain("<< 'HOOKS_EOF'");
+    expect(script).toContain('repair_legacy_plugin_hooks "$PLUGIN_MARKETPLACE_DIR" || true');
   });
 
   test("installs to ~/.local/bin", () => {
@@ -338,7 +328,7 @@ describe("install.sh", () => {
       'if [ "$skip_skills" -eq 0 ] && ! command -v git &>/dev/null; then',
     );
     expect(gitGateIndex).toBeGreaterThan(0);
-    const pluginHooksIndex = script.indexOf('cat > "$PLUGIN_HOOKS"');
+    const pluginHooksIndex = script.indexOf('repair_legacy_plugin_hooks "$PLUGIN_MARKETPLACE_DIR" || true');
     const codexHooksIndex = script.indexOf('enable_codex_hooks_config || true');
     expect(pluginHooksIndex).toBeGreaterThan(0);
     expect(pluginHooksIndex).toBeLessThan(gitGateIndex);
@@ -565,28 +555,10 @@ describe("install.sh", () => {
 describe("install.ps1", () => {
   const script = readScript("install.ps1");
 
-  test("hooks.json has valid structure", () => {
-    // PS1 uses @"..."@ (interpolated) with $exePathJson for full exe path.
-    // Verify structural keys since the command value is a dynamic variable.
-    expect(script).toContain('"PermissionRequest"');
-    expect(script).toContain('"matcher": "ExitPlanMode"');
-    expect(script).toContain('"type": "command"');
-    expect(script).toContain('"timeout": 345600');
-    expect(script).toContain('"command":');
-    // EnterPlanMode hook drives the compound-skill improvement-hook injection.
-    expect(script).toContain('"PreToolUse"');
-    expect(script).toContain('"matcher": "EnterPlanMode"');
-    // The exe path is JSON-escaped-quoted so hooks survive a space in the
-    // install path (e.g. C:\Users\John Smith\...). Unquoted paths word-split
-    // when the hook shell runs them and the hook silently never fires.
-    expect(script).toContain('"command": "\\"$exePathJson\\" improve-context"');
-    expect(script).toContain('"command": "\\"$exePathJson\\""');
-    expect(script).toContain('"timeout": 5');
-  });
-
-  test("uses full exe path in hooks.json", () => {
-    expect(script).toContain("$exePathJson");
-    expect(script).toContain(".Replace('\\', '/')");
+  test("never writes the Claude Code marketplace clone's hooks.json", () => {
+    expect(script).not.toMatch(/Set-Content -Path \$pluginHooks/);
+    expect(script).not.toContain("$exePathJson");
+    expect(script).toContain("try { Repair-LegacyPluginHooks -Clone $pluginMarketplaceDir } catch { }");
   });
 
   test("handles both PS 5.1 and PS 7+ checksum response types", () => {
@@ -860,26 +832,10 @@ describe("install.ps1", () => {
 describe("install.cmd", () => {
   const script = readScript("install.cmd");
 
-  test("hooks.json echo block produces valid JSON structure", () => {
-    // The .cmd file uses echo statements to produce JSON.
-    expect(script).toContain('echo   "hooks": {');
-    expect(script).toContain('echo     "PermissionRequest": [');
-    expect(script).toContain('echo         "matcher": "ExitPlanMode",');
-    expect(script).toContain('echo             "type": "command",');
-    expect(script).toContain('echo             "command":');
-    expect(script).toContain('echo             "timeout": 345600');
-    // EnterPlanMode hook drives the compound-skill improvement-hook injection.
-    expect(script).toContain('echo     "PreToolUse": [');
-    expect(script).toContain('echo         "matcher": "EnterPlanMode",');
-    // Quoted for space-in-path installs — same invariant as install.ps1.
-    expect(script).toContain('echo             "command": "\\"!EXE_PATH!\\" improve-context",');
-    expect(script).toContain('echo             "command": "\\"!EXE_PATH!\\"",');
-    expect(script).toContain('echo             "timeout": 5');
-  });
-
-  test("uses full exe path in hooks.json", () => {
-    expect(script).toContain("EXE_PATH");
-    expect(script).toContain('!INSTALL_PATH:\\=/!');
+  test("never writes the Claude Code marketplace clone's hooks.json", () => {
+    expect(script).not.toContain('> "!PLUGIN_HOOKS!"');
+    expect(script).not.toContain("EXE_PATH");
+    expect(script).toContain('if exist "!PLUGIN_HOOKS!" call :RepairLegacyPluginHooks');
   });
 
   test("uses only ASCII text so cmd.exe consoles render output on any codepage", () => {
@@ -2169,7 +2125,7 @@ const FAKE_BINARY_SHA256 = createHash("sha256").update(FAKE_BINARY).digest("hex"
 const ATTESTATION_FIXTURE = join(scriptsDir, "fixtures", "attestations-response.json");
 
 type GhBehavior = "reject-bundle" | "fail-all" | "pass-all";
-type GitBehavior = "fail" | "sparse-unsupported" | "network-error";
+type GitBehavior = "fail" | "sparse-unsupported" | "network-error" | "real-no-clone";
 
 // git shim that behaves like git 2.23 (macOS with stale Xcode CLT, #1238):
 // `clone --sparse` dies instantly on "unknown option" (exit 129, before any
@@ -2229,6 +2185,10 @@ function gitShimBody(git: GitBehavior): string {
       return GIT_NETWORK_ERROR_SHIM;
     case "fail":
       return "#!/bin/bash\nexit 1\n";
+    case "real-no-clone":
+      // The host git for everything but a clone (which would reach the
+      // network), so the installer can inspect a real fixture repository.
+      return `#!/bin/bash\nif [ "$1" = "clone" ]; then exit 1; fi\nexec "${Bun.which("git")}" "$@"\n`;
   }
 }
 
@@ -2306,7 +2266,11 @@ exit 1`
   return { home, stub };
 }
 
-function runInstallSh(sandbox: { home: string; stub: string }, args: string[]) {
+function runInstallSh(
+  sandbox: { home: string; stub: string },
+  args: string[],
+  extraEnv: Record<string, string> = {},
+) {
   const r = Bun.spawnSync(
     ["bash", join(scriptsDir, "install.sh"), ...args],
     {
@@ -2318,6 +2282,7 @@ function runInstallSh(sandbox: { home: string; stub: string }, args: string[]) {
         STUB_ATT_JSON: ATTESTATION_FIXTURE,
         PLANNOTATOR_SKIP_SEM_INSTALL: "1",
         PLANNOTATOR_SKIP_AGENT_TERMINAL_INSTALL: "1",
+        ...extraEnv,
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -3054,5 +3019,299 @@ describe("latest tag is parsed by key, not by line (#1655)", () => {
     const cmdScript = readScript("install.cmd");
     expect(cmdScript).toContain("ConvertFrom-Json).tag_name");
     expect(cmdScript).not.toContain('findstr /c:"\\"tag_name\\""');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Claude Code marketplace clone: the installers never write it, and repair a
+// hooks.json an earlier installer rewrote.
+//
+// <claude config>/plugins/marketplaces/plannotator is Claude Code's own git
+// clone of this repo; installing or updating the plugin copies apps/hook from
+// it. Installers used to overwrite its apps/hook/hooks/hooks.json with a
+// hard-coded copy that had no "modules" key, so a plugin installed from that
+// clone lost the Claude Code mod. These tests pin both halves: the clone is
+// left byte-for-byte alone, and a clone still carrying an old rewrite is
+// restored to its HEAD, while a user's own edit is never discarded.
+// ---------------------------------------------------------------------------
+
+const REPO_HOOKS_JSON = readFileSync(
+  join(scriptsDir, "..", "apps", "hook", "hooks", "hooks.json"),
+  "utf-8",
+);
+
+// Every hooks.json shape an earlier installer wrote, rebuilt from the old
+// writers: install.sh (#230 PermissionRequest only, #689 + EnterPlanMode),
+// install.ps1 / install.cmd (#230 bare command, #267 unquoted exe path,
+// 47bdd210 quoted exe path; CRLF line endings).
+function legacyPluginHooks(opts: {
+  command: string;
+  improveContext: boolean;
+  eol?: string;
+}): string {
+  const hook = (command: string, timeout: number) => [
+    "        \"hooks\": [",
+    "          {",
+    "            \"type\": \"command\",",
+    `            "command": "${command}",`,
+    `            "timeout": ${timeout}`,
+    "          }",
+    "        ]",
+  ];
+  const lines = ["{", "  \"hooks\": {"];
+  if (opts.improveContext) {
+    lines.push(
+      "    \"PreToolUse\": [",
+      "      {",
+      "        \"matcher\": \"EnterPlanMode\",",
+      ...hook(`${opts.command} improve-context`, 5),
+      "      }",
+      "    ],",
+    );
+  }
+  lines.push(
+    "    \"PermissionRequest\": [",
+    "      {",
+    "        \"matcher\": \"ExitPlanMode\",",
+    ...hook(opts.command, 345600),
+    "      }",
+    "    ]",
+    "  }",
+    "}",
+  );
+  const eol = opts.eol ?? "\n";
+  return lines.join(eol) + eol;
+}
+
+const WIN_EXE = "C:/Users/John Smith/AppData/Local/plannotator/plannotator.exe";
+const LEGACY_REWRITES: Record<string, string> = {
+  "install.sh #230": legacyPluginHooks({ command: "plannotator", improveContext: false }),
+  "install.sh #689": legacyPluginHooks({ command: "plannotator", improveContext: true }),
+  "install.cmd #230": legacyPluginHooks({ command: "plannotator", improveContext: false, eol: "\r\n" }),
+  "install.ps1 #267": legacyPluginHooks({ command: WIN_EXE, improveContext: false, eol: "\r\n" }),
+  "install.ps1 #689": legacyPluginHooks({ command: WIN_EXE, improveContext: true, eol: "\r\n" }),
+  "install.ps1 quoted": legacyPluginHooks({ command: `\\"${WIN_EXE}\\"`, improveContext: true, eol: "\r\n" }),
+};
+
+// Shapes that are NOT an installer's rewrite and must never be discarded.
+const NOT_LEGACY: Record<string, string> = {
+  "the repo's hooks.json": REPO_HOOKS_JSON,
+  "a user's changed timeout": legacyPluginHooks({ command: "plannotator", improveContext: true }).replace("345600", "60"),
+  "a user's extra key": legacyPluginHooks({ command: "plannotator", improveContext: true }).replace(
+    "{\n  \"hooks\"",
+    "{\n  \"modules\": [\"./mine.ts\"],\n  \"hooks\"",
+  ),
+  "a user's other command": legacyPluginHooks({ command: "my-review-tool", improveContext: false }),
+};
+
+function compactHooks(text: string): string {
+  return text.replace(/[\s\uFEFF]/g, "");
+}
+
+describe("legacy plugin hooks.json pattern (all three installers)", () => {
+  const shRe = /^LEGACY_PLUGIN_HOOKS_RE='(.*)'$/m.exec(readScript("install.sh"))?.[1];
+  const ps1Re = /^\$legacyPluginHooksRe = '(.*)'$/m.exec(readScript("install.ps1"))?.[1];
+  const cmdRe = /^set "PLN_HOOKS_RE=(.*)"$/m.exec(readScript("install.cmd"))?.[1];
+
+  test("install.ps1 and install.cmd carry the identical .NET pattern", () => {
+    expect(ps1Re).toBeTruthy();
+    expect(cmdRe).toBe(ps1Re!);
+    // cmd.exe would parse these: keep them out of the pattern. (A caret is
+    // literal inside the quoted set as long as the line has no "!".)
+    expect(cmdRe!).not.toMatch(/["|!%&<>]/);
+  });
+
+  // ERE (install.sh) is JS-compatible as written; the .NET form only needs
+  // its \A / \z anchors spelled for JS.
+  const patterns = () => ({
+    "install.sh": new RegExp(shRe!),
+    "install.ps1/cmd": new RegExp(ps1Re!.replace(/^\\A/, "^").replace(/\\z$/, "$")),
+  });
+
+  for (const [name, text] of Object.entries(LEGACY_REWRITES)) {
+    test(`recognizes the ${name} rewrite`, () => {
+      for (const [script, re] of Object.entries(patterns())) {
+        expect({ script, match: re.test(compactHooks(text)) }).toEqual({ script, match: true });
+      }
+    });
+  }
+
+  for (const [name, text] of Object.entries(NOT_LEGACY)) {
+    test(`does not recognize ${name}`, () => {
+      for (const [script, re] of Object.entries(patterns())) {
+        expect({ script, match: re.test(compactHooks(text)) }).toEqual({ script, match: false });
+      }
+    });
+  }
+});
+
+function makeMarketplaceClone(home: string, configDir = join(home, ".claude")): string {
+  const clone = join(configDir, "plugins", "marketplaces", "plannotator");
+  mkdirSync(join(clone, "apps", "hook", "hooks"), { recursive: true });
+  writeFileSync(join(clone, "apps", "hook", "hooks", "hooks.json"), REPO_HOOKS_JSON);
+  writeFileSync(join(clone, "README.md"), "plannotator\n");
+  const gitEnv = { HOME: home, PATH: process.env.PATH ?? "/usr/bin:/bin" };
+  const run = (args: string[]) => {
+    const r = Bun.spawnSync([Bun.which("git")!, "-C", clone, ...args], { env: gitEnv });
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+    return r.stdout.toString();
+  };
+  run(["init", "-q", "-b", "main"]);
+  run(["add", "-A"]);
+  run(["-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "fixture"]);
+  return clone;
+}
+
+function cloneStatus(home: string, clone: string): string {
+  const r = Bun.spawnSync([Bun.which("git")!, "-C", clone, "status", "--porcelain"], {
+    env: { HOME: home, PATH: process.env.PATH ?? "/usr/bin:/bin" },
+  });
+  return r.stdout.toString();
+}
+
+const SANDBOX_INSTALL_ARGS = [
+  "--version", "v99.9.9", "--non-interactive", "--no-extras", "--skip-skills",
+];
+
+describe.skipIf(process.platform === "win32" || !Bun.which("node") || !Bun.which("git"))(
+  "install.sh leaves the Claude Code marketplace clone alone (stubbed PATH, sandbox HOME)",
+  () => {
+    test("a clean clone is untouched, so the plugin keeps its mod", () => {
+      const sandbox = setupInstallSandbox({ gh: "pass-all", git: "real-no-clone" });
+      const clone = makeMarketplaceClone(sandbox.home);
+      const hooks = join(clone, "apps", "hook", "hooks", "hooks.json");
+      const { code, out } = runInstallSh(sandbox, SANDBOX_INSTALL_ARGS);
+      expect(code).toBe(0);
+      expect(readFileSync(hooks, "utf-8")).toBe(REPO_HOOKS_JSON);
+      expect(JSON.parse(readFileSync(hooks, "utf-8")).modules).toEqual(["./mod/register.ts"]);
+      expect(cloneStatus(sandbox.home, clone)).toBe("");
+      expect(out).not.toContain("Restored ");
+    });
+
+    test("a clone carrying an earlier installer's rewrite is restored to HEAD (CLAUDE_CONFIG_DIR)", () => {
+      const sandbox = setupInstallSandbox({ gh: "pass-all", git: "real-no-clone" });
+      const configDir = join(sandbox.home, "claude-config");
+      const clone = makeMarketplaceClone(sandbox.home, configDir);
+      const hooks = join(clone, "apps", "hook", "hooks", "hooks.json");
+      writeFileSync(hooks, LEGACY_REWRITES["install.sh #689"]!);
+      expect(cloneStatus(sandbox.home, clone)).not.toBe("");
+      const { code, out } = runInstallSh(sandbox, SANDBOX_INSTALL_ARGS, {
+        CLAUDE_CONFIG_DIR: configDir,
+      });
+      expect(code).toBe(0);
+      expect(out).toContain(`Restored ${hooks} from its git checkout`);
+      expect(readFileSync(hooks, "utf-8")).toBe(REPO_HOOKS_JSON);
+      expect(cloneStatus(sandbox.home, clone)).toBe("");
+    });
+
+    test("a user's own edit to the clone is never discarded", () => {
+      const sandbox = setupInstallSandbox({ gh: "pass-all", git: "real-no-clone" });
+      const clone = makeMarketplaceClone(sandbox.home);
+      const hooks = join(clone, "apps", "hook", "hooks", "hooks.json");
+      const edited = NOT_LEGACY["a user's changed timeout"]!;
+      writeFileSync(hooks, edited);
+      const { code, out } = runInstallSh(sandbox, SANDBOX_INSTALL_ARGS);
+      expect(code).toBe(0);
+      expect(readFileSync(hooks, "utf-8")).toBe(edited);
+      expect(out).not.toContain("Restored ");
+    });
+
+    test("without a usable git the rewrite is left as is and the install still succeeds", () => {
+      const sandbox = setupInstallSandbox({ gh: "pass-all", git: "real-no-clone" });
+      const clone = makeMarketplaceClone(sandbox.home);
+      const hooks = join(clone, "apps", "hook", "hooks", "hooks.json");
+      writeFileSync(hooks, LEGACY_REWRITES["install.sh #689"]!);
+      writeFileSync(join(sandbox.stub, "git"), gitShimBody("fail"), { mode: 0o755 });
+      const { code } = runInstallSh(sandbox, SANDBOX_INSTALL_ARGS);
+      expect(code).toBe(0);
+      expect(readFileSync(hooks, "utf-8")).toBe(LEGACY_REWRITES["install.sh #689"]!);
+    });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// OpenCode plugin cache. OpenCode 2 caches npm plugins at
+// <cache>/opencode/npm/<name>@<spec>/<generation>/ (packages/util/src/npm.ts
+// in OpenCode 2.0.22), so @plannotator/opencode@latest is the nested
+// npm/@plannotator/opencode@latest. OpenCode 1 used node_modules/ and
+// packages/. Both root <cache> at ${XDG_CACHE_HOME:-~/.cache}.
+// ---------------------------------------------------------------------------
+
+function seedOpenCodeCache(cacheRoot: string) {
+  const oc = join(cacheRoot, "opencode");
+  const paths = {
+    oc1Plugin: join(oc, "node_modules", "@plannotator", "opencode", "package.json"),
+    oc2Latest: join(oc, "npm", "@plannotator", "opencode@latest", "1790000000000", "node_modules", "@plannotator", "opencode", "package.json"),
+    oc2Pinned: join(oc, "npm", "@plannotator", "opencode@0.27.25", "1790000000000", "package.json"),
+    oc2Sibling: join(oc, "npm", "@plannotator", "pi-extension@latest", "1790000000000", "package.json"),
+    oc2Unrelated: join(oc, "npm", "some-plugin@latest", "1790000000000", "package.json"),
+  };
+  for (const p of Object.values(paths)) {
+    mkdirSync(join(p, ".."), { recursive: true });
+    writeFileSync(p, "{}\n");
+  }
+  return paths;
+}
+
+describe.skipIf(process.platform === "win32" || !Bun.which("node"))(
+  "install.sh clears the OpenCode plugin cache (stubbed PATH, sandbox HOME)",
+  () => {
+    test("removes OpenCode 1 and OpenCode 2 entries for our plugin and nothing else", () => {
+      const sandbox = setupInstallSandbox({ gh: "pass-all" });
+      const cache = seedOpenCodeCache(join(sandbox.home, ".cache"));
+      const { code } = runInstallSh(sandbox, SANDBOX_INSTALL_ARGS);
+      expect(code).toBe(0);
+      const npmScope = join(sandbox.home, ".cache", "opencode", "npm", "@plannotator");
+      expect(existsSync(cache.oc1Plugin)).toBe(false);
+      expect(existsSync(join(npmScope, "opencode@latest"))).toBe(false);
+      expect(existsSync(join(npmScope, "opencode@0.27.25"))).toBe(false);
+      expect(existsSync(cache.oc2Sibling)).toBe(true);
+      expect(existsSync(cache.oc2Unrelated)).toBe(true);
+    });
+
+    test("honors XDG_CACHE_HOME and drops the scope directory once it is empty", () => {
+      const sandbox = setupInstallSandbox({ gh: "pass-all" });
+      const xdg = join(sandbox.home, "xdg-cache");
+      const scope = join(xdg, "opencode", "npm", "@plannotator");
+      const latest = join(scope, "opencode@latest", "1790000000000", "package.json");
+      mkdirSync(join(latest, ".."), { recursive: true });
+      writeFileSync(latest, "{}\n");
+      const unrelated = join(xdg, "opencode", "npm", "some-plugin@latest", "package.json");
+      mkdirSync(join(unrelated, ".."), { recursive: true });
+      writeFileSync(unrelated, "{}\n");
+      const { code } = runInstallSh(sandbox, SANDBOX_INSTALL_ARGS, { XDG_CACHE_HOME: xdg });
+      expect(code).toBe(0);
+      expect(existsSync(scope)).toBe(false);
+      expect(existsSync(unrelated)).toBe(true);
+    });
+
+    test("--skip-opencode leaves OpenCode's cache alone", () => {
+      const sandbox = setupInstallSandbox({ gh: "pass-all" });
+      const cache = seedOpenCodeCache(join(sandbox.home, ".cache"));
+      const { code } = runInstallSh(sandbox, [...SANDBOX_INSTALL_ARGS, "--skip-opencode"]);
+      expect(code).toBe(0);
+      for (const p of Object.values(cache)) expect(existsSync(p)).toBe(true);
+    });
+  },
+);
+
+describe("Windows installers clear the OpenCode 2 plugin cache (source scan)", () => {
+  test("install.ps1 roots the cache at XDG_CACHE_HOME and removes only opencode@* under npm\\@plannotator", () => {
+    const script = readScript("install.ps1");
+    expect(script).toContain(
+      '$opencodeCacheDir = if ($env:XDG_CACHE_HOME) { Join-Path $env:XDG_CACHE_HOME "opencode" } else { "$env:USERPROFILE\\.cache\\opencode" }',
+    );
+    expect(script).toContain('$opencodeNpmScope = "$opencodeCacheDir\\npm\\@plannotator"');
+    expect(script).toContain("Where-Object { $_.Name -like 'opencode@*' }");
+    expect(script).not.toContain('"$env:USERPROFILE\\.cache\\opencode\\node_modules\\@plannotator"');
+  });
+
+  test("install.cmd roots the cache at XDG_CACHE_HOME and removes only opencode@* under npm\\@plannotator", () => {
+    const script = readScript("install.cmd");
+    expect(script).toContain('set "OPENCODE_CACHE_DIR=%XDG_CACHE_HOME%\\opencode"');
+    expect(script).toContain(
+      'for /d %%D in ("!OPENCODE_CACHE_DIR!\\npm\\@plannotator\\opencode@*") do rmdir /s /q "%%~fD" >nul 2>&1',
+    );
+    expect(script).not.toContain('"%USERPROFILE%\\.cache\\opencode\\node_modules\\@plannotator"');
   });
 });

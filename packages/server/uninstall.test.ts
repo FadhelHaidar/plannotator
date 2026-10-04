@@ -386,7 +386,30 @@ describe("default uninstall", () => {
       "opencode",
       "0.25.1@@@1",
     );
+    // OpenCode 2 caches npm plugins at <cache>/opencode/npm/<name>@<spec>/<generation>/.
+    const openCode2PluginCache = join(
+      homeDir,
+      ".cache",
+      "opencode",
+      "npm",
+      "@plannotator",
+      "opencode@latest",
+      "1790000000000",
+      "package.json",
+    );
+    const openCode2UnrelatedCache = join(
+      homeDir,
+      ".cache",
+      "opencode",
+      "npm",
+      "@plannotator",
+      "pi-extension@latest",
+      "1790000000000",
+      "package.json",
+    );
     writeText(openCodePackageCache);
+    writeText(openCode2PluginCache);
+    writeText(openCode2UnrelatedCache);
     writeText(unrelatedScopedCache);
     writeText(unrelatedBunCache);
     writeText(bunOpenCodeVersionCache);
@@ -517,6 +540,8 @@ describe("default uninstall", () => {
     expect(vibeHooksAfter).not.toContain("exit_plan_mode");
     expect(existsSync(customStaleLayoutEntry)).toBe(true);
     expect(existsSync(openCodePackageCache)).toBe(false);
+    expect(existsSync(join(homeDir, ".cache", "opencode", "npm", "@plannotator", "opencode@latest"))).toBe(false);
+    expect(existsSync(openCode2UnrelatedCache)).toBe(true);
     expect(existsSync(unrelatedScopedCache)).toBe(true);
     expect(existsSync(unrelatedBunCache)).toBe(true);
     expect(existsSync(bunOpenCodeVersionCache)).toBe(false);

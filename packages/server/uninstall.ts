@@ -848,6 +848,20 @@ function removeInstalledFiles(
     removePath(cachePath, request, state);
   }
 
+  // OpenCode 2 caches npm plugins at <cache>/opencode/npm/<name>@<spec>/
+  // (packages/util/src/npm.ts), i.e. npm/@plannotator/opencode@latest.
+  for (const cacheRoot of uniquePaths([
+    paths.xdgCacheDir,
+    join(environment.homeDir, ".cache"),
+  ])) {
+    cleanupDirectoryEntriesWithPrefix(
+      join(cacheRoot, "opencode", "npm", "@plannotator"),
+      "opencode",
+      request,
+      state,
+    );
+  }
+
   cleanupDirectoryEntriesWithPrefix(
     join(environment.homeDir, ".bun", "install", "cache", "@plannotator"),
     "opencode",

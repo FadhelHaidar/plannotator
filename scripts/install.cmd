@@ -898,47 +898,26 @@ call :InstallCallFlowRuntime
 
 call :PrintPathAdvice
 
-REM Validate plugin hooks.json if plugin is already installed
+REM Claude Code plugin: repair the marketplace clone, never rewrite it.
+REM
+REM <claude config>\plugins\marketplaces\plannotator is Claude Code's own git
+REM clone of this repository; installing or updating the plugin copies
+REM apps/hook from it into the plugin cache. Installers used to overwrite its
+REM apps/hook/hooks/hooks.json with a hard-coded copy (#230 stale timeout,
+REM #267 Windows exe path). That copy drifted from the repo file (#689 dropped
+REM the EnterPlanMode hook; later it dropped "modules", the Claude Code mod),
+REM so nothing writes it now: the clone's own file is the source of truth.
+REM An earlier installer's rewrite can still be sitting in the clone as a
+REM local edit; :RepairLegacyPluginHooks restores it from the clone's HEAD,
+REM but only when it differs from HEAD AND matches one of the shapes those
+REM installers wrote, so a user's own edit is never discarded.
 if defined CLAUDE_CONFIG_DIR (
-    set "PLUGIN_HOOKS=%CLAUDE_CONFIG_DIR%\plugins\marketplaces\plannotator\apps\hook\hooks\hooks.json"
+    set "PLUGIN_MARKETPLACE_DIR=%CLAUDE_CONFIG_DIR%\plugins\marketplaces\plannotator"
 ) else (
-    set "PLUGIN_HOOKS=%USERPROFILE%\.claude\plugins\marketplaces\plannotator\apps\hook\hooks\hooks.json"
+    set "PLUGIN_MARKETPLACE_DIR=%USERPROFILE%\.claude\plugins\marketplaces\plannotator"
 )
-if exist "!PLUGIN_HOOKS!" (
-    REM Use full path so the hook works without PATH being set in the shell
-    set "EXE_PATH=!INSTALL_PATH:\=/!"
-    (
-echo {
-echo   "hooks": {
-echo     "PreToolUse": [
-echo       {
-echo         "matcher": "EnterPlanMode",
-echo         "hooks": [
-echo           {
-echo             "type": "command",
-echo             "command": "\"!EXE_PATH!\" improve-context",
-echo             "timeout": 5
-echo           }
-echo         ]
-echo       }
-echo     ],
-echo     "PermissionRequest": [
-echo       {
-echo         "matcher": "ExitPlanMode",
-echo         "hooks": [
-echo           {
-echo             "type": "command",
-echo             "command": "\"!EXE_PATH!\"",
-echo             "timeout": 345600
-echo           }
-echo         ]
-echo       }
-echo     ]
-echo   }
-echo }
-    ) > "!PLUGIN_HOOKS!"
-    echo Updated plugin hooks at !PLUGIN_HOOKS!
-)
+set "PLUGIN_HOOKS=!PLUGIN_MARKETPLACE_DIR!\apps\hook\hooks\hooks.json"
+if exist "!PLUGIN_HOOKS!" call :RepairLegacyPluginHooks
 
 REM Codex hooks on Windows are still experimental upstream. Do not mutate
 REM the Codex home automatically from the cmd installer until that path
@@ -1052,12 +1031,28 @@ if "!VIBE_AVAILABLE!"=="1" if "!SKIP_VIBE!"=="0" (
 )
 
 REM Clear any cached OpenCode plugin to force fresh download on next run.
-REM An OpenCode opt-out (#1178) leaves OpenCode's own cache directory alone;
-REM the Bun package cache is a shared cache, not OpenCode's home, and is
-REM always cleared.
+REM Both OpenCode generations root their cache at %XDG_CACHE_HOME%\opencode,
+REM else %USERPROFILE%\.cache\opencode (on Windows too: OpenCode uses XDG
+REM paths off the home directory, not %LOCALAPPDATA%).
+REM   OpenCode 1: node_modules\@plannotator and packages\@plannotator
+REM   OpenCode 2: npm\<name>@<spec>\<generation>\ (packages/util/src/npm.ts),
+REM               so our plugin is npm\@plannotator\opencode@<spec>.
+REM Only our own package's entries are removed. An OpenCode opt-out (#1178)
+REM leaves OpenCode's own cache directory alone; the Bun package cache is a
+REM shared cache, not OpenCode's home, and is always cleared.
+if defined XDG_CACHE_HOME (
+    set "OPENCODE_CACHE_DIR=%XDG_CACHE_HOME%\opencode"
+) else (
+    set "OPENCODE_CACHE_DIR=%USERPROFILE%\.cache\opencode"
+)
 if "!SKIP_OPENCODE!"=="0" (
-    if exist "%USERPROFILE%\.cache\opencode\node_modules\@plannotator" rmdir /s /q "%USERPROFILE%\.cache\opencode\node_modules\@plannotator" >nul 2>&1
-    if exist "%USERPROFILE%\.cache\opencode\packages\@plannotator" rmdir /s /q "%USERPROFILE%\.cache\opencode\packages\@plannotator" >nul 2>&1
+    if exist "!OPENCODE_CACHE_DIR!\node_modules\@plannotator" rmdir /s /q "!OPENCODE_CACHE_DIR!\node_modules\@plannotator" >nul 2>&1
+    if exist "!OPENCODE_CACHE_DIR!\packages\@plannotator" rmdir /s /q "!OPENCODE_CACHE_DIR!\packages\@plannotator" >nul 2>&1
+    if exist "!OPENCODE_CACHE_DIR!\npm\@plannotator" (
+        for /d %%D in ("!OPENCODE_CACHE_DIR!\npm\@plannotator\opencode@*") do rmdir /s /q "%%~fD" >nul 2>&1
+        REM The scope directory goes only when nothing else is left in it.
+        rmdir "!OPENCODE_CACHE_DIR!\npm\@plannotator" >nul 2>&1
+    )
 )
 if exist "%USERPROFILE%\.bun\install\cache\@plannotator" rmdir /s /q "%USERPROFILE%\.bun\install\cache\@plannotator" >nul 2>&1
 
@@ -1716,6 +1711,28 @@ if "!SKIP_SKILLS_FLAG!"=="1" call :AddInstallFlag skip-skills
 if not exist "!_CONFIG_DIR!" mkdir "!_CONFIG_DIR!" >nul 2>&1
 >"!_CONFIG_DIR!\install-flags.json.tmp" echo {"v":1,"flags":[!IFL!]}
 if exist "!_CONFIG_DIR!\install-flags.json.tmp" move /y "!_CONFIG_DIR!\install-flags.json.tmp" "!_CONFIG_DIR!\install-flags.json" >nul 2>&1
+goto :eof
+
+REM ======================================================================
+REM :RepairLegacyPluginHooks - restore the Claude Code marketplace clone's
+REM apps/hook/hooks/hooks.json from its git HEAD when (and only when) it is
+REM an earlier installer's rewrite: it must differ from HEAD and, with all
+REM whitespace removed, match PLN_HOOKS_RE exactly. PLN_HOOKS_RE is the same
+REM pattern as LEGACY_PLUGIN_HOOKS_RE in install.sh and $legacyPluginHooksRe
+REM in install.ps1 (keep the three in step), written with \x22 / \x5c and
+REM \A / \z so it carries no quote, pipe, percent or exclamation mark for
+REM cmd.exe to parse (the one caret, in [^...], is literal inside the quoted
+REM set on a line with no exclamation mark). Needs git; best effort, never
+REM fails the install.
+REM ======================================================================
+:RepairLegacyPluginHooks
+where git >nul 2>&1
+if errorlevel 1 goto :eof
+set "PLN_PLUGIN_CLONE=!PLUGIN_MARKETPLACE_DIR!"
+set "PLN_HOOKS_RE=\A\{\x22hooks\x22:\{(\x22PreToolUse\x22:\[\{\x22matcher\x22:\x22EnterPlanMode\x22,\x22hooks\x22:\[\{\x22type\x22:\x22command\x22,\x22command\x22:\x22(\x5c\x22)?[^\x22\x5c]*plannotator(\.exe)?(\x5c\x22)?improve-context\x22,\x22timeout\x22:5\}\]\}\],)?\x22PermissionRequest\x22:\[\{\x22matcher\x22:\x22ExitPlanMode\x22,\x22hooks\x22:\[\{\x22type\x22:\x22command\x22,\x22command\x22:\x22(\x5c\x22)?[^\x22\x5c]*plannotator(\.exe)?(\x5c\x22)?\x22,\x22timeout\x22:345600\}\]\}\]\}\}\z"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = $env:PLN_PLUGIN_CLONE; $r = 'apps/hook/hooks/hooks.json'; $f = Join-Path $c 'apps\hook\hooks\hooks.json'; if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { exit 0 }; git -C $c cat-file -e ('HEAD:' + $r) 2>$null; if ($LASTEXITCODE -ne 0) { exit 0 }; git -C $c diff --quiet HEAD -- $r 2>$null; if ($LASTEXITCODE -ne 1) { exit 0 }; $t = Get-Content -LiteralPath $f -Raw; if ($null -eq $t) { exit 0 }; if (($t -replace '[\s\uFEFF]', '') -notmatch $env:PLN_HOOKS_RE) { exit 0 }; git -C $c checkout -q -- $r 2>$null; if ($LASTEXITCODE -eq 0) { Write-Output ('Restored ' + $f + ' from its git checkout (an earlier installer had rewritten it).') }"
+set "PLN_PLUGIN_CLONE="
+set "PLN_HOOKS_RE="
 goto :eof
 
 :AddInstallFlag
