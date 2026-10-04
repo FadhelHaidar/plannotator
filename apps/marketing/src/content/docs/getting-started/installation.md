@@ -134,7 +134,12 @@ Same precedence: flag over environment variable over config file. The installer 
 
 ## Updating
 
-To update, run the install command again. It installs the latest release over the old one, and a Plannotator session that is open while it runs keeps working.
+To update, run the install command again. It installs the latest release over the old one, and a Plannotator session that is open while it runs keeps working. It also clears cached OpenCode plugin versions (OpenCode 1 and OpenCode 2), so OpenCode loads the latest `@plannotator/opencode` after a restart.
+
+The install script does not update the Claude Code plugin or the Pi extension. Update those in the agent:
+
+- **Claude Code:** refreshing the marketplace alone does not update an installed plugin. Run `claude plugin marketplace update plannotator`, then `claude plugin update plannotator@plannotator`, then restart Claude Code (or run `/reload-plugins`). Inside Claude Code you can run `/plugin marketplace update plannotator`, then open `/plugin`, go to **Installed**, select **plannotator** and choose **Update now**.
+- **Pi:** run `pi update --extensions` (or `pi update npm:@plannotator/pi-extension`). A plain `pi update` updates only Pi itself.
 
 ### Automatic updates (opt-in)
 
@@ -233,9 +238,11 @@ Every release includes SHA256 checksums (verified automatically) and optional [S
 /plugin install plannotator@plannotator
 ```
 
-Restart Claude Code after installing for hooks to take effect.
+Restart Claude Code after installing for hooks to take effect. To update the plugin later, see [Updating](#updating).
 
-The plugin provides the plan-review hook only. To also get the `/plannotator-*` slash commands you must run the [install script](#prerequisites) — it installs them as Claude Code skills in `~/.claude/skills` (see [Slash commands](#slash-commands) below).
+On Claude Code 2.1.287 or newer, the plugin also runs the [Plannotator mod](/docs/guides/claude-code/#the-plannotator-mod), which is on by default: Claude does not wait while you review, and your decision arrives later as a message. Set `PLANNOTATOR_CLAUDE_MOD=0` to turn it off.
+
+The plugin does not include the `plannotator` binary. To get the binary and the `/plannotator-*` slash commands you must run the [install script](#prerequisites). It installs the commands as Claude Code skills in `~/.claude/skills` (see [Slash commands](#slash-commands) below).
 
 ### Manual installation
 
@@ -272,7 +279,7 @@ claude --plugin-dir ./apps/hook
 
 Plannotator's slash commands (`/plannotator-review`, `/plannotator-annotate`, `/plannotator-last`) are installed as Claude Code skills in `~/.claude/skills` by the install script — Claude Code skills are user-invocable by directory name, so the command names are unchanged. There is no separate `~/.claude/commands` step.
 
-Upgrading from an older version? The installer removes the legacy `~/.claude/commands/plannotator-*.md` files automatically, but the marketplace plugin's old namespaced `plannotator:*` command entries are managed by Claude Code — run `/plugin marketplace update` once so they disappear from the `/` menu.
+Upgrading from an older version? The installer removes the legacy `~/.claude/commands/plannotator-*.md` files automatically, but the marketplace plugin's old namespaced `plannotator:*` command entries are managed by Claude Code. [Update the plugin](#updating) once so they disappear from the `/` menu.
 
 Optional extra skills (compound planning, setup-goal, visual explainer) are not installed by default. Add them with:
 
@@ -407,7 +414,9 @@ Or try it without installing:
 pi -e npm:@plannotator/pi-extension
 ```
 
-Start plan mode with `pi --plan`, or toggle mid-session with `/plannotator-plan-mode` or `Ctrl+Alt+P`. The extension provides file-based plan review, code review (`/plannotator-review`), markdown annotation (`/plannotator-annotate`), bash safety gating during planning, and progress tracking during execution.
+To update it later, run `pi update --extensions` (a plain `pi update` updates only Pi).
+
+Start plan mode with `pi --plan`, or toggle mid-session with `/plannotator-plan-mode` or `Ctrl+Alt+P`. Plan review does not make the agent wait: the agent ends its turn, and your decision arrives later as a message. The extension provides file-based plan review, code review (`/plannotator-review`), markdown annotation (`/plannotator-annotate`), bash safety gating during planning, and progress tracking during execution.
 
 See [Plannotator Meets Pi](/blog/plannotator-meets-pi) for the full walkthrough.
 

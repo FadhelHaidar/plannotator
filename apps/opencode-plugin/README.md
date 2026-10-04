@@ -40,11 +40,14 @@ Install stable OpenCode 2 with `npm install -g @opencode/cli`, then add Plannota
 
 Restart OpenCode 2 and verify that `plannotator` appears in `opencode2 plugin list`.
 
+To update, run the [install script](https://plannotator.ai/docs/getting-started/installation/) again and restart OpenCode 2. The script clears OpenCode 2's cached copy of the plugin, so the restart loads the latest `@plannotator/opencode`.
+
 Plannotator builds against the stable `@opencode/plugin` API and checks its installed package against a real stable OpenCode 2 host in CI. The core `submit_plan` review flow and native slash commands are supported. Capability checks preserve fallbacks for older V2 builds:
 
 - **Slash commands.** Stable OpenCode 2 supports native command execution (anomalyco/opencode issue #2185, PR #44765). Capability is detected from the command draft OpenCode hands the plugin: `ctx.command.transform` exists on both generations, and only the newer draft has `add`. On a host that has it, Plannotator registers `/plannotator-review`, `/plannotator-annotate`, and `/plannotator-last` itself and runs the same machinery OpenCode 1 uses, so your raw arguments reach the CLI unchanged and nothing is routed through the model. On an older host it registers nothing and the commands run from their markdown definitions, which ask the agent to run the `plannotator` CLI and relay its output; that path works but costs a model turn and depends on the agent following the instruction.
 - **Command precedence.** OpenCode activates its own config-command loader after package plugins, and the last definition to claim a name wins, so the markdown stubs the installer writes to `~/.config/opencode/commands` would otherwise shadow the native definitions on every normal install. Plannotator re-registers the three names shortly after startup so its own definitions are the ones that run. If that reclaim cannot run, the stubs keep the names and the commands still work through the model-mediated fallback.
 - **Agent switching.** `ctx.session.switchAgent` arrived with the same plugin API generation. On a host that exposes it, an agent switch chosen in the review UI is applied to the session. On an older host the plan is still approved and a warning is written to the server log; switch to `build` manually before implementation.
+- **Ask this session.** In code review, annotate and `/plannotator-last`, Ask AI is answered by your OpenCode 2 session, and it is the only Ask AI option there. In plan review the session is waiting for your decision, so it gives a quick answer from its context only. Remote sessions and OpenCode 1 use a separate provider you pick.
 - **Cancellation.** Stable V2 tool execution exposes an abort signal, but Plannotator's V2 adapter does not yet forward it to the review server or CLI child. Cancelling a turn cannot stop that review immediately.
 - **Session URLs.** OpenCode 2 has a TUI plugin entry point, but it is separate from the server plugin Plannotator registers, so there is no toast to show and the plugin's own console output is discarded by the host unless you start it with `OPENCODE_PRINT_LOGS=1`. Instead, on a host whose plugin API exposes `session.synthetic`, Plannotator posts the URL into the session transcript as a `Plannotator session ready: <url>` notice, injected with `resume: false` so it appears without waking a model turn. This covers every way a session opens: the three slash commands and the `submit_plan` plan review, whether the review runs on the embedded runtime or the CLI. That is the link to open for a remote session, which gets no browser opened for it. On an older host without `session.synthetic` the URL only reaches that discarded console output, so run with `OPENCODE_PRINT_LOGS=1` there.
 
@@ -65,7 +68,7 @@ Restart OpenCode. By default, the `submit_plan` tool is available to OpenCode's 
 > ```bash
 > curl -fsSL https://plannotator.ai/install.sh | bash
 > ```
-> This also clears any cached plugin versions.
+> This also clears cached plugin versions for both OpenCode 1 and OpenCode 2. To update the plugin later, run the install script again and restart OpenCode.
 
 ## Workflow Modes
 

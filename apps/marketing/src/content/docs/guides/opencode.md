@@ -183,7 +183,11 @@ Install the CLI for slash command support:
 curl -fsSL https://plannotator.ai/install.sh | bash
 ```
 
-This also clears any cached plugin versions.
+This also clears cached plugin versions for both OpenCode 1 and OpenCode 2. To update the plugin later, run the install script again and restart OpenCode.
+
+## Ask this session
+
+On OpenCode 2, Ask AI in code review, annotate and `/plannotator-last` is answered by your OpenCode session ("Ask this session"), and it is the only Ask AI option there. In plan review the session is waiting for your decision, so it gives a quick answer from its context only. OpenCode 1 and remote sessions use a separate provider you pick. See [Ask this session](/docs/guides/ai-features/#ask-this-session).
 
 ## Plugin installation
 

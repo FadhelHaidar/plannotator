@@ -38,6 +38,13 @@ All Plannotator environment variables and their defaults.
 
 \* If you use the VS Code extension, make sure `PLANNOTATOR_DATA_DIR` is visible to both your terminal and VS Code. On macOS, apps launched from the Dock don't inherit shell env vars — launch VS Code from the terminal (`code .`) or set the variable via `launchctl setenv`.
 
+## Claude Code variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PLANNOTATOR_CLAUDE_MOD` | on | Controls the [Plannotator mod](/docs/guides/claude-code/#the-plannotator-mod) for Claude Code 2.1.287 or newer: plan review, code review, annotate and annotate-last without making Claude wait, the `plannotator` tool, and Ask this session. Set to `0`, `false`, `off` or `disabled` to turn it off and use the classic hook. `1`, `true` or `on` turn it on; an empty or other value counts as unset (on). Claude Code reads it when it starts, so restart after a change. Set it in the shell that starts Claude Code or in the `env` block of Claude Code's `settings.json`. Can also be set via `~/.plannotator/config.json` (`{ "claudeCodeMod": false }`); the env var takes precedence. The mod always stays off in `claude -p` and SDK runs and on Windows. |
+| `PLANNOTATOR_MOD_DEBUG` | off | Set to `1` before you start Claude Code to make the Plannotator mod write a debug log to `~/.plannotator/claude-code-mod/debug.log` (or under `PLANNOTATOR_DATA_DIR`). Useful when you report a problem with the mod. |
+
 ## Glimpse (native window)
 
 | Variable | Default | Description |

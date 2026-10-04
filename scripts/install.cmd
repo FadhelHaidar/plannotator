@@ -1638,8 +1638,9 @@ echo Then install the Claude Code plugin:
 echo   /plugin marketplace add backnotprop/plannotator
 echo   /plugin install plannotator@plannotator
 echo.
-echo Upgrading from an older version? Also run /plugin marketplace update
-echo so the plugin drops its old plannotator:* command entries.
+echo Updating the plugin? Run these in a terminal, then restart Claude Code:
+echo   claude plugin marketplace update plannotator
+echo   claude plugin update plannotator@plannotator
 echo.
 REM Never claim the /plannotator-* skills are ready when nothing was installed -
 REM that false banner is exactly what the skills-checkout guard exists to prevent.

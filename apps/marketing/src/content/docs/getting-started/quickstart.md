@@ -22,7 +22,7 @@ Plannotator reads the plan from stdin
 Browser opens with the plan review UI
 ```
 
-Claude Code uses an `ExitPlanMode` hook. Codex uses a `Stop` hook after a plan turn completes. Both flows open Plannotator automatically after installation.
+Claude Code uses an `ExitPlanMode` hook. Codex uses a `Stop` hook after a plan turn completes. Both flows open Plannotator automatically after installation. On Claude Code 2.1.287 or newer, Claude does not wait while you review: your decision arrives later as a message (see [Claude Code](/docs/guides/claude-code/#the-plannotator-mod)).
 
 ## 2. Review the plan
 

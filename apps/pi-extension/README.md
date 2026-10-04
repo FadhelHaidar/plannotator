@@ -23,6 +23,14 @@ pi install ./plannotator/apps/pi-extension
 pi -e npm:@plannotator/pi-extension
 ```
 
+## Update
+
+```bash
+pi update --extensions
+```
+
+This updates your installed Pi packages, Plannotator included. `pi update npm:@plannotator/pi-extension` updates only Plannotator, and `pi update --all` updates Pi and every package. A plain `pi update` updates only Pi itself, not Plannotator. Restart Pi after updating.
+
 ## Pi version and project trust
 
 Plannotator requires **Pi 0.79.1 or newer**. Updating only the Plannotator
@@ -91,6 +99,8 @@ When the agent calls `plannotator_submit_plan`, the Plannotator UI opens in your
 The agent iterates on the plan until you approve, then executes with full tool access. On resubmission, Plan Diff highlights what changed since the previous version.
 
 The submit tool does not wait for you: it returns as soon as the review opens, the agent ends its turn, and your decision reaches it later as a new message. While the review is open you can keep chatting with the agent in Pi, or ask it questions from the review's Ask AI panel ("Ask this session"). It still cannot change code: planning restrictions stay on until you approve. If the agent revises the plan while the review is open, the open tab updates to the new version and keeps your comments. Leaving plan mode closes an open review.
+
+Pressing Esc in Pi no longer cancels an open plan review. To abandon a review, leave plan mode (`/plannotator-plan-mode` or `Ctrl+Alt+P`).
 
 ### Programmatic plan-mode control
 
@@ -206,6 +216,10 @@ Use these inside `instructions` strings. They render once, when the phase is ent
 ### Code review
 
 Run `/plannotator-review` to open your current VCS changes in the code review UI. Annotate specific lines, switch between the modes supported by the detected Git, GitButler, or JJ provider, and submit feedback that gets sent to the agent. Pass `--git` or `--gitbutler` to force that provider; GitButler requires `but` 0.21.0 or newer on `PATH`. Pass `--patch-file <path>` to review a static caller-supplied unified diff without a repository.
+
+### Ask this session
+
+In plan review, code review, annotate and `/plannotator-last`, Ask AI is answered by your Pi session ("Ask this session"). It is the only Ask AI option there, so there is no provider picker. Your question shows in Pi's chat. If the agent is busy, choose **Ask when it finishes** or **Interrupt and ask now**. In remote mode you pick a separate provider instead. Review agents, Code Tour and Guided Review still run their own models.
 
 ### Shared Plannotator event API
 
