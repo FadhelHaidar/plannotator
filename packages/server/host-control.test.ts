@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startAnnotateServer } from "./annotate";
+import { resolveHostControlToken } from "./host-control";
 import { startPlannotatorServer } from "./index";
 import { startReviewServer } from "./review";
 
@@ -94,7 +95,10 @@ describe("host control: annotate", () => {
   test("guards: off without a token, refused from a browser page or with the wrong token", async () => {
     const off = await start({ hostControlToken: undefined });
     try {
-      expect((await status(off.url)).status).toBe(404);
+      const answer = await close(off.url);
+      expect(answer.status).toBe(404);
+      // Coded, so the mod does not mistake it for an older CLI and TERM it.
+      expect((await answer.json()).code).toBe("host_control_disabled");
     } finally {
       off.stop();
     }
@@ -150,6 +154,17 @@ describe("host control: annotate", () => {
     } finally {
       server.stop();
     }
+  });
+});
+
+describe("host control: remote mode", () => {
+  // The failure: a remote session (reachable beyond loopback) answers host
+  // control with the launch token.
+  test("remote mode turns the endpoints off even with a token", () => {
+    process.env.PLANNOTATOR_REMOTE = "1";
+    expect(resolveHostControlToken(TOKEN)).toBeUndefined();
+    process.env.PLANNOTATOR_REMOTE = "0";
+    expect(resolveHostControlToken(TOKEN)).toBe(TOKEN);
   });
 });
 

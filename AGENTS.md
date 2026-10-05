@@ -437,11 +437,17 @@ released 0.27.25 and 0.27.10 binaries as processes:
   (`classifyHostCloseAnswer` in `controller.ts`): 0.24–0.28.3 answer a JSON
   `404` and 0.19.24–0.23.x (before the `/api/*` 404 guard, #748) their app page
   with `200 text/html`, and both read as "an older Plannotator", never as
-  closed. Only then does the mod TERM the process (`STOP_SCRIPT`), and only if
-  the launch's `result.json` / `exit` is still absent and the pid still names a
-  `plannotator` process (`ps -o args=`); nothing answering on the port (a stale
-  or reused pid after a reboot) is never signalled, and the close reports
-  failure. After a TERM close, a decision record without `closedBy` (or an
+  closed. A CURRENT CLI with host control turned off (remote mode) answers
+  `404 { code: "host_control_disabled" }` instead, which the mod never TERMs:
+  the close reports that the review runs in remote mode and should be closed
+  from the tab. Only for an older CLI does the mod TERM the process
+  (`STOP_SCRIPT`), and only if the launch's `result.json` / `exit` is still
+  absent and the pid still names a `plannotator` process (`ps -o args=`);
+  nothing answering on the port (a stale or reused pid after a reboot) is never
+  signalled, and where `ps` cannot verify a pid (missing, as on Debian slim
+  without procps, or without `-p`, as BusyBox's) the script signals nothing
+  and the close says the review was left running. In every such case the close
+  reports failure. After a TERM close, a decision record without `closedBy` (or an
   older CLI's exit 0) is the reviewer's and is delivered as usual. **Remaining
   window:** these CLIs publish a decision only after a 1.5 s post-decision
   sleep and nothing on their HTTP surface says a decision is pending, so a
@@ -1475,7 +1481,9 @@ review ask what it holds and close it. Guarded exactly like the pull bridge: a
 loopback Host naming the server's port (`403`), no `Origin` (`403`), and
 `Authorization: Bearer <token>` (`401`), the launch's `PLANNOTATOR_SESSION_BRIDGE_TOKEN`
 (Bun default; servers also take `hostControlToken`). Without a token the paths answer
-`404`, which a host reads as an older Plannotator; they are off in remote mode, and
+`404 { error: "Not found", code: "host_control_disabled" }` (`HOST_CONTROL_DISABLED_CODE`),
+which a host reads as "turned off" rather than "an older Plannotator" (an uncoded `404`);
+they are off in remote mode, and
 `--tailscale` discards the env token. Unlike the pull bridge they still answer under
 `PLANNOTATOR_AI=disabled` (closing a review is not an AI feature). Once a session is
 decided (a host close included), the review servers refuse a late `/api/feedback` or

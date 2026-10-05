@@ -104,6 +104,8 @@ export function sessionIdOf(launch: { id: string }): string {
 /** The host-only endpoints of the CLI's server (packages/shared/host-control.ts). */
 export const HOST_STATUS_PATH = '/api/host/status'
 export const HOST_CLOSE_PATH = '/api/host/close'
+/** The code a current CLI's 404 carries while host control is off (packages/shared/host-control.ts). */
+export const HOST_CONTROL_DISABLED_CODE = 'host_control_disabled'
 
 function jsonObjectOf(text: string): Record<string, unknown> | null {
   try {
@@ -120,6 +122,8 @@ export type HostCloseAnswer =
   | { kind: 'decided' }
   /** A Plannotator without the endpoint answered: a JSON 404 (0.24+) or its app page (0.19.24–0.23.x). */
   | { kind: 'older' }
+  /** A Plannotator WITH the endpoint, turned off (remote mode): `404 { code: "host_control_disabled" }`. */
+  | { kind: 'disabled' }
   | { kind: 'refused'; status: number }
   /** Nothing answered on the port. */
   | { kind: 'unreachable' }
@@ -136,6 +140,7 @@ export function classifyHostCloseAnswer(response: HttpResult | null): HostCloseA
   if (body) {
     if (response.ok && typeof body.unsentAnnotations === 'number') return { kind: 'closed', unsent: body.unsentAnnotations }
     if (response.status === 409 && body.code === 'already_decided') return { kind: 'decided' }
+    if (response.status === 404 && body.code === HOST_CONTROL_DISABLED_CODE) return { kind: 'disabled' }
     if (response.status === 404 && typeof body.error === 'string') return { kind: 'older' }
     return { kind: 'refused', status: response.status }
   }
@@ -549,6 +554,16 @@ export class PlannotatorMod {
         return { id, subject, closed: false, reason: 'failed', detail: 'its server is not answering' }
       case 'refused':
         return { id, subject, closed: false, reason: 'failed', detail: `its server refused the close (HTTP ${answer.status})` }
+      case 'disabled':
+        // A current CLI that turned host control off (remote mode): its
+        // process is not ours to signal.
+        return {
+          id,
+          subject,
+          closed: false,
+          reason: 'failed',
+          detail: 'it runs in remote mode, where Plannotator turns host close off; close it from the tab',
+        }
       case 'older':
         return this.stopOlderCli(launch, id, subject)
     }
@@ -575,6 +590,14 @@ export class PlannotatorMod {
         return { id, subject, closed: false, reason: 'decided' }
       case STOP_EXIT.notPlannotator:
         return { id, subject, closed: false, reason: 'failed', detail: 'its server process is gone' }
+      case STOP_EXIT.cannotVerify:
+        return {
+          id,
+          subject,
+          closed: false,
+          reason: 'failed',
+          detail: "this system's ps could not verify the review's process, so it was left running; close it from the tab",
+        }
       default:
         return { id, subject, closed: false, reason: 'failed', detail: 'its server could not be stopped' }
     }

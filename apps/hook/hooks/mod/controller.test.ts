@@ -802,6 +802,37 @@ describe('the plannotator tool: list and close (contract v2)', () => {
     expect(host.runs.some((call) => call.argv[3] === 'plannotator-stop')).toBe(false)
   })
 
+  // A current CLI in remote mode turns /api/host/* off: its 404 is not an
+  // older CLI's, and its process must not be signalled.
+  test('host control turned off (remote mode): no TERM, the close says to use the tab', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    host.onFetch = () => ({ status: 404, ok: false, text: JSON.stringify({ error: 'Not found', code: 'host_control_disabled' }) })
+    const mod = new PlannotatorMod(host, SESSION)
+    const id = sessionIdIn(await mod.runTool({ action: 'annotate', target: 'a.md' }))
+    host.files.set(`${launchDirOf(launches(host)[0]!)}/pid`, '4242\n')
+
+    const answer = await mod.runTool({ action: 'close', session: id })
+    expect('deny' in answer && answer.deny).toContain('remote mode')
+    expect(host.runs.some((call) => call.argv[3] === 'plannotator-stop')).toBe(false)
+    expect(textOf(await mod.runTool({ action: 'list' }))).toContain(id)
+  })
+
+  test('ps cannot verify the pid: not closed, and the close says it was left running', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    host.onFetch = (url) => ({ status: 404, ok: false, text: JSON.stringify({ error: 'Not found', path: new URL(url).pathname }) })
+    const onRun = host.onRun
+    host.onRun = (call) => (call.argv[3] === 'plannotator-stop' ? { exitCode: 6, stdout: '', stderr: '' } : onRun(call))
+    const mod = new PlannotatorMod(host, SESSION)
+    const id = sessionIdIn(await mod.runTool({ action: 'annotate', target: 'a.md' }))
+    host.files.set(`${launchDirOf(launches(host)[0]!)}/pid`, '4242\n')
+
+    const answer = await mod.runTool({ action: 'close', session: id })
+    expect('deny' in answer && answer.deny).toContain('left running')
+    expect(textOf(await mod.runTool({ action: 'list' }))).toContain(id)
+  })
+
   // The race a TERM can lose: the reviewer decided just before it, and the
   // older CLI publishes the decision anyway. A record without closedBy is the
   // reviewer's, not Claude's close.

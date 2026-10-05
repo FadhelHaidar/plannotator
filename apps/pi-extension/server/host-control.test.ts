@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveHostControlToken } from "./host-control.ts";
 import { startAnnotateServer } from "./serverAnnotate.ts";
 import { startPlanReviewServer } from "./serverPlan.ts";
 import { startReviewServer } from "./serverReview.ts";
@@ -75,7 +76,10 @@ describe("Pi host control", () => {
 		sandboxed(async () => {
 			const server = await startReviewServer({ rawPatch: "diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b\n", gitRef: "HEAD", htmlContent: MINIMAL_HTML });
 			try {
-				expect((await fetch(`${server.url}/api/host/status`, { headers: auth })).status).toBe(404);
+				const off = await fetch(`${server.url}/api/host/close`, { method: "POST", headers: auth });
+				expect(off.status).toBe(404);
+				// Coded, so a host does not mistake it for an older CLI and TERM it.
+				expect((await off.json()).code).toBe("host_control_disabled");
 				await saveDraft(server.url, { annotations: [], codeAnnotations: [{ id: "c1" }], globalAttachments: [] });
 				expect(server.hostControl.close?.()).toEqual({ closed: true, unsentAnnotations: 1 });
 				expect(await server.waitForDecision()).toMatchObject({ exit: true, closedBy: "agent" });
@@ -93,6 +97,16 @@ describe("Pi host control", () => {
 			} finally {
 				server.stop();
 			}
+		}));
+
+	// The failure: a remote session (reachable beyond loopback) answers host
+	// control with the caller's token.
+	test("remote mode turns the endpoints off even with a token", () =>
+		sandboxed(async () => {
+			process.env.PLANNOTATOR_REMOTE = "1";
+			expect(resolveHostControlToken(TOKEN)).toBeUndefined();
+			process.env.PLANNOTATOR_REMOTE = "0";
+			expect(resolveHostControlToken(TOKEN)).toBe(TOKEN);
 		}));
 
 	test("plan: status only, never closable", () =>

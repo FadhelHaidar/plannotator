@@ -38,7 +38,10 @@ describe("host control guards", () => {
     expect(ask({ origin: "http://localhost:4321" })?.status).toBe(403);
     expect(ask({ authorization: `Bearer ${"x".repeat(40)}` })?.status).toBe(401);
     expect(ask({ authorization: null })?.status).toBe(401);
-    expect(ask({}, route({ token: undefined }))?.status).toBe(404);
+    // Off answers a coded 404, so a host can tell it from a Plannotator that
+    // predates the endpoint (whose process it may TERM) and leave it alone.
+    expect(ask({}, route({ token: undefined }))).toMatchObject({ status: 404, body: { code: "host_control_disabled" } });
+    expect(ask({ method: "POST", pathname: "/api/host/close" }, route({ token: undefined }))?.body).toMatchObject({ code: "host_control_disabled" });
   });
 
   test("other paths are not answered; a session without close refuses it", () => {

@@ -14,7 +14,8 @@
  * `Origin` header (a browser page is never the host), and
  * `Authorization: Bearer <token>`, the per-launch secret the host started the
  * server with (`PLANNOTATOR_SESSION_BRIDGE_TOKEN`). Without a token the paths
- * answer 404, which a host reads as "an older Plannotator". Available wherever
+ * answer 404 with `code: "host_control_disabled"`, which a host reads as
+ * "turned off" (an uncoded 404 is "an older Plannotator"). Available wherever
  * the host launched the server with that token, including under
  * `PLANNOTATOR_AI=disabled` (which turns the pull bridge itself off); never in
  * remote mode or a `--tailscale` session (which discards the token).
@@ -29,6 +30,8 @@ import { isLoopbackHostHeader } from "./loopback-host";
 
 export const HOST_STATUS_PATH = "/api/host/status";
 export const HOST_CLOSE_PATH = "/api/host/close";
+/** The `code` of the 404 the endpoints answer while turned off (remote mode, no token). */
+export const HOST_CONTROL_DISABLED_CODE = "host_control_disabled";
 
 export type HostSessionKind = "plan" | "annotate" | "annotate-last" | "review";
 
@@ -119,7 +122,11 @@ export function isHostControlPath(pathname: string): boolean {
  */
 export function handleHostControlRequest(request: HostControlRequest, route: HostControlRoute): HostControlAnswer | null {
 	if (!isHostControlPath(request.pathname)) return null;
-	if (!route.token) return { status: 404, body: { error: "Not found" } };
+	// Off (remote mode, or launched without a token): a 404 like an unknown
+	// path, but with a code, so a host can tell "this Plannotator turned host
+	// control off" from "this Plannotator predates it" and not fall back to
+	// signalling its process.
+	if (!route.token) return { status: 404, body: { error: "Not found", code: HOST_CONTROL_DISABLED_CODE } };
 	if (!isLoopbackHostHeader(request.host, route.getServerPort())) {
 		return { status: 403, body: { error: "Host control answers only this machine.", code: "host_control_forbidden_host" } };
 	}

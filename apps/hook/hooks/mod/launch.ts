@@ -134,7 +134,7 @@ export function aliveArgv(pid: string): string[] {
 }
 
 /** Exit codes of `STOP_SCRIPT`. */
-export const STOP_EXIT = { stopped: 0, decided: 3, notPlannotator: 4, failed: 5 } as const
+export const STOP_EXIT = { stopped: 0, decided: 3, notPlannotator: 4, failed: 5, cannotVerify: 6 } as const
 
 /**
  * Stops a CLI that has no host close endpoint (an older Plannotator) with
@@ -143,11 +143,14 @@ export const STOP_EXIT = { stopped: 0, decided: 3, notPlannotator: 4, failed: 5 
  * already decided (the result record, the exit code): then nothing is sent
  * (exit 3), so that decision is still delivered. The pid must still name a
  * `plannotator` process (exit 4 otherwise), so a pid reused after the CLI
- * died (a reboot, a crash) is never signalled.
+ * died (a reboot, a crash) is never signalled. Where `ps` cannot say (missing,
+ * as on Debian slim without procps, or without `-p`, as BusyBox's) nothing is
+ * signalled either (exit 6): the check is made on the script's own pid first.
  */
 export const STOP_SCRIPT = [
   'pid=$1; shift',
   'for f in "$@"; do [ -e "$f" ] && exit 3; done',
+  '[ -n "$(ps -o args= -p $$ 2>/dev/null)" ] || exit 6',
   'ps -o args= -p "$pid" 2>/dev/null | grep -q plannotator || exit 4',
   'kill -TERM "$pid" 2>/dev/null || exit 5',
 ].join('\n')

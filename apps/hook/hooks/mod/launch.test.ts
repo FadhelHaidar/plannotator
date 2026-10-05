@@ -55,6 +55,16 @@ describe('stopArgv (TERM for a CLI without host close)', () => {
     expect(alive(child.pid)).toBe(true)
   })
 
+  // No ps (Debian slim without procps; BusyBox's has no -p): the pid cannot be
+  // verified, so nothing is signalled and the close says so.
+  test('a system whose ps cannot verify the pid: nothing is signalled', async () => {
+    const child = spawn('sleep 30; : plannotator review')
+    const emptyPath = tempDir()
+    const proc = Bun.spawn(stopArgv(String(child.pid), []), { stdout: 'ignore', stderr: 'ignore', env: { PATH: emptyPath } })
+    expect(await proc.exited).toBe(STOP_EXIT.cannotVerify)
+    expect(alive(child.pid)).toBe(true)
+  })
+
   test('a decision already on disk wins: nothing is signalled', async () => {
     const child = spawn('sleep 30; : plannotator review')
     const dir = tempDir()
