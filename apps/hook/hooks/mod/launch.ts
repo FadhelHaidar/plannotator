@@ -133,12 +133,27 @@ export function aliveArgv(pid: string): string[] {
   return ['/bin/sh', '-c', 'kill -0 "$1" 2>/dev/null', 'plannotator-alive', pid]
 }
 
+/** Exit codes of `STOP_SCRIPT`. */
+export const STOP_EXIT = { stopped: 0, decided: 3, notPlannotator: 4, failed: 5 } as const
+
 /**
- * Stops a CLI that has no host close endpoint (an older Plannotator): TERM,
- * which ends the server without a decision and never deletes its draft.
+ * Stops a CLI that has no host close endpoint (an older Plannotator) with
+ * TERM, which ends the server without a decision and never deletes its draft.
+ * `$1` is the pid, the rest are files whose presence means the reviewer
+ * already decided (the result record, the exit code): then nothing is sent
+ * (exit 3), so that decision is still delivered. The pid must still name a
+ * `plannotator` process (exit 4 otherwise), so a pid reused after the CLI
+ * died (a reboot, a crash) is never signalled.
  */
-export function stopArgv(pid: string): string[] {
-  return ['/bin/sh', '-c', 'kill -TERM "$1" 2>/dev/null', 'plannotator-stop', pid]
+export const STOP_SCRIPT = [
+  'pid=$1; shift',
+  'for f in "$@"; do [ -e "$f" ] && exit 3; done',
+  'ps -o args= -p "$pid" 2>/dev/null | grep -q plannotator || exit 4',
+  'kill -TERM "$pid" 2>/dev/null || exit 5',
+].join('\n')
+
+export function stopArgv(pid: string, decidedFiles: readonly string[]): string[] {
+  return ['/bin/sh', '-c', STOP_SCRIPT, 'plannotator-stop', pid, ...decidedFiles]
 }
 
 export function launchDirOf(dataDir: string, sessionId: string, launchId: string): string {

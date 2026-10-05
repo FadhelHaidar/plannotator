@@ -9,11 +9,12 @@
 
 import { BRIDGE_HOST, BRIDGE_MODES, bridgeBaseUrl, createBridge, type BridgeHandle } from './bridge'
 import { deliveryFor, legacyResult, parseHostResult, type HostResultRecord, type SessionKind } from './delivery'
-import type { Host } from './host'
+import type { Host, HttpResult } from './host'
 import {
   aliveArgv,
   cleanupArgv,
   stopArgv,
+  STOP_EXIT,
   cliArgvFor,
   failedText,
   fileIn,
@@ -103,6 +104,44 @@ export function sessionIdOf(launch: { id: string }): string {
 /** The host-only endpoints of the CLI's server (packages/shared/host-control.ts). */
 export const HOST_STATUS_PATH = '/api/host/status'
 export const HOST_CLOSE_PATH = '/api/host/close'
+
+function jsonObjectOf(text: string): Record<string, unknown> | null {
+  try {
+    const value = JSON.parse(text) as unknown
+    return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+/** What `POST /api/host/close` told the mod. */
+export type HostCloseAnswer =
+  | { kind: 'closed'; unsent: number }
+  | { kind: 'decided' }
+  /** A Plannotator without the endpoint answered: a JSON 404 (0.24+) or its app page (0.19.24–0.23.x). */
+  | { kind: 'older' }
+  | { kind: 'refused'; status: number }
+  /** Nothing answered on the port. */
+  | { kind: 'unreachable' }
+
+/**
+ * Reads the close answer. Only a JSON body with a numeric `unsentAnnotations`
+ * is a close: a CLI before the `/api/*` 404 guard (#748) serves its app page
+ * with 200 for any path, which must not read as closed (the reviewer's later
+ * decision would be swallowed as the agent's close).
+ */
+export function classifyHostCloseAnswer(response: HttpResult | null): HostCloseAnswer {
+  if (!response) return { kind: 'unreachable' }
+  const body = jsonObjectOf(response.text)
+  if (body) {
+    if (response.ok && typeof body.unsentAnnotations === 'number') return { kind: 'closed', unsent: body.unsentAnnotations }
+    if (response.status === 409 && body.code === 'already_decided') return { kind: 'decided' }
+    if (response.status === 404 && typeof body.error === 'string') return { kind: 'older' }
+    return { kind: 'refused', status: response.status }
+  }
+  if (response.status === 200 && /<html|<!doctype html/i.test(response.text)) return { kind: 'older' }
+  return { kind: 'refused', status: response.status }
+}
 
 export const STORE_LAUNCHES = 'launches'
 export const STORE_APPROVALS = 'approvals'
@@ -434,11 +473,10 @@ export class PlannotatorMod {
         headers: this.hostHeaders(launch),
       })
       if (!response.ok) return null
-      const body = JSON.parse(response.text) as { unsentAnnotations?: unknown; decided?: unknown }
-      return {
-        unsent: typeof body.unsentAnnotations === 'number' ? body.unsentAnnotations : 0,
-        decided: body.decided === true,
-      }
+      // An older CLI answers its app page (200 text/html) or a JSON 404: no count.
+      const body = jsonObjectOf(response.text)
+      if (!body || typeof body.unsentAnnotations !== 'number') return null
+      return { unsent: body.unsentAnnotations, decided: body.decided === true }
     } catch {
       return null
     }
@@ -487,39 +525,59 @@ export class PlannotatorMod {
     const id = sessionIdOf(launch)
     const subject = launch.subject
     if (launch.kind === 'plan') return { id, subject, closed: false, reason: 'plan' }
-    if (launch.port && launch.bridgeToken) {
-      const response = await this.host
-        .fetch(`${bridgeBaseUrl(launch.port)}${HOST_CLOSE_PATH}`, {
-          method: 'POST',
-          headers: { ...this.hostHeaders(launch), 'content-type': 'application/json' },
-          body: '{}',
-        })
-        .catch(() => null)
-      if (response?.ok) {
-        let unsent: number | null = null
-        try {
-          const body = JSON.parse(response.text) as { unsentAnnotations?: unknown }
-          if (typeof body.unsentAnnotations === 'number') unsent = body.unsentAnnotations
-        } catch {
-          // A closed session with an unreadable count.
-        }
+    if (!launch.port) {
+      return { id, subject, closed: false, reason: 'failed', detail: 'its server has not started yet; try again in a moment' }
+    }
+    const response = await this.host
+      .fetch(`${bridgeBaseUrl(launch.port)}${HOST_CLOSE_PATH}`, {
+        method: 'POST',
+        headers: { ...this.hostHeaders(launch), 'content-type': 'application/json' },
+        body: '{}',
+      })
+      .catch(() => null)
+    const answer = classifyHostCloseAnswer(response)
+    switch (answer.kind) {
+      case 'closed':
         await this.markClosedByAgent(launch)
-        return { id, subject, closed: true, unsent }
-      }
-      if (response && response.status === 409) {
+        return { id, subject, closed: true, unsent: answer.unsent }
+      case 'decided':
         // The reviewer decided first: that decision is on its way.
         return { id, subject, closed: false, reason: 'decided' }
-      }
-      // 404 (an older CLI) or no answer: stop the process instead.
+      case 'unreachable':
+        // Nothing answers on its port: the server is gone (the timer reports
+        // that) or the pid is stale. Never signal a pid on a guess.
+        return { id, subject, closed: false, reason: 'failed', detail: 'its server is not answering' }
+      case 'refused':
+        return { id, subject, closed: false, reason: 'failed', detail: `its server refused the close (HTTP ${answer.status})` }
+      case 'older':
+        return this.stopOlderCli(launch, id, subject)
     }
+  }
+
+  /**
+   * An older Plannotator (no host close) answered on the launch's port: TERM
+   * its process, unless the reviewer's decision is already on disk or the pid
+   * no longer names a plannotator process (`STOP_SCRIPT`). A decision such a
+   * CLI is still publishing (it waits 1.5 s after the reviewer decides) cannot
+   * be seen and is lost; see "Version skew" in AGENTS.md.
+   */
+  private async stopOlderCli(launch: LiveLaunch, id: string, subject: string): Promise<PlannotatorCloseOutcome> {
     const pid = (await this.host.readFile(fileIn(launch.dir, 'pid')).catch(() => '')).trim()
     if (!/^\d+$/.test(pid)) return { id, subject, closed: false, reason: 'failed', detail: 'its server has not started yet; try again in a moment' }
-    const killed = await this.host.run(stopArgv(pid), { timeoutMs: 5_000 }).catch(() => null)
-    if (!killed || killed.exitCode !== 0) {
-      return { id, subject, closed: false, reason: 'failed', detail: 'its server could not be stopped' }
+    const stopped = await this.host
+      .run(stopArgv(pid, [fileIn(launch.dir, 'result'), fileIn(launch.dir, 'exit')]), { timeoutMs: 5_000 })
+      .catch(() => null)
+    switch (stopped?.exitCode) {
+      case STOP_EXIT.stopped:
+        await this.markClosedByAgent(launch)
+        return { id, subject, closed: true, unsent: null }
+      case STOP_EXIT.decided:
+        return { id, subject, closed: false, reason: 'decided' }
+      case STOP_EXIT.notPlannotator:
+        return { id, subject, closed: false, reason: 'failed', detail: 'its server process is gone' }
+      default:
+        return { id, subject, closed: false, reason: 'failed', detail: 'its server could not be stopped' }
     }
-    await this.markClosedByAgent(launch)
-    return { id, subject, closed: true, unsent: null }
   }
 
   private async markClosedByAgent(launch: LiveLaunch): Promise<void> {
@@ -738,13 +796,34 @@ export class PlannotatorMod {
     if (launch.port && !launch.bridge) this.startBridge(launch)
     const resultPath = fileIn(launch.dir, 'result')
     if (launch.closedByAgent) {
+      // Only a record marked closedBy "agent" (or an exit with no decision) is
+      // Claude's close. A record without it, or an older CLI that exited 0, is
+      // the reviewer's decision that won the race against a TERM: deliver it.
       const record = (await this.host.exists(resultPath)) ? parseHostResult(await this.host.readFile(resultPath)) : null
-      if (record || (await this.host.exists(fileIn(launch.dir, 'exit')))) {
-        await this.finishAgentClose(launch, record)
+      if (record) {
+        if (record.closedBy === 'agent') {
+          await this.finishAgentClose(launch, record)
+          return
+        }
+        this.host.debug(`result ${launch.id}: ${record.surface} ${record.decision} after Claude's close; delivering it`)
+        launch.closedByAgent = false
+        launch.settling = true
+        await this.settle(launch, record)
         return
       }
-      if (launch.ticks % PID_CHECK_EVERY_TICKS === 0) await this.checkAlive(launch)
-      return
+      const exitPath = fileIn(launch.dir, 'exit')
+      if (await this.host.exists(exitPath)) {
+        const code = (await this.host.readFile(exitPath).catch(() => '')).trim()
+        if (code !== '0' || launch.kind === 'plan') {
+          await this.finishAgentClose(launch, null)
+          return
+        }
+        // Exit 0 with no record: fall through to the legacy stdout path below.
+        launch.closedByAgent = false
+      } else {
+        if (launch.ticks % PID_CHECK_EVERY_TICKS === 0) await this.checkAlive(launch)
+        return
+      }
     }
     if (await this.host.exists(resultPath)) {
       const record = parseHostResult(await this.host.readFile(resultPath))
