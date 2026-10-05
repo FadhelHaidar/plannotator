@@ -238,6 +238,14 @@ export interface PlannotatorConfig {
    */
   claudeCodeMod?: boolean;
   /**
+   * The `plannotator` agent tool (packages/shared/plannotator-tool.ts) on the
+   * hosts that register it: Pi, the Claude Code mod. On by default; `false`
+   * keeps it out of the agent's tool list (the slash commands are unchanged).
+   * Read once when a session starts, so a change applies to the next session.
+   * PLANNOTATOR_AGENT_TOOL wins over this key. Default: AGENT_TOOL_DEFAULT.
+   */
+  agentTool?: boolean;
+  /**
    * Inject a Plannotator Flavored Markdown reminder into every EnterPlanMode
    * call so the agent is aware it can enrich plans with code-file links,
    * callouts, tables, diagrams, task lists, and the other PFM extensions.
@@ -828,6 +836,35 @@ export function resolveClaudeCodeMod(
   if (v === "1" || v === "true" || v === "on") return true;
   if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
   return coerceConfigBoolean(config.claudeCodeMod, true);
+}
+
+/**
+ * Whether hosts register the `plannotator` agent tool when nothing is set.
+ * The one place the default lives; the Claude Code mod's mirror
+ * (`apps/hook/hooks/mod/enabled.ts`) is kept equal by `enabled.test.ts`.
+ */
+export const AGENT_TOOL_DEFAULT = true;
+
+/**
+ * Resolve whether a host registers the `plannotator` agent tool.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_AGENT_TOOL env var  →  config.agentTool  →  AGENT_TOOL_DEFAULT
+ *
+ * Env `1` / `true` / `on` turn it on and `0` / `false` / `off` / `disabled`
+ * turn it off; an empty or unrecognized value counts as unset. Hosts call it
+ * ONCE per session start and never again for that session: the tool list is
+ * part of the model's prompt, so changing it mid-session would change the
+ * prompt prefix (and miss the cache). A change applies to the next session.
+ */
+export function resolveAgentTool(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const v = env.PLANNOTATOR_AGENT_TOOL?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return coerceConfigBoolean(config.agentTool, AGENT_TOOL_DEFAULT);
 }
 
 /** The PLANNOTATOR_AUTO_UPDATE override, or undefined when it does not decide. */

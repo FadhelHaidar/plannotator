@@ -19,6 +19,7 @@ import {
   resolveAnnotateHistory,
   resolveGuideHistory,
   resolveReviewProgress,
+  resolveAgentTool,
   resolveUseJina,
   resolveTodoProviderEnabled,
   resolveUrlHost,
@@ -424,6 +425,32 @@ describe("resolveReviewProgress env handling", () => {
   test("an empty-but-set env var counts as unset, so the config key decides", () => {
     expect(resolveReviewProgress({ reviewProgress: false }, { PLANNOTATOR_REVIEW_PROGRESS: "" })).toBe(false);
     expect(resolveReviewProgress({}, { PLANNOTATOR_REVIEW_PROGRESS: "" })).toBe(true);
+  });
+});
+
+describe("resolveAgentTool", () => {
+  // The failure this guards: a user who turned the tool off (or on) gets the
+  // other answer, so the agent's tool list does not match their setting.
+  test("on when nothing is set; an empty or unrecognized env value counts as unset", () => {
+    expect(resolveAgentTool({}, {})).toBe(true);
+    expect(resolveAgentTool({}, { PLANNOTATOR_AGENT_TOOL: "" })).toBe(true);
+    expect(resolveAgentTool({ agentTool: false }, { PLANNOTATOR_AGENT_TOOL: "" })).toBe(false);
+    expect(resolveAgentTool({ agentTool: false }, { PLANNOTATOR_AGENT_TOOL: "yes" })).toBe(false);
+  });
+
+  test("the env var wins over agentTool in config.json, in both directions", () => {
+    for (const v of ["0", "false", "OFF", "disabled", " off "]) {
+      expect(resolveAgentTool({ agentTool: true }, { PLANNOTATOR_AGENT_TOOL: v })).toBe(false);
+    }
+    for (const v of ["1", "true", "On"]) {
+      expect(resolveAgentTool({ agentTool: false }, { PLANNOTATOR_AGENT_TOOL: v })).toBe(true);
+    }
+  });
+
+  test("agentTool is coerced like the other boolean keys", () => {
+    expect(resolveAgentTool({ agentTool: "false" as never }, {})).toBe(false);
+    expect(resolveAgentTool({ agentTool: "0" as never }, {})).toBe(false);
+    expect(resolveAgentTool({ agentTool: "nope" as never }, {})).toBe(true);
   });
 });
 

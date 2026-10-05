@@ -33,7 +33,7 @@ import {
 	parseChecklist,
 	renderCompletedChecklist,
 } from "./generated/checklist.ts";
-import { loadConfig, resolveUseJina } from "./generated/config.ts";
+import { loadConfig, resolveAgentTool, resolveUseJina } from "./generated/config.ts";
 import { readImprovementHook } from "./generated/improvement-hooks.ts";
 import { composeImproveContext } from "./generated/pfm-reminder.ts";
 import {
@@ -88,7 +88,6 @@ import {
 	PLANNOTATOR_TOOL_DESCRIPTION,
 	PLANNOTATOR_TOOL_INPUT_SCHEMA,
 	PLANNOTATOR_TOOL_NAME,
-	PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT,
 	parsePlannotatorToolInput,
 	plannotatorBundleSubject,
 	plannotatorDecisionHeading,
@@ -351,6 +350,14 @@ interface PendingPlanReview {
 }
 
 /** Host seams for tests. Production passes nothing. */
+/**
+ * `defaultActive: false` for `pi.registerTool`, spread in rather than written
+ * as a literal key because the Pi floor's types (0.79.1) do not declare it.
+ * Pi 0.99+ then leaves the tool inactive until the extension activates it;
+ * older Pi ignores the key and activates every registered tool.
+ */
+const NOT_ACTIVE_ON_REGISTRATION = { defaultActive: false } as const;
+
 export interface PlannotatorExtensionDeps {
 	startPlanReview?: typeof startPlanReviewBrowserSession;
 	hasPlanBrowserHtml?: () => boolean;
@@ -395,6 +402,9 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	const startCodeReview = deps.startCodeReview ?? startCodeReviewBrowserSession;
 	const startAnnotation = deps.startAnnotation ?? startMarkdownAnnotationSession;
 	const startLastMessageAnnotation = deps.startLastMessageAnnotation ?? startLastMessageAnnotationSession;
+	// The `plannotator` tool switch, read once per extension instance (one per
+	// session and per /reload): see the tool's registration below.
+	const agentToolEnabled = resolveAgentTool(loadConfig());
 	const currentPiSession = registerCurrentPiSession(pi);
 	// "Ask this session": Ask AI answered by this Pi session (review, annotate,
 	// last, plan review). Listeners register once here; each command binds a bridge to its ctx.
@@ -468,7 +478,25 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	pi.on("session_start", (_event, ctx) => {
 		sessionAlive = true;
 		currentPiSession.update(ctx);
+		settleAgentToolActivation(ctx);
 	});
+
+	/**
+	 * Whether this session's model sees the `plannotator` tool, decided ONCE,
+	 * at the session's start and before its first request: active with an
+	 * interactive UI, inactive in print/JSON mode (Pi before 0.99 activates
+	 * every registered tool, so it is taken back out there). Never revisited
+	 * for the session, so the tool list (part of the prompt prefix) stays put.
+	 */
+	let agentToolActivationSettled = false;
+	function settleAgentToolActivation(ctx: ExtensionContext): void {
+		if (!agentToolEnabled || agentToolActivationSettled) return;
+		agentToolActivationSettled = true;
+		const active = pi.getActiveTools();
+		const isActive = active.includes(PLANNOTATOR_TOOL_NAME);
+		if (ctx.hasUI && !isActive) pi.setActiveTools([...active, PLANNOTATOR_TOOL_NAME]);
+		else if (!ctx.hasUI && isActive) pi.setActiveTools(active.filter((tool) => tool !== PLANNOTATOR_TOOL_NAME));
+	}
 
 	// The plannotator knowledge skill is offered here rather than through a
 	// static `pi.skills` manifest entry, so it can yield to the copy the CLI
@@ -1486,8 +1514,16 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	// come from it, never a copy. Opening returns at once (terminate: the
 	// turn ends) and the decision arrives later as a followUp message, the
 	// same launch the slash commands use.
+	//
+	// Registered only when the switch is on (PLANNOTATOR_AGENT_TOOL /
+	// `agentTool`, read once here: Pi builds a new extension instance for every
+	// session and /reload, so a change applies to the next one and never moves
+	// the tool list of a running session). It does not activate itself on
+	// registration (`defaultActive: false`, honored by Pi 0.99+); session_start
+	// activates it once, and only when the session has an interactive UI,
+	// since a print/JSON run cannot receive the decision later.
 
-	pi.registerTool({
+	if (agentToolEnabled) pi.registerTool({
 		name: PLANNOTATOR_TOOL_NAME,
 		label: "Plannotator",
 		description: PLANNOTATOR_TOOL_DESCRIPTION,
@@ -1497,6 +1533,8 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		// "Edit the file, then open it" in one assistant message must open the
 		// edited file: sequential makes Pi run the batch in order (#1622).
 		executionMode: "sequential",
+		// Not a literal key: Pi before 0.99 does not declare it (and ignores it).
+		...NOT_ACTIVE_ON_REGISTRATION,
 
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			const text = await runPlannotatorTool(params, ctx, signal, toolCallId);
@@ -1526,9 +1564,6 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				if (!closed.ok) throw new Error(closed.text);
 				return { text: closed.text, details: { action: "close" } };
 			}
-			case "reply":
-				// Reserved for live comments: no comment is ever delivered yet.
-				throw new Error(PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT);
 			case "annotate":
 			case "review":
 			case "last":
