@@ -221,7 +221,6 @@ jobs:
           packages/ui/components/html-viewer/HtmlViewer.mentionSource.test.tsx
           packages/ui/components/AnnotationToolstrip.test.tsx
           packages/ui/components/StickyHeaderLane.test.tsx
-          packages/ui/components/CommentPopover.quickLookGood.test.tsx
           packages/editor/actionsLabelMode.test.ts
           packages/ui/webmcp/useToolset.seam.test.tsx
           packages/ui/components/AnnotationPanel.inReplyTo.test.tsx

@@ -32,8 +32,8 @@ export const LABEL_COLOR_MAP: Record<string, { bg: string; text: string; darkTex
 };
 
 /**
- * The hardcoded one-click positive label behind the toolbar's 👍 button and
- * the composer's "Looks good" action. Deliberately NOT part of the
+ * The hardcoded one-click positive label behind the selection toolbar's 👍
+ * "Looks good" button. Deliberately NOT part of the
  * configurable set: it is the ONLY label comment-only surfaces (HTML /
  * live-app) may emit — their restricted handlers filter on this id.
  */

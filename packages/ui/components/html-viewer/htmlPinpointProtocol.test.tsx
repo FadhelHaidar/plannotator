@@ -904,18 +904,6 @@ describe.if(hasDom)('multi-target composer flow (chips, promotion, submit)', () 
     await save();
     expect(added[0]!.htmlAdditionalTargets!.length).toBe(3);
 
-    // The composer's one-click "Looks good" path submits under the same cap.
-    await post(primarySelection({ targetKey: 'ht-2' }));
-    for (let i = 0; i < 8; i++) {
-      await post(addedTarget(`host-cap-b-${i}`, `Target ${i}`));
-    }
-    const looksGood = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('[data-comment-popover] button'),
-    ).find((b) => b.title.startsWith('Add "Looks good"'));
-    if (!looksGood) throw new Error('Looks good button missing');
-    await act(async () => { looksGood.click(); });
-    expect(added[1]!.isQuickLabel).toBe(true);
-    expect(added[1]!.htmlAdditionalTargets!.length).toBe(3);
   });
 
   test('without maxAdditionalTargets the arm message and the 16 cap are unchanged', async () => {

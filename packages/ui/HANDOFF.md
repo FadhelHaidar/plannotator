@@ -1759,6 +1759,28 @@ this branch with the same static patch (merged chains, A/D/R/M marks, nested
 folders), at rest, after two `j` presses and after collapsing a folder: the
 sidebar screenshots and its `outerHTML` were byte-identical.
 
+## Comment composer trim (next ui release; BREAKING for hosts that passed `onQuickLookGood`)
+
+Owner ruling: the composer's one-click "Looks good" on HTML / live-app surfaces
+was an affordance no other surface has, and the visible submit hint added noise.
+Both are gone from `components/CommentPopover`.
+
+- **`onQuickLookGood` prop removed** from `CommentPopover` (published in 0.32.0
+  with the comment-only thumbs-up restore). A host that passed it gets a TypeScript
+  error; delete the prop. There is no replacement on the composer: the
+  thumbs-up stays on the **selection toolbar** (`AnnotationToolbar` with
+  `commentOnly` + `onQuickLabel` still renders only the 👍 "Looks good"), so a
+  reviewer who wants one selects text and clicks it.
+- **`handleCommentLooksGood` removed** from the `useHtmlAnnotation` return
+  value (`components/html-viewer`); `HtmlViewer` no longer passes the prop.
+  Mint through `handleCommentSubmit` instead.
+- **Submit hint text removed** from both composer footers (popover and
+  dialog): the `⌘↵` / `Ctrl+Enter` label no longer renders. The keyboard
+  behavior is unchanged: `Mod+Enter` still saves.
+
+`THUMBS_UP_LABEL` (`utils/quickLabels`) stays exported; the toolbar path and
+`HtmlViewer`'s id filter still use it. The trust-boundary clamp is untouched.
+
 ---
 
 ## The law (guardrails for anyone editing `@plannotator/ui`)

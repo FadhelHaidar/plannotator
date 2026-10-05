@@ -1244,10 +1244,6 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
               draftKey={`html:${hook.commentPopover.draftKey}`}
               onSubmit={hook.handleCommentSubmit}
               mentionSource={mentionSource}
-              // Pinpoint clicks open this composer directly, so it carries
-              // the surface's one-click "Looks good" (the global composer
-              // does not: a document-wide thumbs-up is not a thing).
-              onQuickLookGood={hook.handleCommentLooksGood}
               onClose={hook.handleCommentClose}
               skillReferences
               onAskAI={onAskAI}
