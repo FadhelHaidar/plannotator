@@ -59,6 +59,10 @@ export function formatAnnotateOutcome(
     return JSON.stringify({
       decision: "annotated",
       feedback: result.feedback || "",
+      // Additive, and only on a Done with nothing to send: `feedback` keeps
+      // the zero-state sentence, and a consumer that starts agent turns (the
+      // OpenCode CLI bridge) skips the turn (#1701).
+      ...(result.nothingToSend === true ? { nothingToSend: true } : {}),
     });
   }
 

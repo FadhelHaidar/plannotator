@@ -521,7 +521,9 @@ export async function handleAnnotateCommand(
   await Bun.sleep(1500);
   server.stop();
 
-  if (result.exit || (result.approved && !result.feedback)) {
+  // A Done with nothing to send (#1701) carries the zero-state sentence as
+  // feedback; it is not something the agent should act on.
+  if (result.exit || (result.approved && !result.feedback) || result.nothingToSend === true) {
     return;
   }
 
@@ -654,7 +656,7 @@ export async function handleAnnotateLastCommand(
   await Bun.sleep(1500);
   server.stop();
 
-  if (result.exit || (result.approved && !result.feedback)) {
+  if (result.exit || (result.approved && !result.feedback) || result.nothingToSend === true) {
     return null;
   }
 

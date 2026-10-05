@@ -117,6 +117,9 @@ export interface CliAnnotateOutcome {
   feedback?: string;
   selectedMessageId?: string;
   feedbackScope?: "message" | "messages";
+  /** A Done with nothing to send (#1701): `feedback` is the zero-state
+   *  sentence, and no turn is started. Absent from an older CLI. */
+  nothingToSend?: boolean;
 }
 
 export interface CliReviewOutcome {
@@ -726,6 +729,7 @@ export function buildAnnotatePromptFromBridgeOutcome(
 ): string | null {
   if (outcome.decision === "dismissed" || !outcome.feedback?.trim()) return null;
   if (outcome.decision !== "annotated" && outcome.decision !== "approved") return null;
+  if (outcome.decision === "annotated" && outcome.nothingToSend === true) return null;
 
   if (outcome.decision === "approved") {
     return getAnnotateApprovedWithNotesPrompt("opencode", undefined, {

@@ -508,6 +508,22 @@ describe("annotate feedback agent routing (embedded runtime)", () => {
 
     expect(deps.client.session.prompt.mock.calls[0]?.[0].body.agent).toBe("agent-engineer");
   });
+
+  // #1701: the editor's bare Done posts the zero-state sentence marked
+  // nothingToSend. Neither command may turn it into a feedback prompt (on
+  // OpenCode 1 that would be a feedback turn riding the command's message).
+  test("a Done with nothing to send prompts nothing", async () => {
+    const projectRoot = makeTempDir();
+    writeFileSync(path.join(projectRoot, "plan.md"), "# Plan\n");
+    const done = { feedback: "User reviewed the document and has no feedback.", annotations: [], nothingToSend: true };
+    const fileDeps = routingDeps(MESSAGES.slice(0, 2), done);
+    fileDeps.directory = projectRoot;
+    await handleAnnotateCommand({ properties: { arguments: "plan.md", sessionID: "session-123" } }, fileDeps);
+    expect(fileDeps.client.session.prompt).not.toHaveBeenCalled();
+
+    const lastDeps = routingDeps(MESSAGES, { ...done, feedback: "User reviewed the messages and has no feedback." });
+    expect(await handleAnnotateLastCommand({ properties: { sessionID: "session-123" } }, lastDeps)).toBeNull();
+  });
 });
 
 // OpenCode 1, embedded runtime: the session URL must reach a VISIBLE surface.

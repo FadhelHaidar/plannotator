@@ -6,6 +6,7 @@ import {
   supportsAnnotateApprovalNotes,
   supportsAnnotateClientLease,
 } from "./annotate-output";
+import { serializeStrictAnnotateResult } from "./strict-annotate-result";
 
 describe("annotate stdout", () => {
   test("preserves legacy plaintext output byte-for-byte", () => {
@@ -43,6 +44,22 @@ describe("annotate stdout", () => {
       { feedback: "", approved: true },
       { hook: false, json: true },
     )).toBe('{"decision":"approved"}');
+  });
+
+  // #1701: a bare Done gains ONE additive JSON field; plaintext, hook and the
+  // strict-gate record keep their bytes.
+  test("a Done with nothing to send adds nothingToSend to the JSON record only", () => {
+    const done = { feedback: "User reviewed the document and has no feedback.", nothingToSend: true };
+    expect(formatAnnotateOutcome(done, { hook: false, json: true }))
+      .toBe('{"decision":"annotated","feedback":"User reviewed the document and has no feedback.","nothingToSend":true}');
+    expect(formatAnnotateOutcome(done, { hook: false, json: false }))
+      .toBe("User reviewed the document and has no feedback.");
+    expect(formatAnnotateOutcome(done, { hook: true, json: false }))
+      .toBe('{"decision":"block","reason":"User reviewed the document and has no feedback."}');
+    expect(serializeStrictAnnotateResult(done))
+      .toBe('{"decision":"annotated","feedback":"User reviewed the document and has no feedback."}');
+    expect(formatAnnotateOutcome({ feedback: "Revise this." }, { hook: false, json: true }))
+      .toBe('{"decision":"annotated","feedback":"Revise this."}');
   });
 
   test("advertises approval notes only for gated direct JSON", () => {

@@ -195,6 +195,18 @@ process.exit(1);
     expect(prompt).not.toContain("artifact is approved");
   });
 
+  // #1701: the CLI's --json record for a bare Done keeps the zero-state
+  // sentence as feedback and adds nothingToSend; the bridge starts no turn.
+  test("a Done with nothing to send builds no prompt", () => {
+    for (const target of [{ kind: "message" as const }, { kind: "file" as const, fileHeader: "File" as const, filePath: "notes.md" }]) {
+      expect(buildAnnotatePromptFromBridgeOutcome({
+        decision: "annotated",
+        feedback: "User reviewed the document and has no feedback.",
+        nothingToSend: true,
+      }, target)).toBeNull();
+    }
+  });
+
   test("classifies CLI bridge prompt-delivery failures for fallback prevention", async () => {
     const client = {
       app: { log: mock(() => {}) },

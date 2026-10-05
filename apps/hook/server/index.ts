@@ -767,6 +767,7 @@ function emitOpenCodeAnnotateOutcome(result: {
   approved?: boolean;
   selectedMessageId?: string;
   feedbackScope?: "message" | "messages";
+  nothingToSend?: boolean;
 }): void {
   if (result.approved) {
     console.log(JSON.stringify({
@@ -788,6 +789,8 @@ function emitOpenCodeAnnotateOutcome(result: {
     feedback: result.feedback || "",
     ...(result.selectedMessageId && { selectedMessageId: result.selectedMessageId }),
     ...(result.feedbackScope && { feedbackScope: result.feedbackScope }),
+    // Additive: a Done with nothing to send, which the bridge delivers as no turn (#1701).
+    ...(result.nothingToSend === true && { nothingToSend: true }),
   }));
 }
 
