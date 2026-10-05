@@ -6,6 +6,24 @@ import { computeListIndices, groupBlocks, parseMarkdownToBlocks } from '../../ut
 import { BlockRenderer } from '../BlockRenderer';
 
 /**
+ * The document renderers at the card's scale and tone. A stylesheet rather
+ * than Tailwind arbitrary variants on purpose: those would add utilities to
+ * every bundle whose Tailwind scans `packages/ui/components` (the guides.show
+ * viewer among them, which never renders a question card), and a host gets
+ * these rules without any Tailwind setup. Unlayered, so it outranks the
+ * renderers' utility classes.
+ */
+const QUESTION_CONTEXT_CSS = `
+.question-context > * { margin-top: 0.5rem; margin-bottom: 0.5rem; }
+.question-context > :first-child { margin-top: 0; }
+.question-context > :last-child { margin-bottom: 0; }
+.question-context p, .question-context .text-sm { font-size: 13px; line-height: 1.5; }
+.question-context p, .question-context [data-question-context-list] span { color: inherit; }
+.question-context h1, .question-context h2, .question-context h3 { margin: 0.75rem 0 0.25rem; font-size: 14px; }
+.question-context h3 { font-size: 13.5px; }
+`;
+
+/**
  * A question card's context, rendered as the document renders markdown: the
  * same block parser and the same block renderers, so a table, a list, a code
  * fence, a quote or an image in the context looks the way it does in the
@@ -42,17 +60,11 @@ export const QuestionContext: React.FC<{
   return (
     <div
       id={id}
-      className={[
-        'question-context mt-1 text-[13px] leading-normal text-muted-foreground',
-        // The document renderers at the card's scale and tone.
-        '[&>*]:my-2 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
-        '[&_p]:text-[13px] [&_p]:leading-normal [&_p]:text-muted-foreground',
-        '[&_.text-sm]:text-[13px] [&_.text-sm]:leading-normal',
-        '[&_[data-question-context-list]_span]:text-muted-foreground',
-        '[&_h1]:text-[14px] [&_h2]:text-[14px] [&_h3]:text-[13.5px] [&_h1]:mt-3 [&_h2]:mt-3 [&_h3]:mt-3 [&_h1]:mb-1 [&_h2]:mb-1 [&_h3]:mb-1',
-      ].join(' ')}
+      className="question-context mt-1 text-[13px] leading-normal text-muted-foreground"
       data-question-part="context"
     >
+      {/* React hoists this into <head> once for every card. */}
+      <style href="plannotator-question-context" precedence="default">{QUESTION_CONTEXT_CSS}</style>
       {groups.map((group, i) =>
         'list' in group ? (
           <div key={`l-${i}`} data-question-context-list="">

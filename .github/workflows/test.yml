@@ -127,6 +127,7 @@ jobs:
           packages/ui/hooks/usePinpoint.question.test.tsx
           packages/ui/utils/blockTargeting.blocks.test.tsx
           packages/ui/components/AnnotationPanel.questions.test.tsx
+          packages/ui/hooks/useActiveSection.test.tsx
           packages/editor/hooks/useQuestionAnswers.test.tsx
           packages/ui/components/diagram/DiagramViewer.test.tsx
           packages/ui/utils/diagramAnchor.test.ts
