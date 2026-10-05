@@ -302,26 +302,46 @@ result. Tool differences: the annotate target is ONE argument, so the #1182
 tolerant word split never runs on it (`tolerant: false`); an opened review
 returns `plannotatorToolOpenedText` with `terminate: true`, so the turn ends
 and the session is idle for Ask; a gated session the tool opened delivers a
-bare Approve as a message (`deliverApproval`, the mod's rule). A list of
+bare Approve as a message (`deliverApproval`, the mod's rule). The tool's
+`last` skips the assistant entry holding the calling tool call
+(`isAssistantEntryForToolCall` in `assistant-message.ts`): Pi saves an
+assistant message at message_end, before its tools run, so otherwise the
+agent's own "opening it now" message would open, and would head the picker.
+On one fixed port (remote mode or a single `PLANNOTATOR_PORT`, read from
+`getServerPorts`) a second open is refused while any review is open
+(`fixedPortBusyText` names it), because the new server would otherwise
+self-preempt the open one silently. A list of
 files answers `PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT` and `reply`
 `PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT` until those PRs land; a session
 without UI (print/JSON mode) is refused, since nothing could deliver the
 decision later.
 
-**Sessions, list and close.** Every review the extension instance opens (tool,
-commands, `plannotator_submit_plan`) is recorded in `createPiReviewRegistry`
-(`apps/pi-extension/plannotator-tool-host.ts`) with a `pn-` id until its
-decision settles. `list` and `close` see only entries whose owner is the
-calling ctx's `sessionManager.getSessionId()` in this extension instance, never
-the global `sessions/` registry. `unsent` and `decided` come from the server's
+**Sessions, list and close.** Every review the extension opens (tool,
+commands, `plannotator_submit_plan`) is recorded in ONE process-wide registry
+(`getProcessPiReviewRegistry` in `apps/pi-extension/plannotator-tool-host.ts`,
+on `globalThis`) with a `pn-` id until its decision settles. Process-wide
+because Pi builds a new extension instance on `/reload` and `/resume`, and a
+per-instance map would forget the open reviews of a session that merely
+reloaded. `list` and `close` see only entries whose owner is the calling ctx's
+`sessionManager.getSessionId()`, so another session's reviews (including the
+previous one after `/new`) are never in reach; the global `sessions/` registry
+is never read. `unsent` and `decided` come from the server's
 in-process `hostControl.status()`; `close` calls `hostControl.close()` (the
 reviewer's Close marked `closedBy: "agent"`, draft kept, tab told), so it
 works in remote mode too, where the HTTP endpoints are off. A review the agent
 closed delivers nothing: its decision handler notifies "the agent closed …"
-instead. Plan reviews are listed (subject `plan <file>`) and never closed.
+instead (user-facing notices name a last-message review "the agent's last
+message"; agent-facing texts say "your last message"). Plan reviews are listed
+as `Plan vN` (the history version, read from `updatePlan`'s no-op answer for
+the same text, and from each revision) and never closed.
 Review, annotate and last decisions (commands included) now start with
 `plannotatorDecisionHeading` (`Plannotator: notes.md (pn-3f2a9c) — Feedback ·
-2 comments.`); plan decisions are unchanged. Pi cannot take over an agent's
+2 comments.`); outcomes follow the mod: a code review that is not an approval
+is `Changes requested · N comments`, and one with zero annotations is the
+PR-platform status post (the in-app general comment is an annotation too), which
+now starts no turn on Pi either: the user gets a notice, the agent nothing
+(slash commands included; Pi used to deliver the status line). Plan decisions
+are unchanged. Pi cannot take over an agent's
 shell `plannotator` command: its `tool_call` event can only block a call, which
 the model reads as an error, so the skill's "use the tool" line is what steers
 it.

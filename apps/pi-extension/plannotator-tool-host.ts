@@ -2,12 +2,15 @@
  * The Pi side of the `plannotator` agent tool (contract:
  * packages/shared/plannotator-tool.ts, vendored as generated/plannotator-tool.ts).
  *
- * The extension keeps one registry per extension instance (one Pi session):
- * every review it opens, through the tool, a /plannotator-* command, or
- * plannotator_submit_plan, is recorded here with a `pn-` session id until its
- * decision settles. `list` and `close` read only this registry, filtered to
- * the Pi session that opened each review, so another Pi session's reviews
- * (or another project's) are never in reach.
+ * One registry per Pi PROCESS (`getProcessPiReviewRegistry`, on globalThis):
+ * every review the extension opens, through the tool, a /plannotator-*
+ * command, or plannotator_submit_plan, is recorded here with a `pn-` session
+ * id until its decision settles. Pi builds a new extension instance on
+ * /resume, /reload and /new, so a per-instance map would forget the open
+ * reviews of a session that merely reloaded. Entries are keyed by the Pi
+ * session id that opened them instead: a replacement instance for the SAME
+ * session still lists and closes them, and `list` / `close` never reach
+ * another session's reviews.
  *
  * Closing calls the server's in-process host control (`HostControl.close`,
  * packages/shared/host-control.ts): the reviewer's Close, marked
@@ -34,7 +37,10 @@ export interface PiOpenReview {
 	/** `pn-` + 6 hex, unique among this registry's open reviews. */
 	id: string;
 	kind: PiReviewKind;
+	/** How the agent-facing texts (list, close, decision heading) name it. */
 	subject: string;
+	/** How user-facing notices name it, when that differs ("the agent's last message"). */
+	userSubject?: string;
 	url: string;
 	startedAt: number;
 	/** The Pi session id that opened it (`ctx.sessionManager.getSessionId()`). */
@@ -47,11 +53,13 @@ export interface PiOpenReview {
 
 export interface PiReviewRegistry {
 	/** Record a review that just opened and give it a session id. */
-	add(entry: Pick<PiOpenReview, "kind" | "subject" | "url" | "owner" | "hostControl">): PiOpenReview;
+	add(entry: Pick<PiOpenReview, "kind" | "subject" | "userSubject" | "url" | "owner" | "hostControl">): PiOpenReview;
 	/** Forget a review once its decision settled or its server stopped. */
 	remove(review: PiOpenReview): void;
 	/** The open reviews `owner` opened (not closed by the agent), oldest first. */
 	openFor(owner: string | undefined): PiOpenReview[];
+	/** Every open review in this process, whichever session opened it, oldest first. */
+	openAll(): PiOpenReview[];
 	/** The tool's `list` result for `owner`. */
 	listText(owner: string | undefined): string;
 	/** The tool's `close` for `owner`: one session id or "all". `ok: false` is an error result. */
@@ -75,8 +83,8 @@ export function createPiReviewRegistry(
 		return id;
 	};
 
-	const openFor = (owner: string | undefined): PiOpenReview[] =>
-		[...reviews.values()].filter((review) => !review.closedByAgent && review.owner === owner);
+	const openAll = (): PiOpenReview[] => [...reviews.values()].filter((review) => !review.closedByAgent);
+	const openFor = (owner: string | undefined): PiOpenReview[] => openAll().filter((review) => review.owner === owner);
 
 	const statusOf = (review: PiOpenReview) => {
 		try {
@@ -117,6 +125,7 @@ export function createPiReviewRegistry(
 			if (reviews.get(review.id) === review) reviews.delete(review.id);
 		},
 		openFor,
+		openAll,
 		listText(owner) {
 			const at = now();
 			const sessions: PlannotatorSessionSummary[] = openFor(owner).map((review) => {
@@ -143,6 +152,27 @@ export function createPiReviewRegistry(
 			return { ok: outcome.closed, text: plannotatorToolCloseText([outcome]) };
 		},
 	};
+}
+
+type RegistryGlobal = typeof globalThis & { __plannotatorPiReviewRegistry?: PiReviewRegistry };
+
+/** The registry every extension instance in this process shares (see the file comment). */
+export function getProcessPiReviewRegistry(): PiReviewRegistry {
+	const store = globalThis as RegistryGlobal;
+	store.__plannotatorPiReviewRegistry ??= createPiReviewRegistry();
+	return store.__plannotatorPiReviewRegistry;
+}
+
+/**
+ * What the tool answers instead of opening a second review while one is open
+ * and every server binds the SAME fixed port (remote mode, or a single
+ * PLANNOTATOR_PORT): the new server would silently stop the open one.
+ */
+export function fixedPortBusyText(open: PiOpenReview, ownedByCaller: boolean): string {
+	const lead = "Plannotator did not open: this Pi runs Plannotator on one fixed port (remote mode or PLANNOTATOR_PORT), so only one review can be open at a time.";
+	if (!ownedByCaller) return `${lead} Another Pi session has a review open; wait until it ends.`;
+	if (open.kind === "plan") return `${lead} The plan review ${open.id} is open; wait for the reviewer's decision.`;
+	return `${lead} ${open.subject} (${open.id}) is open: wait for the reviewer's decision, or close it first with action "close" and session "${open.id}".`;
 }
 
 function baseName(path: string): string {
@@ -175,9 +205,19 @@ export function reviewSubject(prUrl: string | undefined, directory: string | und
 	return directory ? `changes in ${baseName(directory)}` : "local changes";
 }
 
-/** How a review names the last-message surface (several messages when the picker is offered). */
+/** How a plan review is named, as the Claude Code mod names it: `Plan v3` once the version is known. */
+export function planSubject(version: number | undefined): string {
+	return version && version > 0 ? `Plan v${version}` : "Plan";
+}
+
+/** How agent-facing texts name the last-message surface (several messages when the picker is offered). */
 export function lastMessageSubject(messageCount: number): string {
 	return messageCount > 1 ? "your recent messages" : "your last message";
+}
+
+/** How user-facing notices name the same surface. */
+export function lastMessageUserSubject(messageCount: number): string {
+	return messageCount > 1 ? "the agent's recent messages" : "the agent's last message";
 }
 
 function plural(count: number, one: string, many: string): string {
@@ -191,9 +231,9 @@ export function commentCountSuffix(annotations: unknown): string {
 }
 
 /** The notification after the agent closed a review: nothing is delivered for it. */
-export function agentClosedNotice(review: Pick<PiOpenReview, "id" | "subject">, unsent: number | undefined): string {
+export function agentClosedNotice(review: Pick<PiOpenReview, "id" | "subject" | "userSubject">, unsent: number | undefined): string {
 	const saved = typeof unsent === "number" && unsent > 0
 		? ` ${plural(unsent, "unsent comment", "unsent comments")} kept in the draft.`
 		: "";
-	return `Plannotator: the agent closed ${review.subject} (${review.id}).${saved} Nothing was sent to the agent.`;
+	return `Plannotator: the agent closed ${review.userSubject ?? review.subject} (${review.id}).${saved} Nothing was sent to the agent.`;
 }

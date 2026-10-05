@@ -45,7 +45,7 @@ export const PLANNOTATOR_TOOL_DESCRIPTION = [
   '- action "last": annotate your own last assistant message; no target.',
   '- action "list": the reviews opened in this conversation that are still open, one line each: session id, what it shows, url, age, state, and how many comments the reviewer has not sent yet.',
   '- action "close": close a review opened in this conversation that is no longer needed; `session` is its id (pn-...) or "all". Nothing is sent to you, and the reviewer\'s unsent comments stay saved as a draft. Plan reviews are not closed this way: they end with the reviewer\'s decision.',
-  'Opening only opens the page and names its session id (pn-...). The reviewer\'s feedback arrives later as a message from the plannotator plugin that names the same id, so end your turn after opening and wait for it. Use this tool instead of running the `plannotator` CLI. Plan review is not done with this tool: it opens by itself when you exit plan mode.',
+  'Opening only opens the page and names its session id (pn-...). The reviewer\'s feedback arrives later as a message in this conversation that names the same id, so end your turn after opening and wait for it. Use this tool instead of running the `plannotator` CLI. Plan review is not done with this tool: it opens by itself when you exit plan mode.',
 ].join('\n')
 
 export const PLANNOTATOR_TOOL_INPUT_SCHEMA = {
@@ -294,7 +294,7 @@ export function plannotatorToolOpenedText(subject: string, url: string | undefin
   return [
     ...(sessionId ? [`Session: ${sessionId}`] : []),
     where,
-    'The reviewer is looking at it now. End your turn now and wait: their decision arrives later as a message from the plannotator plugin.',
+    'The reviewer is looking at it now. End your turn now and wait: their decision arrives later as a message in this conversation that starts with "Plannotator:".',
     outcome,
     'Do not poll, reopen it, or run the plannotator CLI for this session.',
   ].join('\n')

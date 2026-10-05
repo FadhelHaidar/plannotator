@@ -55,6 +55,7 @@ import {
 	getLastAssistantMessageSnapshot,
 	getRecentAssistantMessages,
 	hasSessionMovedPastEntry,
+	isAssistantEntryForToolCall,
 } from "./assistant-message.ts";
 import {
 	getPiSessionIdentity,
@@ -76,7 +77,7 @@ import {
 	type Phase,
 	stripPlanningOnlyTools,
 } from "./tool-scope.ts";
-import { isRemoteSession, isUrlHostOverridden } from "./server/network.ts";
+import { getServerPorts, isRemoteSession, isUrlHostOverridden } from "./server/network.ts";
 import { isBrowserSessionStoppedError } from "./browser-session-error.ts";
 import { classifyAnnotateOutcome } from "./annotate-outcome.ts";
 import { createPiSessionBridgeHub } from "./pi-session-bridge.ts";
@@ -96,8 +97,11 @@ import {
 	agentClosedNotice,
 	annotateSubject,
 	commentCountSuffix,
-	createPiReviewRegistry,
+	fixedPortBusyText,
+	getProcessPiReviewRegistry,
 	lastMessageSubject,
+	lastMessageUserSubject,
+	planSubject,
 	reviewSubject,
 	type PiOpenReview,
 	type PiReviewKind,
@@ -391,11 +395,12 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	const sessionBridgeFor = (ctx: ExtensionContext, origin: PiSessionIdentity) =>
 		isRemoteSession() ? undefined : sessionBridgeHub.createBridge(ctx, origin);
 	/**
-	 * The reviews this Pi session opened and that are still open (tool,
-	 * slash commands, plan review), each with a `pn-` session id: what the
-	 * `plannotator` tool's list and close see.
+	 * The open reviews (tool, slash commands, plan review), each with a `pn-`
+	 * session id and the Pi session that opened it: what the `plannotator`
+	 * tool's list and close see. Process-wide, so a replacement instance for
+	 * the same Pi session (/resume, /reload) still sees its reviews.
 	 */
-	const openReviews = createPiReviewRegistry();
+	const openReviews = getProcessPiReviewRegistry();
 	let phase: Phase = "idle";
 	void registerPlannotatorEventListeners(pi, {
 		handlePlanMode: async (mode, ctx) => {
@@ -835,6 +840,8 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		 * ONE argument, like the CLI's argv, so it never splits it.
 		 */
 		tolerant?: boolean;
+		/** `last` from the tool: skip the assistant message holding this tool call. */
+		skipToolCallId?: string;
 	}
 
 	/** The id of the Pi session that owns a review; list/close only see their own. */
@@ -860,12 +867,12 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		ctx: ExtensionContext,
 		origin: PiSessionIdentity,
 		kind: Exclude<PiReviewKind, "plan">,
-		subject: string,
+		names: { subject: string; userSubject?: string },
 		session: BrowserDecisionSession<T>,
 		errors: { send: string; session: string },
 		deliver: (result: T, review: PiOpenReview) => Promise<void>,
 	): PiOpenReview {
-		const review = openReviews.add({ kind, subject, url: session.url, owner: ownerOf(ctx), hostControl: session.hostControl });
+		const review = openReviews.add({ kind, ...names, url: session.url, owner: ownerOf(ctx), hostControl: session.hostControl });
 		void session
 			.waitForDecision()
 			.then(async (result) => {
@@ -934,7 +941,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				send: "Plannotator code review feedback could not be sent",
 				session: "Plannotator code review session failed",
 			};
-			const review = trackReview(ctx, origin, "review", subject, session, errors, async (result, tracked) => {
+			const review = trackReview(ctx, origin, "review", { subject }, session, errors, async (result, tracked) => {
 				if (result.feedback) result.feedback = withReviewDirectory(result.feedback, result.reviewDirectory);
 				if (result.exit) {
 					safeNotify(ctx, "Code review session closed.", "info", origin);
@@ -959,20 +966,21 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 					safeNotify(ctx, "Code review closed (no feedback).", "info", origin);
 					return;
 				}
-				// Append the verification-only suffix when the reviewer sent
-				// annotations to act on (PR mode included). Platform PR actions
-				// (approve/comment posted to the host) come back with an empty
-				// annotation set and a status message — don't tell the agent to
-				// "address" a platform action.
-				let reviewFeedback = result.feedback;
-				const annotated = (result.annotations?.length ?? 0) > 0;
-				if (annotated) {
-					const { getReviewDeniedSuffix } = await loadPlannotatorPrompts();
-					reviewFeedback += getReviewDeniedSuffix("pi", loadConfig());
+				// Platform PR actions (approve/comment posted to GitHub, GitLab or
+				// Bitbucket) come back with an empty annotation set and a status
+				// message. Like the Claude Code mod, that starts no turn: the review
+				// went to the platform, not to the agent. (Every in-app comment,
+				// a general one included, is an annotation.)
+				if ((result.annotations?.length ?? 0) === 0) {
+					safeNotify(ctx, `Plannotator: ${result.feedback.trim()} Nothing was sent to the agent.`, "info", origin);
+					return;
 				}
+				// The verification-only suffix: the reviewer sent annotations to act on.
+				const { getReviewDeniedSuffix } = await loadPlannotatorPrompts();
+				const reviewFeedback = result.feedback + getReviewDeniedSuffix("pi", loadConfig());
 				sendUserMessageWithCurrentSessionFallback(
 					pi,
-					withDecisionHeading(tracked, annotated ? `Changes requested${commentCountSuffix(result.annotations)}` : "Feedback", reviewFeedback),
+					withDecisionHeading(tracked, `Changes requested${commentCountSuffix(result.annotations)}`, reviewFeedback),
 					{ deliverAs: "followUp" },
 					errors.send,
 					origin,
@@ -1217,7 +1225,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				send: "Plannotator annotation feedback could not be sent",
 				session: "Plannotator annotation session failed",
 			};
-			const review = trackReview(ctx, origin, "annotate", annotateSubject(absolutePath), session, errors, async (result, tracked) => {
+			const review = trackReview(ctx, origin, "annotate", { subject: annotateSubject(absolutePath) }, session, errors, async (result, tracked) => {
 				const outcome = classifyAnnotateOutcome(result);
 				if (outcome.notification === "closed") {
 					safeNotify(ctx, "Annotation session closed.", "info", origin);
@@ -1282,12 +1290,18 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		currentPiSession.update(ctx);
 		const origin = getPiSessionIdentity(ctx);
 
-		const snapshot = getLastAssistantMessageSnapshot(ctx);
+		// From the tool: the assistant message calling it is already saved and
+		// is the newest; it is not the answer the user wants to annotate.
+		const skipToolCallId = options.skipToolCallId;
+		const skip = skipToolCallId
+			? (entry: { message?: unknown }) => isAssistantEntryForToolCall(entry, skipToolCallId)
+			: undefined;
+		const snapshot = getLastAssistantMessageSnapshot(ctx, skip);
 		if (!snapshot) {
 			return { ok: false, error: "No assistant message found in session." };
 		}
 
-		const recent = getRecentAssistantMessages(ctx, 25);
+		const recent = getRecentAssistantMessages(ctx, 25, skip);
 		const pickerMessages = recent.length > 1 ? recent : undefined;
 
 		ctx.ui.notify("Opening annotation UI for last message...", "info");
@@ -1305,8 +1319,8 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				send: "Plannotator message annotation feedback could not be sent",
 				session: "Plannotator message annotation session failed",
 			};
-			const subject = lastMessageSubject(recent.length);
-			const review = trackReview(ctx, origin, "last", subject, session, errors, async (result, tracked) => {
+			const names = { subject: lastMessageSubject(recent.length), userSubject: lastMessageUserSubject(recent.length) };
+			const review = trackReview(ctx, origin, "last", names, session, errors, async (result, tracked) => {
 				const outcome = classifyAnnotateOutcome(result);
 				if (outcome.notification === "closed") {
 					safeNotify(ctx, "Annotation session closed.", "info", origin);
@@ -1420,8 +1434,8 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		// edited file: sequential makes Pi run the batch in order (#1622).
 		executionMode: "sequential",
 
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			const text = await runPlannotatorTool(params, ctx, signal);
+		async execute(toolCallId, params, signal, _onUpdate, ctx) {
+			const text = await runPlannotatorTool(params, ctx, signal, toolCallId);
 			return { content: [{ type: "text", text: text.text }], details: text.details, ...(text.terminate ? { terminate: true } : {}) };
 		},
 	});
@@ -1434,6 +1448,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		params: unknown,
 		ctx: ExtensionContext,
 		signal: AbortSignal | undefined,
+		toolCallId: string,
 	): Promise<{ text: string; details: Record<string, unknown>; terminate?: boolean }> {
 		const parsed = parsePlannotatorToolInput(params);
 		if (!parsed.ok) throw new Error(parsed.error);
@@ -1463,13 +1478,22 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			);
 		}
 		if (signal?.aborted) throw new Error("Plannotator did not open: the call was cancelled.");
+		// One fixed port (remote mode, or a single PLANNOTATOR_PORT): a second
+		// server would silently stop the open review to take its port. Refuse
+		// and name the open one instead.
+		const { ports } = getServerPorts();
+		if (ports.length === 1 && ports[0] !== 0) {
+			const open = openReviews.openAll();
+			const busy = open.find((review) => review.owner === owner) ?? open[0];
+			if (busy) throw new Error(fixedPortBusyText(busy, busy.owner === owner));
+		}
 
 		const gate = call.gate === true;
 		let launched: LaunchResult;
 		if (call.action === "review") {
 			launched = await launchCodeReview(ctx, plannotatorToolArgs(call));
 		} else if (call.action === "last") {
-			launched = await launchLastMessage(ctx, false);
+			launched = await launchLastMessage(ctx, false, { skipToolCallId: toolCallId });
 		} else {
 			const target = call.target as string;
 			const { stripAtPrefix } = await import("./generated/at-reference.ts");
@@ -1715,7 +1739,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				if (revision) {
 					open.filePath = inputPath;
 					open.planContent = planContent;
-					if (open.tracked) open.tracked.subject = `plan ${inputPath}`;
+					if (open.tracked && !revision.unchanged) open.tracked.subject = planSubject(revision.version);
 					if (revision.unchanged) {
 						return {
 							content: [
@@ -1795,9 +1819,17 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			// A previous review that is somehow still tracked loses to the new one.
 			if (pendingPlanReview && pendingPlanReview !== review) stopPendingPlanReview();
 			pendingPlanReview = review;
+			// The history version the server saved this plan as: pushing the SAME
+			// text is a no-op that reports it (updatePlan's unchanged branch).
+			let planVersion: number | undefined;
+			try {
+				planVersion = session.updatePlan?.(planContent)?.version;
+			} catch {
+				planVersion = undefined;
+			}
 			review.tracked = openReviews.add({
 				kind: "plan",
-				subject: `plan ${inputPath}`,
+				subject: planSubject(planVersion),
 				url: session.url,
 				owner: ownerOf(ctx),
 				hostControl: session.hostControl,

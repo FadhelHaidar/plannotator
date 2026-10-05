@@ -1,20 +1,24 @@
 /**
- * The `plannotator` agent tool on Pi (contract: packages/shared/plannotator-tool.ts).
+ * The `plannotator` agent tool on Pi (contract: packages/shared/plannotator-tool.ts),
+ * and the decision delivery it shares with the /plannotator-* commands.
  *
- * Driven through the real extension with a fake Pi host. Annotate sessions
- * run a REAL in-process annotate server (only the browser launch is skipped),
- * so close, unsent counts and decisions go through the server's own host
- * control.
+ * Driven through the real extension with a fake Pi host. Annotate, last and
+ * code review sessions run REAL in-process servers (only the browser launch is
+ * skipped), so close, unsent counts and decisions go through the servers' own
+ * host control and decision endpoints.
  *
  * What regresses if this fails:
  *  - Pi's tool validator refuses the shared plain JSON Schema, so every call fails;
  *  - the tool forks the contract (name, schema, description) instead of using it;
  *  - opening blocks the turn, or opens without the Ask-this-session bridge;
- *  - the reviewer's decision never reaches the agent, or arrives without the
- *    `Plannotator: <subject> (pn-…) — <outcome>.` heading that names the session;
+ *  - the reviewer's decision (tool or slash command) never reaches the agent, or
+ *    arrives without the `Plannotator: <subject> (pn-…) — <outcome>.` heading;
  *  - a gated session the agent opened swallows a bare approval it was told to wait for;
- *  - list/close reach another Pi session's reviews, close deletes the
- *    reviewer's draft or delivers a message, or a plan review can be closed;
+ *  - the tool's `last` opens the agent's own tool-calling message instead of its answer;
+ *  - list/close reach another Pi session's reviews, lose the session's own reviews
+ *    after a reload (new extension instance), close deletes the reviewer's draft
+ *    or delivers a message, or a plan review can be closed;
+ *  - on one fixed port a second open silently stops the open review;
  *  - a list of files, `reply`, or a session without UI opens anything.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -32,8 +36,10 @@ import {
 } from "./generated/plannotator-tool.ts";
 import type { PlanReviewDecision } from "./plannotator-browser.ts";
 import { startAnnotateServer } from "./server/serverAnnotate.ts";
+import { startReviewServer } from "./server/serverReview.ts";
 
 const MINIMAL_HTML = "<html><body>Plannotator</body></html>";
+const PATCH = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n";
 const ENV_KEYS = ["PLANNOTATOR_DATA_DIR", "PLANNOTATOR_AI", "PLANNOTATOR_PORT", "PLANNOTATOR_REMOTE", "PLANNOTATOR_FEEDBACK_HISTORY", "PLANNOTATOR_ANNOTATE_HISTORY"] as const;
 
 const tempDirs: string[] = [];
@@ -63,23 +69,31 @@ afterEach(() => {
 
 type ToolResult = { content: Array<{ type: string; text: string }>; details?: Record<string, unknown>; terminate?: boolean };
 type Tool = { name: string; description: string; parameters: unknown; executionMode?: string; execute: (...args: unknown[]) => Promise<ToolResult> };
+type BranchEntry = { id: string; type: string; message?: unknown };
 
-interface AnnotateLaunch {
-	filePath: string;
+interface Launch {
+	kind: "annotate" | "last" | "review";
+	text?: string;
+	recent?: Array<{ messageId: string; text: string }>;
 	gate: boolean | undefined;
 	sessionBridge: unknown;
 	url: string;
 }
 
-function createHarness(options: { sessionId?: string; hasUI?: boolean; deps?: PlannotatorExtensionDeps } = {}) {
+/** The registry is process-wide, so every harness gets its own Pi session id unless a test shares one. */
+let sessionCounter = 0;
+const freshSessionId = () => `pi-session-${process.pid}-${(sessionCounter += 1)}`;
+
+function createHarness(options: { sessionId?: string; hasUI?: boolean; branch?: BranchEntry[]; deps?: PlannotatorExtensionDeps } = {}) {
 	const cwd = mkdtempSync(join(tmpdir(), "plannotator-pi-tool-"));
 	tempDirs.push(cwd);
+	const sessionId = options.sessionId ?? freshSessionId();
 	const tools = new Map<string, Tool>();
 	const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
 	const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
 	const sent: Array<{ text: string; options: unknown }> = [];
 	const notices: Array<{ message: string; type: string }> = [];
-	const annotateLaunches: AnnotateLaunch[] = [];
+	const launches: Launch[] = [];
 	const planReviews: Array<{ decide: (result: PlanReviewDecision) => void }> = [];
 
 	const pi = {
@@ -103,7 +117,7 @@ function createHarness(options: { sessionId?: string; hasUI?: boolean; deps?: Pl
 		sendUserMessage: (text: string, sendOptions: unknown) => sent.push({ text, options: sendOptions }),
 	};
 
-	const makeCtx = (sessionId: string) => ({
+	const makeCtx = (id: string) => ({
 		cwd,
 		hasUI: options.hasUI ?? true,
 		mode: "tui",
@@ -114,9 +128,9 @@ function createHarness(options: { sessionId?: string; hasUI?: boolean; deps?: Pl
 		model: undefined,
 		modelRegistry: { find: () => undefined },
 		sessionManager: {
-			getBranch: () => [],
-			getEntries: () => [],
-			getSessionId: () => sessionId,
+			getBranch: () => options.branch ?? [],
+			getEntries: () => options.branch ?? [],
+			getSessionId: () => id,
 			getSessionFile: () => undefined,
 			getSessionName: () => undefined,
 		},
@@ -127,19 +141,33 @@ function createHarness(options: { sessionId?: string; hasUI?: boolean; deps?: Pl
 			theme: { fg: (_color: string, text: string) => text, strikethrough: (text: string) => text },
 		},
 	});
-	const ctx = makeCtx(options.sessionId ?? "pi-session-a");
+	const ctx = makeCtx(sessionId);
 
-	// A real annotate server; only the browser launch is skipped.
+	// Real servers; only the browser launch is skipped.
 	const startAnnotation: NonNullable<PlannotatorExtensionDeps["startAnnotation"]> = async (
 		_ctx, filePath, markdown, mode, folderPath, _sourceInfo, _converted, gate, _rawHtml, _renderHtml, _convertHtml, _recent, _live, sessionBridge,
 	) => {
 		const server = await startAnnotateServer({ markdown, filePath, mode, folderPath, gate, htmlContent: MINIMAL_HTML });
 		servers.push(server);
-		annotateLaunches.push({ filePath, gate, sessionBridge, url: server.url });
+		launches.push({ kind: "annotate", text: filePath, gate, sessionBridge, url: server.url });
+		return { url: server.url, waitForDecision: server.waitForDecision, stop: server.stop, hostControl: server.hostControl };
+	};
+	const startLastMessageAnnotation: NonNullable<PlannotatorExtensionDeps["startLastMessageAnnotation"]> = async (
+		_ctx, lastText, gate, recentMessages, sessionBridge,
+	) => {
+		const server = await startAnnotateServer({ markdown: lastText, filePath: "last-message", mode: "annotate-last", gate, recentMessages, htmlContent: MINIMAL_HTML });
+		servers.push(server);
+		launches.push({ kind: "last", text: lastText, recent: recentMessages, gate, sessionBridge, url: server.url });
+		return { url: server.url, waitForDecision: server.waitForDecision, stop: server.stop, hostControl: server.hostControl };
+	};
+	const startCodeReview: NonNullable<PlannotatorExtensionDeps["startCodeReview"]> = async (_ctx, reviewOptions = {}) => {
+		const server = await startReviewServer({ rawPatch: PATCH, gitRef: "HEAD", htmlContent: MINIMAL_HTML });
+		servers.push(server);
+		launches.push({ kind: "review", gate: undefined, sessionBridge: reviewOptions.sessionBridge, url: server.url });
 		return { url: server.url, waitForDecision: server.waitForDecision, stop: server.stop, hostControl: server.hostControl };
 	};
 
-	const startPlanReview: NonNullable<PlannotatorExtensionDeps["startPlanReview"]> = async () => {
+	const startPlanReview: NonNullable<PlannotatorExtensionDeps["startPlanReview"]> = async (_ctx, planContent) => {
 		let resolve!: (result: PlanReviewDecision) => void;
 		const decision = new Promise<PlanReviewDecision>((res) => {
 			resolve = res;
@@ -151,7 +179,7 @@ function createHarness(options: { sessionId?: string; hasUI?: boolean; deps?: Pl
 			waitForDecision: () => decision,
 			onDecision: () => () => undefined,
 			stop: () => undefined,
-			updatePlan: () => null,
+			updatePlan: (plan: string) => (plan === planContent ? { revision: 0, version: 1, unchanged: true } : null),
 			hostControl: { status: () => ({ kind: "plan", documents: [], unsentAnnotations: 0, decided: false }) },
 		} as never;
 	};
@@ -160,6 +188,8 @@ function createHarness(options: { sessionId?: string; hasUI?: boolean; deps?: Pl
 		hasPlanBrowserHtml: () => true,
 		hasReviewBrowserHtml: () => true,
 		startAnnotation,
+		startLastMessageAnnotation,
+		startCodeReview,
 		startPlanReview,
 		...options.deps,
 	});
@@ -168,15 +198,15 @@ function createHarness(options: { sessionId?: string; hasUI?: boolean; deps?: Pl
 	return {
 		cwd,
 		ctx,
+		sessionId,
 		makeCtx,
 		tools,
 		sent,
 		notices,
-		annotateLaunches,
-		planReviews,
+		launches,
 		tool,
-		call(params: unknown, callCtx: unknown = ctx) {
-			return tool().execute("call-1", params, undefined, undefined, callCtx);
+		call(params: unknown, callCtx: unknown = ctx, toolCallId = "call-1") {
+			return tool().execute(toolCallId, params, undefined, undefined, callCtx);
 		},
 		async command(name: string, args: string) {
 			await commands.get(name)!.handler(args, ctx);
@@ -200,6 +230,10 @@ const postJson = (url: string, body: unknown) =>
 	fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 const sessionIdIn = (text: string) => /^Session: (pn-[0-9a-f]{6})$/m.exec(text)?.[1];
+const firstLine = (text: string) => text.split("\n")[0];
+
+const assistant = (id: string, content: unknown[]): BranchEntry => ({ id, type: "message", message: { role: "assistant", content } });
+const user = (id: string, text: string): BranchEntry => ({ id, type: "message", message: { role: "user", content: [{ type: "text", text }] } });
 
 describe("plannotator tool on Pi", () => {
 	test("registers the shared contract, and the installed Pi validates calls against its schema", () => {
@@ -227,8 +261,8 @@ describe("plannotator tool on Pi", () => {
 		const text = result.content[0]!.text;
 		const id = sessionIdIn(text);
 		expect(id).toBeDefined();
-		const launch = harness.annotateLaunches[0]!;
-		expect(launch.filePath).toBe(file);
+		const launch = harness.launches[0]!;
+		expect(launch.text).toBe(file);
 		expect(launch.sessionBridge).toBeDefined();
 		expect(text).toContain(launch.url);
 		expect(harness.sent).toHaveLength(0);
@@ -242,7 +276,7 @@ describe("plannotator tool on Pi", () => {
 
 		expect(harness.sent).toHaveLength(1);
 		expect(harness.sent[0]!.options).toEqual({ deliverAs: "followUp" });
-		expect(harness.sent[0]!.text.split("\n")[0]).toBe(`Plannotator: notes.md (${id}) — Feedback · 1 comment.`);
+		expect(firstLine(harness.sent[0]!.text)).toBe(`Plannotator: notes.md (${id}) — Feedback · 1 comment.`);
 		expect(harness.sent[0]!.text).toContain("Tighten the intro.");
 		expect((await harness.call({ action: "list" })).content[0]!.text).toContain("No open Plannotator reviews");
 	});
@@ -252,33 +286,30 @@ describe("plannotator tool on Pi", () => {
 		harness.writeFile("spec.md", "# Spec\n");
 		const result = await harness.call({ action: "annotate", target: "spec.md", gate: true });
 		const id = sessionIdIn(result.content[0]!.text);
-		const launch = harness.annotateLaunches[0]!;
+		const launch = harness.launches[0]!;
 		expect(launch.gate).toBe(true);
 
 		expect((await postJson(`${launch.url}/api/approve`, {})).status).toBe(200);
 		await until(() => harness.sent.length > 0);
-		expect(harness.sent[0]!.text.split("\n")[0]).toBe(`Plannotator: spec.md (${id}) — Approved.`);
+		expect(firstLine(harness.sent[0]!.text)).toBe(`Plannotator: spec.md (${id}) — Approved.`);
 	});
 
 	test("list and close cover this Pi session's reviews only; close keeps the draft and sends nothing", async () => {
-		const harness = createHarness({ sessionId: "pi-session-a" });
+		const harness = createHarness();
 		harness.writeFile("notes.md", "# Notes\n");
 		const opened = await harness.call({ action: "annotate", target: "notes.md" });
 		const id = sessionIdIn(opened.content[0]!.text)!;
-		const launch = harness.annotateLaunches[0]!;
+		const launch = harness.launches[0]!;
 		await postJson(`${launch.url}/api/draft`, { annotations: [{ id: "a1" }, { id: "a2" }], codeAnnotations: [], globalAttachments: [] });
 
 		const listed = (await harness.call({ action: "list" })).content[0]!.text;
 		expect(listed).toContain(`${id} · annotate · notes.md · ${launch.url}`);
 		expect(listed).toContain("unsent: 2");
 
-		// Another Pi session (same process) sees none of it and cannot close it.
-		const other = harness.makeCtx("pi-session-b");
+		// Another Pi session in this process sees none of it and cannot close it.
+		const other = harness.makeCtx(freshSessionId());
 		expect((await harness.call({ action: "list" }, other)).content[0]!.text).toContain("No open Plannotator reviews");
 		await expect(harness.call({ action: "close", session: id }, other)).rejects.toThrow(`No open Plannotator review ${id}`);
-		// Nor does another extension instance.
-		const elsewhere = createHarness({ sessionId: "pi-session-a" });
-		expect((await elsewhere.call({ action: "list" })).content[0]!.text).toContain("No open Plannotator reviews");
 
 		const closed = (await harness.call({ action: "close", session: id.toUpperCase() })).content[0]!.text;
 		expect(closed).toContain(`Closed notes.md (${id}): 2 unsent comments saved as a draft.`);
@@ -289,6 +320,20 @@ describe("plannotator tool on Pi", () => {
 		expect(harness.notices.some((notice) => notice.message.includes(`the agent closed notes.md (${id}). 2 unsent comments kept in the draft.`))).toBe(true);
 		expect(harness.sent).toHaveLength(0);
 		expect((await harness.call({ action: "list" })).content[0]!.text).toContain("No open Plannotator reviews");
+	});
+
+	test("a replacement extension instance for the same Pi session (reload, resume) still lists and closes its reviews", async () => {
+		const first = createHarness();
+		first.writeFile("notes.md", "# Notes\n");
+		const id = sessionIdIn((await first.call({ action: "annotate", target: "notes.md" })).content[0]!.text)!;
+
+		const reloaded = createHarness({ sessionId: first.sessionId });
+		expect((await reloaded.call({ action: "list" })).content[0]!.text).toContain(`${id} · annotate · notes.md`);
+		const elsewhere = createHarness();
+		expect((await elsewhere.call({ action: "list" })).content[0]!.text).toContain("No open Plannotator reviews");
+		await expect(elsewhere.call({ action: "close", session: id })).rejects.toThrow(`No open Plannotator review ${id}`);
+
+		expect((await reloaded.call({ action: "close", session: id })).content[0]!.text).toContain(`Closed notes.md (${id})`);
 	});
 
 	test("slash-command reviews are listed too, and close all skips a plan review", async () => {
@@ -302,14 +347,111 @@ describe("plannotator tool on Pi", () => {
 
 		const listed = (await harness.call({ action: "list" })).content[0]!.text;
 		expect(listed).toContain("2 open Plannotator reviews");
-		expect(listed).toContain("· plan · plan PLAN.md ·");
+		expect(listed).toContain("· plan · Plan v1 ·");
 		expect(listed).toContain("· annotate · notes.md ·");
 		const planId = /(pn-[0-9a-f]{6}) · plan/.exec(listed)![1]!;
 
 		await expect(harness.call({ action: "close", session: planId })).rejects.toThrow("is a plan review");
 		const closedAll = (await harness.call({ action: "close", session: "all" })).content[0]!.text;
-		expect(closedAll).toContain("Not closed: plan PLAN.md");
+		expect(closedAll).toContain("Not closed: Plan v1");
 		expect(closedAll).toMatch(/Closed notes\.md \(pn-[0-9a-f]{6}\): no unsent comments\./);
+	});
+
+	test("/plannotator-review delivers the reviewer's feedback with the decision heading", async () => {
+		const harness = createHarness();
+		await harness.command("plannotator-review", "");
+		const launch = harness.launches[0]!;
+		expect(launch.kind).toBe("review");
+		expect(launch.sessionBridge).toBeDefined();
+		const listed = (await harness.call({ action: "list" })).content[0]!.text;
+		const id = /(pn-[0-9a-f]{6}) · review · local changes/.exec(listed)?.[1];
+		expect(id).toBeDefined();
+
+		await postJson(`${launch.url}/api/feedback`, { approved: false, feedback: "Rename b.", annotations: [{ id: "c1" }] });
+		await until(() => harness.sent.length > 0);
+		expect(firstLine(harness.sent[0]!.text)).toBe(`Plannotator: local changes (${id}) — Changes requested · 1 comment.`);
+		expect(harness.sent[0]!.text).toContain("Rename b.");
+		expect(harness.sent[0]!.options).toEqual({ deliverAs: "followUp" });
+	});
+
+	test("a review posted to the PR platform starts no turn (the mod's rule)", async () => {
+		const harness = createHarness();
+		await harness.command("plannotator-review", "");
+		const launch = harness.launches[0]!;
+		await postJson(`${launch.url}/api/feedback`, { approved: false, feedback: "Pull request reviewed on GitHub: https://github.com/o/r/pull/1", annotations: [] });
+		await until(() => harness.notices.some((notice) => notice.message.includes("Nothing was sent to the agent")));
+		expect(harness.notices.some((notice) => notice.message.includes("Pull request reviewed on GitHub"))).toBe(true);
+		expect(harness.sent).toHaveLength(0);
+	});
+
+	test("the agent closes a code review: the draft is kept and nothing is delivered", async () => {
+		const harness = createHarness();
+		const opened = await harness.call({ action: "review" });
+		const id = sessionIdIn(opened.content[0]!.text)!;
+		const launch = harness.launches[0]!;
+		await postJson(`${launch.url}/api/draft`, { annotations: [], codeAnnotations: [{ id: "c1" }], globalAttachments: [] });
+
+		const closed = (await harness.call({ action: "close", session: id })).content[0]!.text;
+		expect(closed).toContain(`Closed local changes (${id}): 1 unsent comment saved as a draft.`);
+		expect((await (await fetch(`${launch.url}/api/draft`)).json()).codeAnnotations).toHaveLength(1);
+		await until(() => harness.notices.some((notice) => notice.message.includes("the agent closed")));
+		expect(harness.sent).toHaveLength(0);
+	});
+
+	test("/plannotator-last delivers feedback; an agent close names the agent's message, not 'your'", async () => {
+		const branch = [user("u1", "Explain it."), assistant("a1", [{ type: "text", text: "Here is the answer." }])];
+		const delivering = createHarness({ branch });
+		await delivering.command("plannotator-last", "");
+		const launch = delivering.launches[0]!;
+		expect(launch.text).toBe("Here is the answer.");
+		const id = /(pn-[0-9a-f]{6}) · last · your last message/.exec((await delivering.call({ action: "list" })).content[0]!.text)?.[1];
+		expect(id).toBeDefined();
+		await postJson(`${launch.url}/api/feedback`, { feedback: "Shorter please.", annotations: [{ id: "m1" }] });
+		await until(() => delivering.sent.length > 0);
+		expect(firstLine(delivering.sent[0]!.text)).toBe(`Plannotator: your last message (${id}) — Feedback · 1 comment.`);
+		expect(delivering.sent[0]!.text).toContain("Shorter please.");
+
+		const closing = createHarness({ branch });
+		await closing.command("plannotator-last", "");
+		await closing.call({ action: "close", session: "all" });
+		await until(() => closing.notices.some((notice) => notice.message.includes("the agent closed")));
+		const notice = closing.notices.find((entry) => entry.message.includes("the agent closed"))!.message;
+		expect(notice).toContain("the agent closed the agent's last message (pn-");
+		expect(closing.sent).toHaveLength(0);
+	});
+
+	test("the tool's last skips the assistant message that is calling it", async () => {
+		const branch = [
+			user("u1", "First question."),
+			assistant("a1", [{ type: "text", text: "First answer." }]),
+			user("u2", "Second question."),
+			assistant("a2", [{ type: "text", text: "Real answer to annotate." }]),
+			user("u3", "Open that in Plannotator."),
+			assistant("a3", [
+				{ type: "text", text: "Opening it in Plannotator now." },
+				{ type: "toolCall", id: "call-last", name: "plannotator", arguments: { action: "last" } },
+			]),
+		];
+		const harness = createHarness({ branch });
+		const result = await harness.call({ action: "last" }, harness.ctx, "call-last");
+		expect(result.terminate).toBe(true);
+		const launch = harness.launches[0]!;
+		expect(launch.text).toBe("Real answer to annotate.");
+		expect(launch.recent?.map((message) => message.messageId)).toEqual(["a2", "a1"]);
+		expect(result.content[0]!.text).toContain("Opened your recent messages in Plannotator");
+	});
+
+	test("on one fixed port a second open is refused and names the open review", async () => {
+		const harness = createHarness();
+		harness.writeFile("notes.md", "# Notes\n");
+		harness.writeFile("spec.md", "# Spec\n");
+		const id = sessionIdIn((await harness.call({ action: "annotate", target: "notes.md" })).content[0]!.text)!;
+		// Set after the first server bound a random port: no fixed-port bind happens here.
+		process.env.PLANNOTATOR_PORT = "19999";
+		await expect(harness.call({ action: "annotate", target: "spec.md" })).rejects.toThrow(`notes.md (${id}) is open`);
+		expect(harness.launches).toHaveLength(1);
+		delete process.env.PLANNOTATOR_PORT;
+		expect((await harness.call({ action: "annotate", target: "spec.md" })).terminate).toBe(true);
 	});
 
 	test("review maps the call to the slash command's arguments", async () => {
@@ -342,7 +484,7 @@ describe("plannotator tool on Pi", () => {
 		const headless = createHarness({ hasUI: false });
 		headless.writeFile("notes.md", "# Notes\n");
 		await expect(headless.call({ action: "annotate", target: "notes.md" })).rejects.toThrow("no interactive UI");
-		expect(harness.annotateLaunches).toHaveLength(0);
-		expect(headless.annotateLaunches).toHaveLength(0);
+		expect(harness.launches).toHaveLength(0);
+		expect(headless.launches).toHaveLength(0);
 	});
 });

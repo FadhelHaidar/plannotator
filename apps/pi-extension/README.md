@@ -215,7 +215,7 @@ Use these inside `instructions` strings. They render once, when the phase is ent
 
 ### Code review
 
-Run `/plannotator-review` to open your current VCS changes in the code review UI. Annotate specific lines, switch between the modes supported by the detected Git, GitButler, or JJ provider, and submit feedback that gets sent to the agent. Pass `--git` or `--gitbutler` to force that provider; GitButler requires `but` 0.21.0 or newer on `PATH`. Pass `--patch-file <path>` to review a static caller-supplied unified diff without a repository.
+Run `/plannotator-review` to open your current VCS changes in the code review UI. Annotate specific lines, switch between the modes supported by the detected Git, GitButler, or JJ provider, and submit feedback that gets sent to the agent. Pass `--git` or `--gitbutler` to force that provider; GitButler requires `but` 0.21.0 or newer on `PATH`. Pass `--patch-file <path>` to review a static caller-supplied unified diff without a repository. A review you post straight to GitHub, GitLab or Bitbucket is not sent to the agent; Pi shows a notice instead.
 
 ### Ask this session
 
@@ -301,11 +301,11 @@ Run `/plannotator-last` to annotate the agent's most recent response. The messag
 
 The agent has a `plannotator` tool. When you ask it to "open notes.md in Plannotator", it calls the tool instead of running the CLI:
 
-- **Open:** `annotate` a file, folder or URL (`gate: true` adds an Approve button), `review` changes or a PR (`options.base` sets the compare ref), or `last` (the agent's last message). The review opens exactly as the matching slash command opens it, with Ask this session. The tool returns at once with a session id (`pn-3f2a9c`) and the URL, and the agent's turn ends. Your decision arrives later as a new message that starts with `Plannotator: notes.md (pn-3f2a9c) — Feedback · 2 comments.` If the agent asked for a gated sign-off, a plain Approve is sent to it too.
+- **Open:** `annotate` a file, folder or URL (`gate: true` adds an Approve button), `review` changes or a PR (`options.base` sets the compare ref), or `last` (the agent's last answer; the message in which the agent calls the tool is skipped). The review opens exactly as the matching slash command opens it, with Ask this session. The tool returns at once with a session id (`pn-3f2a9c`) and the URL, and the agent's turn ends. Your decision arrives later as a new message that starts with `Plannotator: notes.md (pn-3f2a9c) — Feedback · 2 comments.` If the agent asked for a gated sign-off, a plain Approve is sent to it too.
 - **List:** the reviews this Pi session opened that are still open, including the ones you opened with `/plannotator-*` commands and plan reviews. Each line shows the id, what it shows, the URL, its age and how many comments you have not sent yet.
 - **Close:** one review by id, or `"all"`. This is the same as your Close, except that your unsent comments stay saved as a draft. Nothing is sent to the agent. Plan reviews are not closed this way: they end with your decision or when you leave plan mode.
 
-Another Pi session cannot list or close these reviews. The tool needs an interactive Pi session: in print or JSON mode it refuses, because nothing could deliver your decision later. Several files in one review are not supported yet. Decisions from the slash commands now also start with the same `Plannotator: … (pn-…) — …` line.
+Another Pi session cannot list or close these reviews. After `/reload` or `/resume` of the same session, the agent still sees the reviews that are open. After `/new` it does not, because that is another session. In remote mode (or with a single `PLANNOTATOR_PORT`) every review uses the same port, so the tool opens only one review at a time and tells the agent which one to close first. The tool needs an interactive Pi session: in print or JSON mode it refuses, because nothing could deliver your decision later. Several files in one review are not supported yet. Decisions from the slash commands now also start with the same `Plannotator: … (pn-…) — …` line.
 
 ### Archive browser
 
