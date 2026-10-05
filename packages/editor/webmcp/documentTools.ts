@@ -19,6 +19,7 @@ import { AnnotationType, type Annotation, type Block } from '@plannotator/ui/typ
 import { generateId } from '@plannotator/ui/utils/generateId';
 import { collectQuestionAnswers } from '@plannotator/ui/utils/questionAnswers';
 import {
+  canonicalQuestionAnswer,
   indexQuestionBlocks,
   questionAnswerAnnotationId,
   questionStatus,
@@ -313,9 +314,13 @@ export function questionViews(blocks: readonly Block[], annotations: readonly An
   const indexed = indexQuestionBlocks(blocks);
   const answers = collectQuestionAnswers(annotations);
   const seen = new Set<string>();
+  const questionsByKey = new Map(indexed.map(({ question }) => [question.key, question]));
   const answerView = (key: string): QuestionView['answer'] | undefined => {
-    const a = answers.get(key);
-    if (!a) return undefined;
+    const stored = answers.get(key);
+    if (!stored) return undefined;
+    // An answer quoting an older label of a choice reads as that choice.
+    const question = questionsByKey.get(key);
+    const a = question ? canonicalQuestionAnswer(question, stored) : stored;
     return {
       annotationId: questionAnswerAnnotationId(key),
       selected: [...a.selected],

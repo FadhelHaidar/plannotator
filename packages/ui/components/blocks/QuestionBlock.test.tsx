@@ -16,8 +16,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { indexQuestionBlocks, type QuestionAnswer } from '@plannotator/core/question-block';
 import type { Annotation } from '../../types';
-import { parseMarkdownToBlocks } from '../../utils/parser';
-import { collectQuestionAnswers, upsertQuestionAnswerAnnotation } from '../../utils/questionAnswers';
+import { exportAnnotations, parseMarkdownToBlocks } from '../../utils/parser';
+import { buildQuestionPanelRows, collectQuestionAnswers, upsertQuestionAnswerAnnotation } from '../../utils/questionAnswers';
 import { BlockRenderer } from '../BlockRenderer';
 
 const hasDom = typeof document !== 'undefined';
@@ -334,5 +334,46 @@ describe('QuestionBlock', () => {
     // Nothing inside the card claims a block id of its own.
     expect(context.querySelectorAll('[data-block-id]').length).toBe(0);
     expect(cards(el)[0].getAttribute('aria-describedby')).toBe(context.id);
+  });
+
+  // 0.28.2 pre-tag smoke: an answer saved on 0.28.1 quotes the bullet's first
+  // line, which was its label then. It restored as "Answered" with nothing
+  // picked.
+  test.skipIf(!hasDom)('an answer saved under a 0.28.1 label restores picked, exports, and re-saves with the current label', async () => {
+    const markdown = [
+      ':::question',
+      '**4. How does a Cloudflare-run agent show in the Machines tab?**',
+      '',
+      'Two ways to name it:',
+      '',
+      '- **One per session:** "ramos · cloud-3", "ramos · cloud-4". Each agent shows',
+      '  as its own machine in the Machines tab.',
+      '- **One per person:** "ramos · cloud", shared by all your cloud agents. A',
+      '  short Machines tab.',
+      '',
+      '**Recommendation:** one per session.',
+      ':::',
+    ].join('\n');
+    const blocks = parseMarkdownToBlocks(markdown);
+    const [q] = indexQuestionBlocks(blocks);
+    const oldLabel = '**One per session:** "ramos · cloud-3", "ramos · cloud-4". Each agent shows';
+    const stored = upsertQuestionAnswerAnnotation([], q.blockId, {
+      v: 1, key: q.question.key, kind: 'single', prompt: q.question.prompt, selected: [oldLabel],
+    }, q.question.key);
+    const el = await mount(<Harness markdown={markdown} initial={stored} />);
+    const card = cards(el)[0];
+    expect(card.getAttribute('data-question-status')).toBe('answered');
+    expect(card.querySelector<HTMLInputElement>('input:checked')?.closest('label')?.textContent).toContain('One per session');
+
+    // Untouched, it exports under the current label, as the recommendation.
+    expect(exportAnnotations(blocks, latest)).toContain('Answer: One per session (your recommendation)');
+    // The panel row reads the current label too.
+    expect(buildQuestionPanelRows(blocks, latest)[0].answerText).toBe('One per session');
+
+    // Changing the answer stores current labels only.
+    await click(rowText(card, 'One per person'));
+    expect(answerOf(0)?.selected).toEqual(['One per person']);
+    await click(rowText(card, 'One per session'));
+    expect(answerOf(0)?.selected).toEqual(['One per session']);
   });
 });

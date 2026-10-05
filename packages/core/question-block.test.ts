@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildQuestionAnswerAnnotation,
+  canonicalQuestionAnswer,
   formatQuestionAnswerText,
   formatQuestionAnswersSection,
   indexQuestionBlocks,
@@ -357,6 +358,43 @@ describe("plain-bullet choices keep their wrapped lines", () => {
       ["**Remote:** costly", undefined],
     ]);
     expect(q.context).toBe("Trailing prose");
+  });
+});
+
+// 0.28.2 pre-tag smoke: 0.28.1 read a wrapped plain bullet's first line as
+// its label, so an answer saved then quotes that line. It must still show the
+// choice it picked (and export as it), under the label 0.28.2 gives it.
+describe("answers saved under an older label", () => {
+  const OLD_LABEL = '**One per session:** "ramos · cloud-3", "ramos · cloud-4". Each agent shows';
+  const index = indexQuestionBlocks([{ id: "b", type: "directive", directiveKind: "question", content: WRAPPED_PLAIN_BULLETS, startLine: 1 }]);
+  const q = index[0].question;
+  const saved: QuestionAnswer = { v: 1, key: q.key, kind: "single", prompt: q.prompt, selected: [OLD_LABEL] };
+
+  test("canonicalQuestionAnswer maps a 0.28.1 label to the current one", () => {
+    expect(canonicalQuestionAnswer(q, saved).selected).toEqual(["One per session"]);
+    // The key is the prompt's, unchanged.
+    expect(index[0].question.key).toBe(questionKey("single", q.prompt));
+    // A current label, or one naming no choice, is left alone.
+    const current = { ...saved, selected: ["One per person"] };
+    expect(canonicalQuestionAnswer(q, current)).toBe(current);
+    expect(canonicalQuestionAnswer(q, { ...saved, selected: ["Gone"] }).selected).toEqual(["Gone"]);
+  });
+
+  test("the export prints the current label, marked as the recommendation", () => {
+    const out = formatQuestionAnswersSection(questionExportItems(index), [saved]);
+    expect(out).toContain("Answer: One per session (your recommendation)");
+    expect(out).not.toContain("Each agent shows");
+  });
+
+  test("a recommendation naming a lettered option matches the option with that letter", () => {
+    const lettered = parseQuestionBlock(
+      "question",
+      `Merge?\n\n- **a. It stops at "ready".** It waits.\n- **b. "May merge when green", a checkbox.** Off by default.\n\n**Recommendation:** b. Default off; the launcher can allow it.`,
+    )!;
+    expect(lettered.choices.map((c) => c.recommended)).toEqual([false, true]);
+    // Two labels sharing the letter: no guess.
+    const twice = parseQuestionBlock("question", `Merge?\n\n- a. One\n- a) Two\n\nRecommended: a. whichever`)!;
+    expect(twice.choices.every((c) => !c.recommended)).toBe(true);
   });
 });
 

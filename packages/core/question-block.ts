@@ -87,6 +87,11 @@ export interface QuestionChoice {
   /** Label as written (inline markdown). The export and answers quote it. */
   label: string;
   description?: string;
+  /** Other names this choice had or may be quoted by (plain bullets only):
+   *  its full text, its first line, and that line's label as 0.28.1 and
+   *  earlier read it. A saved answer quoting one of them selects this
+   *  choice (see `canonicalQuestionAnswer`). Absent when there are none. */
+  aliases?: string[];
   /** `- [x]`: the agent marked this choice as already decided. */
   settled: boolean;
   /** Named by the block's `Recommended:` line. */
@@ -350,6 +355,16 @@ const matchRecommendation = (
     const hit = lead ? match(lead) : -1;
     if (hit !== -1) return [hit];
   }
+  // `b. Default off; …` names the choice whose label starts `b.` / `b)`,
+  // when exactly one does.
+  const lettered = text.replace(/^[*_]+/, '').match(/^([a-z]|\d{1,2})[.)]\s/i);
+  if (lettered) {
+    const token = lettered[1].toLowerCase();
+    const hits = choices
+      .map((c, i) => (new RegExp(`^${token}[.)]\\s`).test(c.label.replace(/^[*_]+/, '').toLowerCase()) ? i : -1))
+      .filter((i) => i !== -1);
+    if (hits.length === 1) return hits;
+  }
   if (!multi) return [];
   for (const sep of [/\s*;\s*/, /\s*,\s*|\s+(?:and|&|\+)\s+/i]) {
     const parts = text.split(sep).map((p) => p.trim()).filter(Boolean);
@@ -528,7 +543,15 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
     bullets.forEach((bullet, i) => {
       const { label, description } = splits[i];
       if (!label) return;
-      choices.push({ label, ...(description ? { description } : {}), settled: false, recommended: false });
+      const aliases = [...new Set([bullet.text, ...names[i]])]
+        .filter((name) => name && normalizeQuestionText(name) !== normalizeQuestionText(label));
+      choices.push({
+        label,
+        ...(description ? { description } : {}),
+        ...(aliases.length > 0 ? { aliases } : {}),
+        settled: false,
+        recommended: false,
+      });
       raws.push(bullet.text);
       choiceNames.push(names[i]);
       for (const index of bullet.contextIndices) dropContext.add(index);
@@ -792,6 +815,41 @@ export const parseQuestionAnswer = (value: unknown): QuestionAnswer | null => {
   };
 };
 
+/**
+ * The answer with each picked label read against the question's current
+ * choices: a label that names a choice by one of its `aliases` (a label an
+ * older version gave it) becomes that choice's label, so an answer saved
+ * before the label changed still shows its pick. Labels that name no choice
+ * are kept as they are. Returns the same object when nothing maps.
+ */
+export const canonicalQuestionAnswer = <A extends QuestionAnswer>(
+  question: Pick<ParsedQuestion, 'choices'>,
+  answer: A,
+): A => {
+  if (answer.selected.length === 0) return answer;
+  const byName = new Map<string, string>();
+  for (const c of question.choices) {
+    for (const alias of c.aliases ?? []) {
+      // Answers are capped on validation, so a long alias is matched capped too.
+      for (const name of [alias, cap(alias.trim(), MAX_QUESTION_CHOICE_LABEL_CHARS)]) {
+        const key = normalizeQuestionText(name);
+        if (key && !byName.has(key)) byName.set(key, c.label);
+      }
+    }
+  }
+  if (byName.size === 0) return answer;
+  const labels = new Set(question.choices.map((c) => c.label));
+  let changed = false;
+  const selected = answer.selected.map((s) => {
+    if (labels.has(s)) return s;
+    const mapped = byName.get(normalizeQuestionText(s));
+    if (mapped === undefined) return s;
+    changed = true;
+    return mapped;
+  });
+  return changed ? { ...answer, selected: [...new Set(selected)] } : answer;
+};
+
 /** A choice was picked, "Other…" was filled, or free text was written. */
 export const isQuestionAnswered = (answer: QuestionAnswer): boolean =>
   answer.selected.length > 0 || !!answer.other?.trim() || !!answer.text?.trim();
@@ -935,6 +993,10 @@ export interface QuestionExportItem {
   settled: boolean;
   /** The `[x]` choice labels. Absent reads as none. */
   settledLabels?: string[];
+  /** The question's choices, so an answer that quotes an older label is
+   *  printed with the current one (`canonicalQuestionAnswer`). Absent: the
+   *  answer's labels are printed as stored. */
+  choices?: Pick<QuestionChoice, 'label' | 'aliases'>[];
 }
 
 export const questionExportItems = (indexed: ReadonlyArray<IndexedQuestion>): QuestionExportItem[] =>
@@ -947,6 +1009,7 @@ export const questionExportItems = (indexed: ReadonlyArray<IndexedQuestion>): Qu
     ...(question.suggestedText ? { suggestedText: question.suggestedText } : {}),
     settled: question.choices.some((c) => c.settled),
     settledLabels: question.choices.filter((c) => c.settled).map((c) => c.label),
+    ...(question.choices.some((c) => c.aliases) ? { choices: question.choices.map(({ label, aliases }) => ({ label, ...(aliases ? { aliases } : {}) })) } : {}),
   }));
 
 export const QUESTION_ANSWERS_HEADING = 'Answers to your questions';
@@ -967,7 +1030,13 @@ export const formatQuestionAnswersSection = (
   answers: ReadonlyArray<QuestionAnswer>,
   opts: { headingLevel?: 2 | 3 } = {},
 ): string => {
-  const reported = answers.filter((a) => !isQuestionAnswerEmpty(a));
+  const choicesByKey = new Map(questions.map((q) => [q.key, q.choices]));
+  const reported = answers
+    .filter((a) => !isQuestionAnswerEmpty(a))
+    .map((a) => {
+      const choices = choicesByKey.get(a.key);
+      return choices ? canonicalQuestionAnswer({ choices: choices as QuestionChoice[] }, a) : a;
+    });
   if (reported.length === 0) return '';
   const h = '#'.repeat(opts.headingLevel ?? 2);
   const sub = `${h}#`;

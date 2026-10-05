@@ -18,6 +18,7 @@ import {
   buildDocumentHooks,
   buildDocumentTools,
   createDocumentToolState,
+  questionViews,
   type DocumentSessionView,
   type DocumentToolAdapter,
 } from './documentTools';
@@ -185,5 +186,22 @@ describe('answers are read-only to agents', () => {
     const removal = dataOf(await fx.call('remove_comments', { ids: [ann.id] }));
     expect(removal.results[0].ok).toBe(false);
     expect(fx.annotations.find((a) => a.id === ann.id)?.questionAnswer?.selected).toEqual(['Local only']);
+  });
+});
+
+// 0.28.2: an answer saved under a 0.28.1 label (a wrapped plain bullet's
+// first line) reads as the choice it picked, under the current label.
+describe('read_document maps an answer saved under an older label', () => {
+  test('selected carries the current label', () => {
+    const markdown = ':::question\nHow should it be named?\n\n- **One per session:** each agent shows\n  as its own machine.\n- **One per person:** shared.\n:::\n';
+    const blocks = parseMarkdownToBlocks(markdown);
+    const [q] = indexQuestionBlocks(blocks);
+    const ann = questionAnswerToAnnotation(q.blockId, {
+      v: 1, key: q.question.key, kind: 'single', prompt: q.question.prompt,
+      selected: ['**One per session:** each agent shows'],
+    });
+    const [view] = questionViews(blocks, [ann], []);
+    expect(view.answer?.selected).toEqual(['One per session']);
+    expect(view.status).toBe('answered');
   });
 });

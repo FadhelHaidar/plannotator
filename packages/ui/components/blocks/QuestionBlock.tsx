@@ -1,5 +1,6 @@
-import React, { useId, useRef, useState } from 'react';
+import React, { useId, useMemo, useRef, useState } from 'react';
 import {
+  canonicalQuestionAnswer,
   emptyQuestionAnswer,
   isQuestionAnswerEmpty,
   questionStatus,
@@ -122,7 +123,7 @@ export const QuestionBlock: React.FC<QuestionBlockProps> = ({
   blockId,
   indexed,
   total,
-  answer: savedAnswer,
+  answer: storedAnswer,
   onAnswer: onLiveAnswer,
   onSaveAnswer,
   saveLabel,
@@ -136,6 +137,13 @@ export const QuestionBlock: React.FC<QuestionBlockProps> = ({
   onNavigateAnchor,
 }) => {
   const { question, number } = indexed;
+  // An answer saved under an older label of a choice (0.28.1 read a wrapped
+  // plain bullet's first line as its label) shows that choice picked; the
+  // next edit stores the current label.
+  const savedAnswer = useMemo(
+    () => (storedAnswer ? canonicalQuestionAnswer(question, storedAnswer) : storedAnswer),
+    [question, storedAnswer],
+  );
   const saveMode = !!onSaveAnswer;
   // Save mode: the unsaved draft (null = the reviewer emptied it). Absent
   // means the card shows the host's answer.

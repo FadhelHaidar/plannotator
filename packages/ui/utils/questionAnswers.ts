@@ -8,6 +8,7 @@
  */
 import {
   buildQuestionAnswerAnnotation,
+  canonicalQuestionAnswer,
   indexQuestionBlocks,
   isQuestionAnswerEmpty,
   isQuestionAnswered,
@@ -144,7 +145,8 @@ export const buildQuestionPanelRows = (
   const seen = new Set<string>();
   for (const { blockId, number, line, question } of index) {
     seen.add(question.key);
-    const answer = answers.get(question.key);
+    const stored = answers.get(question.key);
+    const answer = stored && canonicalQuestionAnswer(question, stored);
     const status = questionStatus(question, answer);
     const settledLabels = question.choices.filter((c) => c.settled).map((c) => oneLine(c.label));
     const answerText = status === 'answered' && answer
