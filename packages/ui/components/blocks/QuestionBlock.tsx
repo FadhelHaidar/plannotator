@@ -9,7 +9,7 @@ import {
   type QuestionAnswer,
 } from '@plannotator/core/question-block';
 import { InlineMarkdown } from '../InlineMarkdown';
-import { renderProseBody } from './proseBody';
+import { QuestionContext } from './QuestionContext';
 
 /**
  * A `:::question` block rendered as an answer card (the approved "Card"
@@ -378,20 +378,17 @@ export const QuestionBlock: React.FC<QuestionBlockProps> = ({
         </div>
       )}
       {question.context && (
-        <div id={contextId} className="mt-1 text-[13px] leading-normal text-muted-foreground" data-question-part="context">
-          {renderProseBody({
-            body: question.context,
-            paragraphClassName: 'text-[13px] leading-normal',
-            listClassName: 'text-[13px] leading-normal',
-            imageBaseDir,
-            onImageClick,
-            onOpenLinkedDoc,
-            onOpenCodeFile,
-            onNavigateAnchor,
-            githubRepo,
-            repoHost,
-          })}
-        </div>
+        <QuestionContext
+          id={contextId}
+          markdown={question.context}
+          imageBaseDir={imageBaseDir}
+          onImageClick={onImageClick}
+          onOpenLinkedDoc={onOpenLinkedDoc}
+          onOpenCodeFile={onOpenCodeFile}
+          onNavigateAnchor={onNavigateAnchor}
+          githubRepo={githubRepo}
+          repoHost={repoHost}
+        />
       )}
 
       {question.kind === 'text' ? (

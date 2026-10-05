@@ -193,7 +193,7 @@ describe("plain-bullet choices keep their wrapped lines", () => {
     const q = parseQuestionBlock("question", `Pick\n\n- **Fast** mode with cache\n- **Slow** (no cache)\n- **a. It stops.** It waits.`)!;
     expect(q.choices.map((c) => [c.label, c.description])).toEqual([
       ["**Fast** mode with cache", undefined],
-      ["Slow", "(no cache)"],
+      ["**Slow** (no cache)", undefined],
       ["a. It stops.", "It waits."],
     ]);
   });
@@ -206,14 +206,24 @@ describe("plain-bullet choices keep their wrapped lines", () => {
     expect(`${q.choices[0].label} ${q.choices[0].description}`).toBe(long);
   });
 
-  test("bullets that are not choices stay in the context exactly as before", () => {
+  test("bullets that are not choices stay in the context, wrapped lines included", () => {
     const text = parseQuestionBlock("question-text", `Describe it\n\n- one\n  wrapped\n- two\n\nEnd.`)!;
     expect(text.kind).toBe("text");
-    expect(text.context).toBe("- one\nwrapped\n- two\n\nEnd.");
+    expect(text.context).toBe("- one\n  wrapped\n- two\n\nEnd.");
 
     const withTasks = parseQuestionBlock("question", `Pick\n\nFacts:\n\n- a fact\n  that wraps\n\n- [ ] Yes\n- [ ] No`)!;
     expect(withTasks.choices.map((c) => c.label)).toEqual(["Yes", "No"]);
-    expect(withTasks.context).toBe("Facts:\n\n- a fact\nthat wraps");
+    expect(withTasks.context).toBe("Facts:\n\n- a fact\n  that wraps");
+  });
+
+  test("the context keeps its markdown: table rows, code indentation, nested lists (shared indent removed)", () => {
+    const q = parseQuestionBlock(
+      "question-text",
+      `  Set the numbers.\n\n  | Limit | Proposed |\n  | --- | --- |\n  | Agents | 3 |\n\n  \`\`\`ts\n  if (x) {\n    y();\n  }\n  \`\`\`\n\n  - outer\n    - inner`,
+    )!;
+    expect(q.context).toBe(
+      "| Limit | Proposed |\n| --- | --- |\n| Agents | 3 |\n\n```ts\nif (x) {\n  y();\n}\n```\n\n- outer\n  - inner",
+    );
   });
 
   test("task-list choices are unchanged: bold names and lazy lines are not reinterpreted", () => {

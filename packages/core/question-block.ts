@@ -188,14 +188,14 @@ const BOLD_LEAD_RE = /^(\*\*|__)(.+?)\1(.*)$/s;
 /** A choice written as a bold name and then prose (`**One per session:**
  *  "ramos · cloud-3", …`): the bold name is the label and the rest the
  *  description. Only when the name is set off by punctuation (a `:` `.` `?`
- *  `!` closing the bold text, or `:` `,` `;` `(` or a dash after it), so
- *  `**Fast** mode with cache` stays one label. */
+  *  `!` closing the bold text, or `:` `,` `;` or a dash after it), so
+ *  `**Fast** mode with cache` and `**Fast** (cached)` stay one label. */
 const splitBoldLead = (raw: string): { label: string; description: string } | null => {
   const m = raw.trim().match(BOLD_LEAD_RE);
   if (!m) return null;
   const inner = m[2].trim();
   const rest = m[3];
-  if (!/[:.?!]$/.test(inner) && !/^\s*[:,;(—–]/.test(rest) && !/^\s+-\s/.test(rest)) return null;
+  if (!/[:.?!]$/.test(inner) && !/^\s*[:,;—–]/.test(rest) && !/^\s+-\s/.test(rest)) return null;
   const label = inner.replace(/\s*:$/, '').trim();
   const description = rest.replace(/^\s*[:,;—–-]?\s*/, '').trim();
   if (!label || !description) return null;
@@ -410,7 +410,7 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
         target.text = `${target.text} ${line.trim()}`;
         target.contextIndices.push(contextLines.length);
         openBullet.afterBlank = false;
-        pushContext(line.trim());
+        pushContext(line.trimEnd());
         continue;
       }
     }
@@ -423,7 +423,7 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
         afterBlank: false,
       };
     }
-    pushContext(line.trim());
+    pushContext(line.trimEnd());
   }
 
   if (!prompt) return null;
@@ -452,10 +452,18 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
     else suggestedText = recommendation;
   }
 
+  // Context keeps each line's indentation (a nested list, a wrapped list item,
+  // a code fence), less the indentation every line shares, so it renders as
+  // the markdown it was written as.
+  const shared = Math.min(
+    ...contextLines.filter((l) => l.trim() !== '').map((l) => l.length - l.trimStart().length),
+  );
   const context = contextLines
+    .map((l) => (Number.isFinite(shared) ? l.slice(shared) : l))
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
-    .trim();
+    .replace(/^\n+/, '')
+    .trimEnd();
 
   return {
     kind,

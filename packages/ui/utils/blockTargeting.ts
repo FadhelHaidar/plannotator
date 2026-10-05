@@ -215,6 +215,38 @@ export function buildSemanticTargetGraph(container: HTMLElement): SemanticTarget
 
     const group = block.closest<HTMLElement>('[data-pinpoint-group]');
     const parentKey = group ? groupTargets.get(group)?.key ?? null : null;
+
+    // First: a card's context can hold a table, a code fence or a formula,
+    // and the card is still one question block made of its parts.
+    if (block.matches(QUESTION_CARD_SELECTOR)) {
+      const prompt = block.querySelector<HTMLElement>('[data-question-part="prompt"]');
+      const cardTarget: SemanticTarget = {
+        key: `${blockId}:block`,
+        blockId,
+        element: block,
+        label: prompt ? questionPartLabel(prompt) : 'question',
+        kind: 'block',
+        parentKey,
+      };
+      targets.push(cardTarget);
+      byElement.set(block, cardTarget);
+      blockKeys.push(cardTarget.key);
+      block.querySelectorAll<HTMLElement>(QUESTION_PART_SELECTOR).forEach((part, index) => {
+        const partTarget: SemanticTarget = {
+          key: `${blockId}:part:${index}`,
+          blockId,
+          element: part,
+          label: questionPartLabel(part),
+          kind: 'inline',
+          parentKey: cardTarget.key,
+        };
+        targets.push(partTarget);
+        byElement.set(part, partTarget);
+        addInlineTargets(targets, byElement, blockId, partTarget, part, partTarget.key);
+      });
+      continue;
+    }
+
     const codeElement = block.querySelector<HTMLElement>('pre > code.pn-code');
     const mathElement = block.matches('.math-annotatable,[data-math-tex]')
       ? block
@@ -299,35 +331,6 @@ export function buildSemanticTargetGraph(container: HTMLElement): SemanticTarget
             cellTarget.key,
           );
         });
-      });
-      continue;
-    }
-
-    if (block.matches(QUESTION_CARD_SELECTOR)) {
-      const prompt = block.querySelector<HTMLElement>('[data-question-part="prompt"]');
-      const cardTarget: SemanticTarget = {
-        key: `${blockId}:block`,
-        blockId,
-        element: block,
-        label: prompt ? questionPartLabel(prompt) : 'question',
-        kind: 'block',
-        parentKey,
-      };
-      targets.push(cardTarget);
-      byElement.set(block, cardTarget);
-      blockKeys.push(cardTarget.key);
-      block.querySelectorAll<HTMLElement>(QUESTION_PART_SELECTOR).forEach((part, index) => {
-        const partTarget: SemanticTarget = {
-          key: `${blockId}:part:${index}`,
-          blockId,
-          element: part,
-          label: questionPartLabel(part),
-          kind: 'inline',
-          parentKey: cardTarget.key,
-        };
-        targets.push(partTarget);
-        byElement.set(part, partTarget);
-        addInlineTargets(targets, byElement, blockId, partTarget, part, partTarget.key);
       });
       continue;
     }
@@ -500,8 +503,11 @@ export function resolveSemanticTargetAtPoint(
   if (!block || !graph.container.contains(block) || block.tagName === 'HR') return null;
   const blockTarget = targetForBlock(graph, block);
   if (!blockTarget) return null;
+  // A question card's code fences and tables live in its context part; the
+  // part lookup below resolves them.
+  const card = block.matches(QUESTION_CARD_SELECTOR);
 
-  const code = block.querySelector<HTMLElement>('pre > code.pn-code');
+  const code = card ? null : block.querySelector<HTMLElement>('pre > code.pn-code');
   if (
     code
     && (pointerTarget === code || code.contains(pointerTarget) || pointerTarget.closest('pre'))
@@ -509,7 +515,7 @@ export function resolveSemanticTargetAtPoint(
     return blockTarget;
   }
 
-  const table = block.querySelector<HTMLTableElement>('table');
+  const table = card ? null : block.querySelector<HTMLTableElement>('table');
   if (table && pointer) {
     const rect = table.getBoundingClientRect();
     const nearHorizontalEdge = pointer.clientX - rect.left < TABLE_EDGE_ZONE

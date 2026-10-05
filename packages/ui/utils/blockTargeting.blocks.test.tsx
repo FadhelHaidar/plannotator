@@ -57,8 +57,8 @@ afterEach(async () => {
   host = null;
 });
 
-async function mount(): Promise<HTMLDivElement> {
-  const blocks = parseMarkdownToBlocks(DOC);
+async function mount(doc = DOC): Promise<HTMLDivElement> {
+  const blocks = parseMarkdownToBlocks(doc);
   const index = indexQuestionBlocks(blocks);
   host = document.createElement('div');
   document.body.appendChild(host);
@@ -153,5 +153,27 @@ describe.if(hasDom)('semantic target graph over rendered blocks', () => {
     const next = moveSemanticTarget(graph, first, 'next-block');
     expect(next.element.textContent).toBe('Closing paragraph.');
     expect(moveSemanticTarget(graph, next, 'previous-block').key).toBe(cardTarget.key);
+  });
+
+  // A card whose context holds a table and a code fence: before the card was
+  // checked first, the graph took the whole card for a table (or a code
+  // block) because it now contains one.
+  test('a question card whose context holds a table or code is still one card of parts', async () => {
+    const { buildSemanticTargetGraph, resolveSemanticTargetAtPoint, getSemanticTargetChildren } = targeting!;
+    const el = await mount(`:::question\nSet the numbers?\n\n| Limit | Proposed |\n| --- | --- |\n| Agents | 3 |\n\n\`\`\`sh\nrun it\n\`\`\`\n\n- [ ] OK\n- [ ] Change\n:::\n\nAfter.\n`);
+    const card = el.querySelector<HTMLElement>('fieldset.question-block')!;
+    // The context's blocks carry no block id of their own.
+    expect(card.querySelectorAll('[data-block-id]').length).toBe(0);
+    const graph = buildSemanticTargetGraph(el);
+    const cardTarget = graph.byKey.get(`${card.dataset.blockId}:block`)!;
+    expect(cardTarget.element).toBe(card);
+    expect(graph.byKey.has(`${card.dataset.blockId}:table`)).toBe(false);
+    expect(graph.byKey.has(`${card.dataset.blockId}:code`)).toBe(false);
+    const context = card.querySelector<HTMLElement>('[data-question-part="context"]')!;
+    expect(getSemanticTargetChildren(graph, cardTarget).map((t) => t.element)).toContain(context);
+    // A table cell and a code line in the context resolve to the context part.
+    const cell = card.querySelector<HTMLElement>('td')!;
+    expect(resolveSemanticTargetAtPoint(graph, cell, { clientX: 0, clientY: 0 })?.element).toBe(context);
+    expect(resolveSemanticTargetAtPoint(graph, card.querySelector<HTMLElement>('pre code')!)?.element).toBe(context);
   });
 });

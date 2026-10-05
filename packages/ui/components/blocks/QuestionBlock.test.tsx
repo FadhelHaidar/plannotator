@@ -291,4 +291,48 @@ describe('QuestionBlock', () => {
     expect(card.querySelector<HTMLInputElement>('input:checked')!.closest('label')!.textContent).toContain('Nowhere');
     expect(card.querySelector('textarea')!.value).toBe('keep it simple');
   });
+
+  // The owner's report: a table in a question's context rendered as one
+  // paragraph of pipes. The context goes through the document's own block
+  // renderers now.
+  test.skipIf(!hasDom)('the context renders block markdown with the document renderers', async () => {
+    const markdown = [
+      ':::question-text',
+      '**5. Set the numbers.**',
+      '',
+      'Each of these is a cap; the numbers are **my** proposals.',
+      '',
+      '| Limit | Proposed |',
+      '| --- | --- |',
+      '| Agents at once | 3 |',
+      '| Longest run | 60 minutes |',
+      '',
+      '- first point',
+      '  that wraps',
+      '- second point',
+      '',
+      '```sh',
+      'echo  "kept  spacing"',
+      '```',
+      '',
+      '> quoted',
+      ':::',
+    ].join('\n');
+    const el = await mount(<Harness markdown={markdown} />);
+    const context = cards(el)[0].querySelector<HTMLElement>('[data-question-part="context"]')!;
+    const rows = Array.from(context.querySelectorAll('table tr')).map((tr) =>
+      Array.from(tr.querySelectorAll('th, td')).map((c) => c.textContent),
+    );
+    expect(rows).toEqual([['Limit', 'Proposed'], ['Agents at once', '3'], ['Longest run', '60 minutes']]);
+    expect(context.textContent).not.toContain('|');
+    expect(context.querySelector('strong')?.textContent).toBe('my');
+    // List items as the document draws them, the wrapped line kept in its item.
+    const items = Array.from(context.querySelectorAll('[data-question-context-list] > div')).map((d) => d.textContent?.trim());
+    expect(items).toEqual(['•first point\nthat wraps', '•second point']);
+    expect(context.querySelector('pre code')?.textContent).toBe('echo  "kept  spacing"');
+    expect(context.querySelector('blockquote')?.textContent).toBe('quoted');
+    // Nothing inside the card claims a block id of its own.
+    expect(context.querySelectorAll('[data-block-id]').length).toBe(0);
+    expect(cards(el)[0].getAttribute('aria-describedby')).toBe(context.id);
+  });
 });
