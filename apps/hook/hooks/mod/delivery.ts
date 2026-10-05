@@ -1,3 +1,5 @@
+import { plannotatorDecisionHeading } from './tool'
+
 /**
  * What to do with a decision the CLI published (the host result record,
  * `apps/hook/server/host-result.ts`): submit it to Claude as a plugin turn, or
@@ -20,6 +22,9 @@ export interface HostResultRecord {
   withNotes?: boolean
   approvedPlan?: string
   permissionMode?: string
+  /** A dismissal the host asked for (the tool's `close`), not the reviewer's. */
+  closedBy?: 'agent'
+  unsentAnnotations?: number
 }
 
 /** Feedback longer than this goes to a file Claude reads, never truncated. */
@@ -76,6 +81,8 @@ export type Delivery =
 
 export interface DeliveryContext {
   subject: string
+  /** The launch's `pn-` id, named in the turn's first line. */
+  sessionId?: string
   /** Where the full text is written when it is over the inline limit. */
   overflowPath: string
   inlineLimitBytes?: number
@@ -96,6 +103,13 @@ function byteLength(text: string): number {
 export function deliveryFor(record: HostResultRecord, context: DeliveryContext): Delivery {
   const { subject } = context
 
+  // Claude closed it itself: nothing for Claude, whatever the record says.
+  if (record.closedBy === 'agent') {
+    const unsent = record.unsentAnnotations
+    const saved = typeof unsent === 'number' && unsent > 0 ? ` ${unsent} unsent ${unsent === 1 ? 'comment' : 'comments'} kept in the draft.` : ''
+    return { action: 'log', text: `Claude closed ${subject}.${saved} Nothing was sent to Claude.` }
+  }
+
   if (record.surface === 'review' && record.platform) {
     const posted = record.message.trim() || 'review posted'
     return {
@@ -113,7 +127,7 @@ export function deliveryFor(record: HostResultRecord, context: DeliveryContext):
     return { action: 'log', text: `${subject} ${what}. Nothing was sent to Claude.` }
   }
 
-  const prefix = `Plannotator: ${subject} — ${outcomeOf(record)}.`
+  const prefix = plannotatorDecisionHeading(subject, context.sessionId, outcomeOf(record))
   const nextStep = record.surface === 'plan' && record.decision === 'approved' ? `\n\n${PLAN_APPROVAL_NEXT_STEP}` : ''
   const body = record.message.trim()
   const inline = body ? `${prefix}\n\n${body}${nextStep}` : `${prefix}${nextStep}`

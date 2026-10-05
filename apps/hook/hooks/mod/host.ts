@@ -53,7 +53,8 @@ export interface Host {
   log(text: string): void
   toast(text: string): void
   messages(): Promise<TranscriptMessage[]>
-  fetch(url: string, init: { method: string; headers: Record<string, string>; body: string }): Promise<HttpResult>
+  /** `body` absent for a GET. */
+  fetch(url: string, init: { method: string; headers: Record<string, string>; body?: string }): Promise<HttpResult>
   abortTurn(turnId: string): Promise<void>
   randomHex(bytes: number): string
   /** A line in the mod's debug log (PLANNOTATOR_MOD_DEBUG=1); a no-op otherwise. */

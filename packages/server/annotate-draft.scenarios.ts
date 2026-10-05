@@ -24,7 +24,11 @@ export type StartDraftScenarioServer = (options: {
   filePath: string;
   mode?: "annotate" | "annotate-folder";
   folderPath?: string;
+  /** Bearer token for /api/host/* (#1709); absent leaves host control off. */
+  hostControlToken?: string;
 }) => Promise<DraftScenarioServer>;
+
+const HOST_TOKEN = "annotate-draft-scenarios-host-token-0123456789abcdef";
 
 const ENV_KEYS = [
   "PLANNOTATOR_DATA_DIR",
@@ -83,10 +87,10 @@ export function defineAnnotateDraftScenarios(runtime: string, start: StartDraftS
     });
 
     /** Write the file with this text and open it alone. */
-    async function openFile(name: string, text: string): Promise<DraftScenarioServer> {
+    async function openFile(name: string, text: string, hostControlToken?: string): Promise<DraftScenarioServer> {
       const filePath = join(docDir, name);
       writeFileSync(filePath, text);
-      const server = await start({ markdown: text, filePath });
+      const server = await start({ markdown: text, filePath, ...(hostControlToken ? { hostControlToken } : {}) });
       servers.push(server);
       return server;
     }
@@ -193,6 +197,37 @@ export function defineAnnotateDraftScenarios(runtime: string, start: StartDraftS
       close(same);
       const edited = await openFile("decided.md", "# Decided\n\nv2\n");
       expect((await fetch(`${edited.url}/api/draft`)).status).toBe(404);
+    });
+
+    test("an agent close keeps the draft, its path copy and document copies, and refuses later saves", async () => {
+      const linked = join(docDir, "linked.md");
+      writeFileSync(linked, "# Linked\n");
+      const session = await openFile("kept.md", "# Kept\n\nv1\n", HOST_TOKEN);
+      await post(session, "/api/draft", draftBody(3, ["kept"]));
+      await saveDocuments(session, [{ path: linked, annotations: [comment("kept-linked")] }]);
+
+      const closed = await fetch(`${session.url}/api/host/close`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${HOST_TOKEN}` },
+      });
+      expect(closed.status).toBe(200);
+      // The session draft and the linked document's copy both count.
+      expect(await closed.json()).toEqual({ unsentAnnotations: 2 });
+
+      // The closed tab: a save (even above any tombstone) is refused as
+      // decided, and its "everything removed" DELETE deletes nothing.
+      const late = await post(session, "/api/draft", draftBody(10, ["late"]));
+      expect(late.status).toBe(409);
+      expect((await late.json()).decided).toBe(true);
+      expect((await saveDocuments(session, [{ path: linked, annotations: [] }])).status).toBe(409);
+      await fetch(`${session.url}/api/draft?generation=11`, { method: "DELETE" });
+      close(session);
+
+      // The next session, after the agent edited the file, gets the comments back.
+      const reopened = await openFile("kept.md", "# Kept\n\nv2, edited\n");
+      expect(idsOf(await (await fetch(`${reopened.url}/api/draft`)).json())).toEqual(["kept"]);
+      const linkedCopy = await fetch(`${reopened.url}/api/draft/document?path=${encodeURIComponent(linked)}`);
+      expect(idsOf(await linkedCopy.json())).toEqual(["kept-linked"]);
     });
 
     test("the reviewer's Close clears the path copy too", async () => {

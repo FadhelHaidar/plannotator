@@ -99,7 +99,7 @@ export function fakeHost(): FakeHost {
     log: (text) => host.logs.push(text),
     toast: (text) => host.toasts.push(text),
     messages: async () => host.transcript,
-    fetch: async (url, init) => host.onFetch(url, JSON.parse(init.body)),
+    fetch: async (url, init) => host.onFetch(url, init.body === undefined ? undefined : JSON.parse(init.body)),
     abortTurn: async (turnId) => {
       host.aborted.push(turnId)
     },

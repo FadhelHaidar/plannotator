@@ -1759,27 +1759,38 @@ this branch with the same static patch (merged chains, A/D/R/M marks, nested
 folders), at rest, after two `j` presses and after collapsing a folder: the
 sidebar screenshots and its `outerHTML` were byte-identical.
 
-## Comment composer trim (next ui release; BREAKING for hosts that passed `onQuickLookGood`)
+## Comment composer trim (next ui release; not breaking)
 
-Owner ruling: the composer's one-click "Looks good" on HTML / live-app surfaces
-was an affordance no other surface has, and the visible submit hint added noise.
-Both are gone from `components/CommentPopover`.
+The visible submit hint added noise and is gone from `components/CommentPopover`.
+The composer's one-click thumbs-up was removed in the same change and then
+brought back before any release, so hosts see no API change for it.
 
-- **`onQuickLookGood` prop removed** from `CommentPopover` (published in 0.32.0
-  with the comment-only thumbs-up restore). A host that passed it gets a TypeScript
-  error; delete the prop. There is no replacement on the composer: the
-  thumbs-up stays on the **selection toolbar** (`AnnotationToolbar` with
-  `commentOnly` + `onQuickLabel` still renders only the 👍 "Looks good"), so a
-  reviewer who wants one selects text and clicks it.
-- **`handleCommentLooksGood` removed** from the `useHtmlAnnotation` return
-  value (`components/html-viewer`); `HtmlViewer` no longer passes the prop.
-  Mint through `handleCommentSubmit` instead.
 - **Submit hint text removed** from both composer footers (popover and
   dialog): the `⌘↵` / `Ctrl+Enter` label no longer renders. The keyboard
   behavior is unchanged: `Mod+Enter` still saves.
+- **`onQuickLookGood` stays** on `CommentPopover` (published in 0.32.0), with
+  the same contract: optional, absent renders nothing, the parent owns
+  creation and closing, disabled once anything is typed or attached. Only its
+  look changed: it is now an emoji-only 👍 button beside Save (no "Looks
+  good" text), named "Looks good" through `aria-label` and its tooltip, marked
+  `data-quick-look-good`. It takes no key; `Mod+Enter` still saves. Like
+  Save, a click clears the `draftKey` draft and returns focus to the opener.
+  Its classes are all ones the pinned guides.show viewer CSS already has (the
+  disabled grey-out is an inline filter), so it does not change that bundle.
+  Why it is
+  needed: a pinpoint click on an HTML / live-app element opens this composer
+  directly and never shows the selection toolbar, so without it an element
+  cannot get a one-click thumbs-up.
+- **`handleCommentLooksGood` stays** on the `useHtmlAnnotation` return value
+  (`components/html-viewer`), and `HtmlViewer` still passes it, so hosts that
+  render `HtmlViewer` keep the button exactly as in 0.32.0 to 0.50.0. It now
+  shares one commit path with `handleCommentSubmit` (`commitComposerDraft`),
+  so the 👍 carries the same anchor, element context and shift-click extra
+  targets as a typed comment.
 
-`THUMBS_UP_LABEL` (`utils/quickLabels`) stays exported; the toolbar path and
-`HtmlViewer`'s id filter still use it. The trust-boundary clamp is untouched.
+`THUMBS_UP_LABEL` (`utils/quickLabels`) stays exported; the toolbar path,
+the composer path and `HtmlViewer`'s id filter use it. The trust-boundary
+clamp is untouched.
 
 ---
 

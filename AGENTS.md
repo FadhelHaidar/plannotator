@@ -431,6 +431,30 @@ released 0.27.25 and 0.27.10 binaries as processes:
   mod's bridge stops, and Ask AI offers only its providers.
 - A CLI before 0.19.24 writes no ready file: commands wait their full 45 s /
   15 s and say "Starting…", and decisions still arrive at exit.
+- The tool's `list` and `close` (contract v2): a CLI without
+  `/api/host/status` lists its reviews with `unsent: unknown`. `close` counts as
+  closed ONLY a JSON answer with a numeric `unsentAnnotations`
+  (`classifyHostCloseAnswer` in `controller.ts`): 0.24–0.28.3 answer a JSON
+  `404` and 0.19.24–0.23.x (before the `/api/*` 404 guard, #748) their app page
+  with `200 text/html`, and both read as "an older Plannotator", never as
+  closed. A CURRENT CLI with host control turned off (remote mode) answers
+  `404 { code: "host_control_disabled" }` instead, which the mod never TERMs:
+  the close reports that the review runs in remote mode and should be closed
+  from the tab. Only for an older CLI does the mod TERM the process
+  (`STOP_SCRIPT`), and only if the launch's `result.json` / `exit` is still
+  absent and the pid still names a `plannotator` process (`ps -o args=`);
+  nothing answering on the port (a stale or reused pid after a reboot) is never
+  signalled, and where `ps` cannot verify a pid (missing, as on Debian slim
+  without procps, or without `-p`, as BusyBox's) the script signals nothing
+  and the close says the review was left running. In every such case the close
+  reports failure. After a TERM close, a decision record without `closedBy` (or an
+  older CLI's exit 0) is the reviewer's and is delivered as usual. **Remaining
+  window:** these CLIs publish a decision only after a 1.5 s post-decision
+  sleep and nothing on their HTTP surface says a decision is pending, so a
+  decision the reviewer makes in the ~1.5 s before the TERM is lost (and those
+  CLIs had already deleted the draft on submit; the feedback archive record
+  survives where it is on). A CLI with the endpoint has no such window: its
+  close is refused with `409` once the reviewer decided.
 
 **Commands.** `/plannotator-review`, `/plannotator-annotate` and
 `/plannotator-last` keep their names (spec open question 7, conservative): when
@@ -517,6 +541,45 @@ search (no `alwaysLoad` is possible through `$.tool.register`), so Claude sees
 only its name until it searches; with the updated skill it searched and called
 the tool for "open notes.md in plannotator", while a profile still holding the
 older installed skill text loaded that skill and ran the CLI instead.
+
+**Contract v2: session ids, `list` and `close` (agent sessions, 0.29).** Every
+review the mod opens has a session id, `pn-` + the six hex digits that end its
+launch id (`sessionIdOf` in `controller.ts`; unique among the session's open
+launches). The tool result's first line is `Session: pn-3f2a9c`, and every
+decision turn's first line names it (`plannotatorDecisionHeading`:
+`Plannotator: notes.md (pn-3f2a9c) — Feedback · 3 comments.`); slash-command
+output is unchanged. `action: "list"` reports the reviews opened in THIS Claude
+session, by the tool or by the user's `/plannotator-*` commands (the launch
+store is already per session id; the global `sessions/` registry is never
+read): id, kind, subject, url, age, state and `unsent: N` from the server's
+`GET /api/host/status` (`unknown` for an older CLI). `unsent` counts only the
+reviewer's own draft comments (`countUnsentDraftComments`: entries without a
+`source`, so review-agent, WebMCP and linter findings are not counted, plus
+code review's PR description and PR comment notes).
+`action: "close"` takes `session: "pn-…"` or `"all"` and calls
+`POST /api/host/close` (see "Host session control" under Server API): the
+reviewer's Close, marked `closedBy: "agent"`, with the draft KEPT and the open
+tab told over the external-annotation SSE (`session-closed`, which the editor
+and review app show as "Closed by the Agent" with the unsent count). The result
+reports how many unsent comments stay saved as a draft. The copy promises no
+restore beyond each surface's own draft key (`agentClosedSubtitle`: annotate
+drafts come back for the same unchanged document, code review drafts for the
+same changes; path-keyed annotate drafts are #1710). Nothing is delivered for
+that review afterwards (the launch is marked `closedByAgent` and settles with
+one log line), except a decision record WITHOUT `closedBy`, which is the
+reviewer's and is delivered. Plan reviews are listed but never closed (`close
+all` skips them, a plan id is refused). An id this session did not open is "not
+found". Against an older CLI the mod falls back to `TERM` under the checks
+described in "Version skew" above (`stopArgv`), which ends the server without a
+decision and never deletes a draft. The contract also
+accepts `target` as a list for annotate (validated, duplicates dropped, a
+one-item list is the plain call) and reserves `action: "reply"` (`session`,
+`comment`, `text`, `resolve`) for live comments; until bundles and live
+comments ship the mod answers a list of several files with
+`PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT` and `reply` with
+`PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT`, launching nothing. The tool
+description does not advertise lists or `reply` yet. Design:
+`.product/drafts/agent-sessions-0.29/DESIGN.md`.
 
 **Agent-run CLI commands are taken over (Bash).** Because the tool is deferred
 and the skill also documents the CLI, Claude sometimes runs
@@ -1227,7 +1290,7 @@ Annotate drafts used to be keyed only by a hash of the document text, so an agen
 
 - **Single local file** (mode `annotate`, not a URL): the draft is also saved under `annotateFileDraftKey(<abs path>)`, reusing `review-draft.ts`'s dual-key logic with the content key as the "patch" key. Load prefers the content copy unless the path copy is strictly newer by `draftGeneration`; the path copy remembers every content key it was saved on (`patchKeys`, server-stamped, stripped from client bodies and from load responses); its tombstone guards both keys. Restored comments re-anchor by text and one whose text is gone shows the existing Unanchored chip and still exports. A save refused as stale (another session on the same file decided or saved ahead) answers `409 { ok: false, error, found, draftGeneration }`; `DraftTransport.save` may resolve `{ staleGeneration }` and the hook raises its counter above it and saves once more, so the reviewer's comments are not silently left unsaved.
 - **Per-document copies:** every document a local-file or folder session holds comments on, other than the session's own root, is saved under that document's path key by the client hook `packages/editor/hooks/useDocumentDrafts.ts` (pure planning in `packages/editor/documentDrafts.ts`), and merged in the first time the document opens in a session (ids already held are skipped; a toast says how many came back). So a file's comments follow it between a folder session and a session on the file alone. These writes are generation-stamped by the server (one above whatever the key has seen), so a single-file session that later loads the copy resumes above it. A document is written only after its copy was read, and sent empty only when it was sent with content before. With per-document copies on, the session draft carries the ROOT document's comments even while another document is open (`composeSessionDraft` in `documentDrafts.ts`), plus every document the server keeps no copy for: one it refuses (`400`/`403`: outside the session's roots such as an Obsidian vault document, a symlink alias of the root, not a regular file) and a copy of the root opened through a self-link, so those stay crash-recoverable as before. Paths are canonicalized with `realpath` and must name an existing regular file (`canonicalDocumentPath`), so an alias shares its target's key.
-- **Clearing:** a decision (`/api/feedback`, `/api/approve`, and the reviewer's Close `/api/exit`, which deleted the draft before this too) clears the session's keys and the path copy of every document the session wrote or restored from, then refuses session-draft saves (`409 { decided: true }`, even above the tombstone, so a second tab cannot put back comments that were just sent; never retried by the client) and document writes (`409`). A client DELETE (everything removed, banner dismissed) clears only the session draft's keys. The client-lease auto-dismiss keeps everything, as before.
+- **Clearing:** a decision (`/api/feedback`, `/api/approve`, and the reviewer's Close `/api/exit`, which deleted the draft before this too) clears the session's keys and the path copy of every document the session wrote or restored from, then refuses session-draft saves (`409 { decided: true }`, even above the tombstone, so a second tab cannot put back comments that were just sent; never retried by the client) and document writes (`409`). A client DELETE (everything removed, banner dismissed) clears only the session draft's keys. The client-lease auto-dismiss keeps everything, as before. An agent close (`POST /api/host/close`, `closedBy: "agent"`) is the other exception: it KEEPS the session draft, its path copy and every document copy (`closeKeepingDraft`), so they come back when the file is reopened, but it ends the review like a decision, so later saves from the closed tab are refused (`409 { decided: true }`), its document writes get `409`, and its DELETE is a no-op. The host status/close `unsentAnnotations` count is the session draft the session would restore plus every document copy it covered (`countUnsent`).
 - **Scope:** URL, live-app and annotate-last sessions have no path key and no document copies. Drafts are crash recovery, not history, so `PLANNOTATOR_ANNOTATE_HISTORY` does not govern them. Known edges: two open sessions on the same file write the same path key and the last save wins; the key is the file's path only, so a raw-HTML session and a `--markdown` session on the same `.html` share one copy (raw-HTML pinpoints restored into the converted view, or the other way round, show as Unanchored); and the key follows the path's spelling after `realpath`, so a file reached through a hard link or a different mount is a different key.
 
 Tests: `packages/server/annotate-draft.scenarios.ts` (run against both runtimes by `packages/server/annotate-draft.test.ts` and `apps/pi-extension/server/serverAnnotate-drafts.test.ts`), `packages/editor/documentDrafts.test.ts`, and the DOM tests `packages/editor/App.documentDrafts.test.tsx` and `packages/editor/annotationDraftStaleRetry.test.tsx` (the 409 retry against real draft sessions).
@@ -1314,6 +1377,7 @@ During normal plan review, an Archive sidebar tab provides the same browsing via
 | `/api/external-annotations` | POST | Add external annotations (single or batch `{ annotations: [...] }`) |
 | `/api/external-annotations` | PATCH | Update fields on a single annotation (`?id=`). The body is allowlisted and field-validated by `validateAnnotationPatch` (`@plannotator/core/external-annotation`, both runtimes) with the SAME validators POST applies — `diagramAnchor` / `htmlAnchor` / `elementContext` / the target arrays through their own fail-closed parsers, `inReplyTo` through `validateReplyTarget`, the scalars by type and cap. A bad value is `400`, unknown keys are dropped, `id` and `source` stay immutable, and `null` clears an optional field but is refused on an anchor or a structural one |
 | `/api/external-annotations` | DELETE | Remove by `?id=`, `?source=`, or clear all |
+| `/api/host/status` | GET | Host-only (see "Host session control" below): `{ kind: "plan", documents: [], unsentAnnotations, decided }`. A plan review has no host close (`POST /api/host/close` answers `409 { code: "not_closable" }`). |
 
 ### Review Server (`packages/server/review.ts`)
 
@@ -1350,6 +1414,8 @@ During normal plan review, an Archive sidebar tab provides the same browsing via
 | `/api/external-annotations` | POST | Add external annotations (single or batch `{ annotations: [...] }`) |
 | `/api/external-annotations` | PATCH | Update fields on a single annotation (`?id=`). The body is allowlisted and field-validated by `validateAnnotationPatch` (`@plannotator/core/external-annotation`, both runtimes) with the SAME validators POST applies — `diagramAnchor` / `htmlAnchor` / `elementContext` / the target arrays through their own fail-closed parsers, `inReplyTo` through `validateReplyTarget`, the scalars by type and cap. A bad value is `400`, unknown keys are dropped, `id` and `source` stay immutable, and `null` clears an optional field but is refused on an anchor or a structural one |
 | `/api/external-annotations` | DELETE | Remove by `?id=`, `?source=`, or clear all |
+| `/api/host/status` | GET | Host-only (see "Host session control" below): `{ kind, documents, unsentAnnotations, decided }`; counts only, never comment text |
+| `/api/host/close` | POST | Host-only: the reviewer's Close marked `closedBy: "agent"`, KEEPING the draft; tells open tabs over the external-annotation SSE (`session-closed`) and answers `{ unsentAnnotations }`; `409 { code: "already_decided" }` once decided |
 | `/api/agents/capabilities` | GET | Check available agent providers (claude, codex, tour, guide, cursor, opencode, pi, copilot) |
 | `/api/agents/review-profiles` | GET | List launchable review profiles (enabled skills + builtin default) |
 | `/api/agents/skills` | GET | List all discovered skills for the add-a-review picker (each flagged `enabled`) |
@@ -1413,8 +1479,37 @@ During normal plan review, an Archive sidebar tab provides the same browsing via
 | `/api/external-annotations` | POST | Add external annotations (single or batch `{ annotations: [...] }`) |
 | `/api/external-annotations` | PATCH | Update fields on a single annotation (`?id=`). The body is allowlisted and field-validated by `validateAnnotationPatch` (`@plannotator/core/external-annotation`, both runtimes) with the SAME validators POST applies — `diagramAnchor` / `htmlAnchor` / `elementContext` / the target arrays through their own fail-closed parsers, `inReplyTo` through `validateReplyTarget`, the scalars by type and cap. A bad value is `400`, unknown keys are dropped, `id` and `source` stay immutable, and `null` clears an optional field but is refused on an anchor or a structural one |
 | `/api/external-annotations` | DELETE | Remove by `?id=`, `?source=`, or clear all |
+| `/api/host/status` | GET | Host-only (see "Host session control" below): `{ kind, documents, unsentAnnotations, decided }`; counts only, never comment text |
+| `/api/host/close` | POST | Host-only: the reviewer's Close marked `closedBy: "agent"`, KEEPING the draft; tells open tabs over the external-annotation SSE (`session-closed`) and answers `{ unsentAnnotations }`; `409 { code: "already_decided" }` once decided |
 
 All servers use random ports locally or fixed port (`19432`) in remote mode.
+
+### Host session control
+
+`GET /api/host/status` and `POST /api/host/close` (`packages/shared/host-control.ts`,
+vendored to Pi; Bun adapter `packages/server/host-control.ts`, Pi adapter
+`apps/pi-extension/server/host-control.ts`) let the agent session that launched a
+review ask what it holds and close it. Guarded exactly like the pull bridge: a
+loopback Host naming the server's port (`403`), no `Origin` (`403`), and
+`Authorization: Bearer <token>` (`401`), the launch's `PLANNOTATOR_SESSION_BRIDGE_TOKEN`
+(Bun default; servers also take `hostControlToken`). Without a token the paths answer
+`404 { error: "Not found", code: "host_control_disabled" }` (`HOST_CONTROL_DISABLED_CODE`),
+which a host reads as "turned off" rather than "an older Plannotator" (an uncoded `404`);
+they are off in remote mode, and
+`--tailscale` discards the env token. Unlike the pull bridge they still answer under
+`PLANNOTATOR_AI=disabled` (closing a review is not an AI feature). Once a session is
+decided (a host close included), the review servers refuse a late `/api/feedback` or
+`/api/exit` with `409` (both runtimes, like annotate), so a tab still open after the
+close neither deletes the kept draft nor gets an ok for feedback nobody receives.
+Close settles the decision as `exit` with
+`closedBy: "agent"` and `unsentAnnotations` (no draft delete, no feedback-archive
+record: the reviewer decided nothing), broadcasts `{ type: "session-closed", by:
+"agent", unsentAnnotations }` on the external-annotation stream (`broadcast` on both
+runtimes' handlers; `useExternalAnnotations`'s `onSessionClosed`), and the CLI's
+host result record carries the same `closedBy` / `unsentAnnotations` on its
+`dismissed` record. Every server result also exposes `hostControl` (`status()`,
+`close?()`) for hosts that run the server in-process (Pi, the OpenCode 2 embedded
+plan server). Plan servers implement status only.
 
 ### Paste Service (`apps/paste-service/`)
 
@@ -1700,7 +1795,7 @@ Share links carry the FENCED form in the payload's `p` (`shareableDocumentMarkdo
 
 **HTML and live-app interaction model:** raw-HTML sessions and live app sessions (`mode: "annotate-app"`) share one contract. Both open with pinpoint **armed** (`htmlAnnotateArmed` defaults to `true`, `packages/editor/App.tsx:493`; live sessions open armed like every other HTML surface, `App.tsx:2871`). `Esc` walks a ladder instead of exiting outright: a pending draft closes first, then the pinpoint hover outline clears, and only then does `Esc` drop the surface to **Interact**, where the bridge goes passive so clicks, forms, text selection, and SPA navigation reach the page natively (`packages/ui/components/html-viewer/bridge-script.ts:3066-3080`; committed markers stay visible and a marker click still opens its comment, and in Interact an open drag-comment draft still closes before `Esc` is handed back to the page). Vim owns its own ladder and is skipped here. The header **pen** button toggles Annotate/Interact (`packages/editor/components/AppHeader.tsx:386-404`, `aria-pressed`), as does `Mod+Shift+A` (`packages/ui/shortcuts/plan-review/htmlAnnotate.shortcuts.ts`) — a real toggle in BOTH directions, which is what makes it the answer to "Esc dropped me to Interact, how do I get back?". Disarming through either path tears down any pending draft, because the bridge's `set-annotate-mode(false)` handler clears every pending affordance (`bridge-script.ts:719-739`), exactly as the Esc ladder does. The bridge mirrors the chord inside the iframe on the capture phase and forwards it to the parent, so it works whichever document owns focus. Text drag-selection commenting is **always live**, on both surfaces and in both states, ungated from the armed flag and from the input method (`bridge-script.ts:384-386`, `:1420-1436`): while armed, a click pins an element and a drag selects text at the same time, and the one-shot `dragEndedClick` guard stops a completed drag's trailing click from re-pinning (`bridge-script.ts:1381-1390`).
 
-These surfaces are **comment-only**. `redline` (auto-DELETION) and `quickLabel` are clamped at the trust boundary, which is the parent's postMessage ingest rather than the server, covering the host mode and a page-supplied `modeOverride` alike so a hostile page cannot force a DELETION (`packages/ui/components/html-viewer/useHtmlAnnotation.ts:535-547`). Only CREATION is restricted: persisted DELETION annotations still restore and still render their deletion styling (`useHtmlAnnotation.ts:903`). The selection toolbar drops Delete and the label picker behind a `commentOnly` seam and keeps exactly one label affordance, the hardcoded 👍 "Looks good" for text selections (`HtmlViewer` filters its `onQuickLabel` handler to `THUMBS_UP_LABEL`); markdown surfaces keep the full toolbar. The pinpoint comment composer has no one-click "Looks good": a reviewer who wants one selects text and uses the toolbar's 👍. HTML surfaces also pin the viewer input method to pinpoint (`App.tsx:5480`), so there is no floating input-method toolstrip on them at all (`toolstripVisible` is gated on `!isHtmlSurface`, `App.tsx:2788-2793`) and the `Shift+1`-`4` annotation-mode shortcuts cannot fire there. A header **eye** button immediately left of the pen toggles Show/Hide tools, as does `Mod+Shift+X` (same scope, same bridge forwarding as the pen chord — the binding is deliberately un-mnemonic because every mnemonic letter is a browser chord: H is Chrome Home / Firefox history, E/I/J/K/C devtools, B/O bookmarks, V paste-as-plain-text, T reopen tab): hiding REMOVES all floating chrome over the page from the DOM (the sidebar tongue tabs and the comment/attachments cluster) rather than merely hiding it (`AppHeader.tsx:364-385`, `App.tsx:5193`, `HtmlViewer.tsx:810`). These surfaces **open with the tools hidden** — `DEFAULT_HTML_CHROME_STATE.toolsHidden` is true and `App.tsx` seeds `htmlToolsHidden` true so nothing flashes before the restore effect — because an HTML document is authored to fill the viewport. A fresh persisted record still wins in both directions, so a reviewer who showed the tools keeps them — in a folder annotate session too, which restores and records the `toolsHidden` half while leaving the sidebar/panel halves alone, since its file browser owns the sidebar for the whole session (`mergeHtmlChromeState`). The toggle lives in the header (and in the compact Options menu), so hidden — default or restored — always has a way back, which is what makes both honoring the persisted `toolsHidden` cookie and defaulting to hidden safe (`packages/ui/utils/htmlChrome.ts`). Note the version-diff "Show changes" control lives in that floating cluster, so it is behind the eye on a fresh session. All three header controls (eye, pen, Refresh) describe themselves through the app's `Tooltip` rather than a native `title` (`packages/ui/components/HtmlSurfaceControls.tsx`): two lines, the control's description — still the host-overridable `labels` string — over its shortcut as keycaps from `formatShortcutBindingTokens`, so the chord is never a hardcoded "Cmd". Because `title` no longer supplies the accessible name, the pen carries an explicit `aria-label` (defaulting to its description), the eye keeps its sr-only text and the Refresh its `aria-label`; the shortcut is additionally attached as a persistent `aria-describedby` span, because this Base UI build tags the popup with no ARIA at all. Refresh has no chord and renders no keycap row; `shortcuts` on the component overrides the bindings per control, defaulting to the `html-annotate` scope so the tooltips cannot drift from what the app dispatches.
+These surfaces are **comment-only**. `redline` (auto-DELETION) and `quickLabel` are clamped at the trust boundary, which is the parent's postMessage ingest rather than the server, covering the host mode and a page-supplied `modeOverride` alike so a hostile page cannot force a DELETION (`packages/ui/components/html-viewer/useHtmlAnnotation.ts:535-547`). Only CREATION is restricted: persisted DELETION annotations still restore and still render their deletion styling (`useHtmlAnnotation.ts:903`). The selection toolbar drops Delete and the label picker behind a `commentOnly` seam and keeps exactly one label affordance, the hardcoded 👍 "Looks good" for text selections (`HtmlViewer` filters its `onQuickLabel` handler to `THUMBS_UP_LABEL`); markdown surfaces keep the full toolbar. A pinpoint click opens the comment composer directly and never shows that toolbar, so the composer carries the same one-click 👍: an emoji-only button beside Save (`aria-label` and tooltip "Looks good", `data-quick-look-good`), passed by `HtmlViewer` as `CommentPopover`'s `onQuickLookGood` (absent on markdown and global composers). It goes through the same commit path as a typed comment (`commitComposerDraft` in `useHtmlAnnotation`), so the result is the toolbar's `THUMBS_UP_LABEL` quick-label COMMENT on the pinned element with its anchor, element context and shift-click extra targets. It is disabled once anything is typed or attached (a click never discards a draft) and takes no key: Mod+Enter still saves the typed comment. HTML surfaces also pin the viewer input method to pinpoint (`App.tsx:5480`), so there is no floating input-method toolstrip on them at all (`toolstripVisible` is gated on `!isHtmlSurface`, `App.tsx:2788-2793`) and the `Shift+1`-`4` annotation-mode shortcuts cannot fire there. A header **eye** button immediately left of the pen toggles Show/Hide tools, as does `Mod+Shift+X` (same scope, same bridge forwarding as the pen chord — the binding is deliberately un-mnemonic because every mnemonic letter is a browser chord: H is Chrome Home / Firefox history, E/I/J/K/C devtools, B/O bookmarks, V paste-as-plain-text, T reopen tab): hiding REMOVES all floating chrome over the page from the DOM (the sidebar tongue tabs and the comment/attachments cluster) rather than merely hiding it (`AppHeader.tsx:364-385`, `App.tsx:5193`, `HtmlViewer.tsx:810`). These surfaces **open with the tools hidden** — `DEFAULT_HTML_CHROME_STATE.toolsHidden` is true and `App.tsx` seeds `htmlToolsHidden` true so nothing flashes before the restore effect — because an HTML document is authored to fill the viewport. A fresh persisted record still wins in both directions, so a reviewer who showed the tools keeps them — in a folder annotate session too, which restores and records the `toolsHidden` half while leaving the sidebar/panel halves alone, since its file browser owns the sidebar for the whole session (`mergeHtmlChromeState`). The toggle lives in the header (and in the compact Options menu), so hidden — default or restored — always has a way back, which is what makes both honoring the persisted `toolsHidden` cookie and defaulting to hidden safe (`packages/ui/utils/htmlChrome.ts`). Note the version-diff "Show changes" control lives in that floating cluster, so it is behind the eye on a fresh session. All three header controls (eye, pen, Refresh) describe themselves through the app's `Tooltip` rather than a native `title` (`packages/ui/components/HtmlSurfaceControls.tsx`): two lines, the control's description — still the host-overridable `labels` string — over its shortcut as keycaps from `formatShortcutBindingTokens`, so the chord is never a hardcoded "Cmd". Because `title` no longer supplies the accessible name, the pen carries an explicit `aria-label` (defaulting to its description), the eye keeps its sr-only text and the Refresh its `aria-label`; the shortcut is additionally attached as a persistent `aria-describedby` span, because this Base UI build tags the popup with no ARIA at all. Refresh has no chord and renders no keycap row; `shortcuts` on the component overrides the bindings per control, defaulting to the `html-annotate` scope so the tooltips cannot drift from what the app dispatches.
 
 **HTML Refresh (#1232).** A local rendered-HTML session can re-read its file from disk without reloading the tab, for the loop where an agent edits the page while the reviewer keeps annotating. The header **Refresh** button (left of the eye, `data-html-refresh`, titled "Refresh HTML from disk") fetches the active document through `/api/doc`, hands the bytes to the app, and remounts the viewer under a bumped `reloadGeneration` key (`packages/editor/App.tsx`, viewer `key`). The engine is the published `useHtmlRefresh` (`packages/ui/hooks/useHtmlRefresh.ts`: superseded and cross-document fetches are dropped, one restore acknowledgement per generation) and Plannotator's binding over `fetchHtmlDocumentSnapshot` is `packages/editor/hooks/useHtmlRefresh.ts` (toasts for refreshed, missing, and unavailable). Committed annotations survive on their durable anchors: the remounted viewer re-resolves every element selector and text snapshot against the new page, and the ones it cannot re-anchor are reported once (`onUnanchoredChange` to `reportAnnotationRestore`), toasted, and marked with an **Unanchored** chip in the annotations panel (`htmlUnanchoredIds` in App, cleared when the document changes); their comments stay in the panel and still export. A refresh keeps the version diff: for the root document `/api/doc` carries `previousPlan`/`versionInfo`/`diffHtml` recomputed against the bytes just read (see the annotate `/api/plan` row), `applyRefreshedHtml` sets them and resets `isPlanDiffActive`, so the view returns to normal mode with "Show changes" still available; a tab reload converges on the same state because `/api/plan` serves the current bytes and recomputes the same diff. `/api/share-html` shares the current bytes too. Only local files refresh: `canRefresh` is false for `http(s)` paths and live-app sessions, and the control is absent on read-only (archive) documents. The compact touch shell renders no header controls (`HtmlSurfaceControls` returns null when `compact`), so its Options menu offers "Refresh from disk" beside the Show/Hide tools and Interact/Annotate actions (`compactDocumentActions` in App, disabled while a refresh is in flight); a host that passes `canRefresh` and `onRefresh` to `HtmlSurfaceControls` gets the Refresh button with or without the eye.
 

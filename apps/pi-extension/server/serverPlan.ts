@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import { likelyAppHtmlEncoding, prewarmAppHtml } from "../generated/app-html.ts";
 import { createServer } from "node:http";
 
-import { contentHash, deleteDraft } from "../generated/draft.ts";
+import { contentHash, deleteDraft, loadDraft } from "../generated/draft.ts";
+import { countUnsentDraftComments } from "../generated/host-control.ts";
+import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control.ts";
 import {
 	type ArchivedPlan,
 	generateSlug,
@@ -103,9 +105,13 @@ export interface PlanServerResult {
 	updatePlan: (plan: string) => PlanRevisionResult | null;
 	waitForDone?: () => Promise<void>;
 	stop: () => void;
+	/** Host-only status (no close: a plan review ends with the reviewer's decision). */
+	hostControl: HostControl;
 }
 
 export async function startPlanReviewServer(options: {
+	/** Turns on `/api/host/status` for a caller in another process (never in remote mode or archive mode). */
+	hostControlToken?: string;
 	plan: string;
 	htmlContent: string;
 	origin?: string;
@@ -240,6 +246,17 @@ export async function startPlanReviewServer(options: {
 	// Draft key for annotation persistence
 	const draftKey = options.mode !== "archive" ? contentHash(options.plan) : "";
 
+	// Host-only status: mirrors packages/server/index.ts.
+	const hostControlToken = options.mode === "archive" ? undefined : resolveHostControlToken(options.hostControlToken);
+	const hostControl: HostControl = {
+		status: () => ({
+			kind: "plan",
+			documents: [],
+			unsentAnnotations: draftKey ? countUnsentDraftComments(loadDraft(draftKey)) : 0,
+			decided: decisionSettled || decisionClaimed,
+		}),
+	};
+
 	// Editor annotations (in-memory, VS Code integration — skip in archive mode)
 	const editorAnnotations = options.mode !== "archive" ? createEditorAnnotationHandler() : null;
 	const externalAnnotations = options.mode !== "archive" ? createExternalAnnotationHandler("plan") : null;
@@ -270,6 +287,8 @@ export async function startPlanReviewServer(options: {
 
 	const server = createServer(async (req, res) => {
 		const url = requestUrl(req);
+
+		if (handleHostControl(req, res, url, { token: hostControlToken, getServerPort: () => boundPort, control: hostControl })) return;
 
 		if (url.pathname === "/api/done" && req.method === "POST") {
 			resolveDone?.();
@@ -617,6 +636,7 @@ export async function startPlanReviewServer(options: {
 		portSource,
 		url: buildAdvertisedUrl(port),
 		waitForDecision: () => decisionPromise,
+		hostControl,
 		onDecision: (listener) => {
 			decisionListeners.add(listener);
 			return () => {

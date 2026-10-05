@@ -94,6 +94,7 @@ import {
 } from './hooks/useReviewSearch';
 import { useEditorAnnotations } from '@plannotator/ui/hooks/useEditorAnnotations';
 import { useExternalAnnotations } from '@plannotator/ui/hooks/useExternalAnnotations';
+import { AGENT_CLOSED_TITLE, agentClosedSubtitle } from '@plannotator/ui/utils/agentClosed';
 import { useUndoHistory } from '@plannotator/ui/hooks/useUndoHistory';
 import { useHistoryShortcuts } from '@plannotator/ui/shortcuts';
 import {
@@ -642,6 +643,9 @@ const ReviewApp: React.FC = () => {
   const [isApproving, setIsApproving] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
   const [submitted, setSubmitted] = useState<'approved' | 'feedback' | 'exited' | false>(false);
+  // The agent that opened this review closed it (POST /api/host/close); the
+  // reviewer's unsent comments stay in the draft for a reopen.
+  const [agentClosed, setAgentClosed] = useState<{ unsentAnnotations: number } | null>(null);
   const [showExitWarning, setShowExitWarning] = useState(false);
   // A committed review-level note waiting for its one-render deferred submit
   // (the payload builders close over `allAnnotations`, so the send has to wait
@@ -873,7 +877,13 @@ const ReviewApp: React.FC = () => {
   // (apps/review/) doesn't set it, so external annotations are silently disabled there.
   // The same !!origin proxy is used elsewhere in this file (draft hook, feedback guard, conditional UI)
   // so this should be addressed as a broader refactor.
-  const { externalAnnotations, updateExternalAnnotation, deleteExternalAnnotation } = useExternalAnnotations<CodeAnnotation>({ enabled: !!origin });
+  const { externalAnnotations, updateExternalAnnotation, deleteExternalAnnotation } = useExternalAnnotations<CodeAnnotation>({
+    enabled: !!origin,
+    onSessionClosed: (event) => {
+      setAgentClosed(event);
+      setSubmitted((current) => current || 'exited');
+    },
+  });
   const agentJobs = useAgentJobs({ enabled: !!origin && aiUIEnabled });
 
   // Tour dialog state — opens as an overlay instead of a dock panel
@@ -5920,11 +5930,14 @@ const ReviewApp: React.FC = () => {
           submitted={submitted}
           title={
             submitted === 'approved' ? 'Changes Approved'
+            : submitted === 'exited' && agentClosed ? AGENT_CLOSED_TITLE
             : submitted === 'exited' ? 'Session Closed'
             : 'Feedback Sent'
           }
           subtitle={
-            submitted === 'exited'
+            submitted === 'exited' && agentClosed
+              ? agentClosedSubtitle(agentClosed.unsentAnnotations, 'changes')
+            : submitted === 'exited'
               ? 'Review session closed without feedback.'
               : platformMode
                 ? submitted === 'approved'

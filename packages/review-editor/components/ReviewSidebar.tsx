@@ -3,7 +3,6 @@ import { CodeAnnotation, type CodeAnnotationScope, type EditorAnnotation, type A
 import { Button } from '@plannotator/ui/components/ui/button';
 import { DecisionNoteField } from '@plannotator/ui/components/DecisionControl';
 import { useDismissablePopover } from '@plannotator/ui/hooks/useDismissablePopover';
-import { submitHint } from '@plannotator/ui/utils/platform';
 import { CommentMeta } from './CommentMeta';
 import { EditorAnnotationCard } from '@plannotator/ui/components/EditorAnnotationCard';
 import { CommentActions } from './CommentActions';
@@ -208,8 +207,7 @@ const GeneralCommentComposer: React.FC<{
             onCancel={() => onOpenChange(false)}
             placeholder="Add a general comment..."
           />
-          <div className="mt-2 flex items-center justify-between gap-2">
-            <span className="text-[10px] leading-snug text-muted-foreground">{submitHint}</span>
+          <div className="mt-2 flex items-center justify-end gap-2">
             <Button size="xs" data-general-comment-add onClick={submit} title="Add the comment to this review">
               Add comment
             </Button>

@@ -12,21 +12,40 @@
 
 export const PLANNOTATOR_TOOL_NAME = 'plannotator'
 
-export type PlannotatorToolAction = 'annotate' | 'review' | 'last'
+export type PlannotatorToolAction = 'annotate' | 'review' | 'last' | 'list' | 'close' | 'reply'
+
+/** The actions that open a review page. */
+export type PlannotatorToolOpenAction = 'annotate' | 'review' | 'last'
 
 export interface PlannotatorToolInput {
   action: PlannotatorToolAction
-  target?: string
+  /**
+   * annotate: one file, folder or URL, or (contract v2) several files as a
+   * list, in the order they should be read. A one-item list is returned as a
+   * plain string and exact duplicates are dropped, so a list here always has
+   * two or more entries. review: a directory or PR URL (string only).
+   */
+  target?: string | string[]
   gate?: boolean
   options?: { base?: string; markdown?: boolean }
+  /** close: a session id (`pn-` + 6 hex, as the results name it) or "all". reply: a session id. */
+  session?: string
+  /** reply: the comment id the comment turn named (`c3`). Reserved: no host answers replies yet. */
+  comment?: string
+  /** reply: the answer shown under the comment. */
+  text?: string
+  /** reply: also mark the thread settled. */
+  resolve?: boolean
 }
 
 export const PLANNOTATOR_TOOL_DESCRIPTION = [
-  'Open Plannotator, the browser review UI, for the user, and return at once.',
+  'Open Plannotator, the browser review UI, for the user, and return at once. Also lists and closes the reviews opened in this conversation (by this tool or the user\'s /plannotator-* commands).',
   '- action "annotate": annotate a file (markdown, text, config, HTML), a folder, or a URL; `target` is required. `gate: true` adds an Approve button for an explicit sign-off. `options.markdown: true` converts HTML or a URL to markdown first.',
   '- action "review": review code changes; `target` is an optional repository directory or a GitHub/GitLab/Bitbucket pull request URL (default: the current repository). `options.base` sets the compare branch or ref (git only).',
   '- action "last": annotate your own last assistant message; no target.',
-  'The call only opens the page. The reviewer\'s feedback arrives later as a message from the plannotator plugin, so end your turn after calling this and wait for it. Use this tool instead of running the `plannotator` CLI. Plan review is not done with this tool: it opens by itself when you exit plan mode.',
+  '- action "list": the reviews opened in this conversation that are still open, one line each: session id, what it shows, url, age, state, and how many comments the reviewer has not sent yet.',
+  '- action "close": close a review opened in this conversation that is no longer needed; `session` is its id (pn-...) or "all". Nothing is sent to you, and the reviewer\'s unsent comments stay saved as a draft. Plan reviews are not closed this way: they end with the reviewer\'s decision.',
+  'Opening only opens the page and names its session id (pn-...). The reviewer\'s feedback arrives later as a message from the plannotator plugin that names the same id, so end your turn after opening and wait for it. Use this tool instead of running the `plannotator` CLI. Plan review is not done with this tool: it opens by itself when you exit plan mode.',
 ].join('\n')
 
 export const PLANNOTATOR_TOOL_INPUT_SCHEMA = {
@@ -34,12 +53,15 @@ export const PLANNOTATOR_TOOL_INPUT_SCHEMA = {
   properties: {
     action: {
       type: 'string',
-      enum: ['annotate', 'review', 'last'],
-      description: 'What to open: annotate a file/folder/URL, review code changes or a PR, or annotate your last message.',
+      enum: ['annotate', 'review', 'last', 'list', 'close', 'reply'],
+      description: 'What to do: open a file/folder/URL to annotate, code changes or a PR to review, or your last message; list your open reviews; close one.',
     },
     target: {
-      type: 'string',
-      description: 'annotate: the file, folder or URL (required). review: a repository directory or PR URL (optional). last: not used.',
+      anyOf: [
+        { type: 'string' },
+        { type: 'array', items: { type: 'string' }, minItems: 1 },
+      ],
+      description: 'annotate: the file, folder or URL (required). review: a repository directory or PR URL (optional). Other actions: not used.',
     },
     gate: {
       type: 'boolean',
@@ -53,6 +75,22 @@ export const PLANNOTATOR_TOOL_INPUT_SCHEMA = {
       },
       additionalProperties: false,
     },
+    session: {
+      type: 'string',
+      description: 'close: the session id (pn-...) of a review opened in this conversation, or "all". reply: the session id.',
+    },
+    comment: {
+      type: 'string',
+      description: 'reply only: the comment id named in the reviewer\'s comment message.',
+    },
+    text: {
+      type: 'string',
+      description: 'reply only: your answer to the comment.',
+    },
+    resolve: {
+      type: 'boolean',
+      description: 'reply only: also mark the comment thread resolved.',
+    },
   },
   required: ['action'],
   additionalProperties: false,
@@ -60,9 +98,33 @@ export const PLANNOTATOR_TOOL_INPUT_SCHEMA = {
 
 /** Longest target or base accepted; a real path or URL is far shorter. */
 export const PLANNOTATOR_TOOL_MAX_TEXT = 4096
+/** Longest reply text accepted. */
+export const PLANNOTATOR_TOOL_MAX_REPLY = 32 * 1024
 
-const TOOL_KEYS = ['action', 'target', 'gate', 'options']
+/**
+ * A session id as every host names it: `pn-` and six lowercase hex digits, a
+ * short alias of the host's own launch id. Hosts resolve an id only among the
+ * reviews their own agent session opened.
+ */
+export const PLANNOTATOR_SESSION_ID_PREFIX = 'pn-'
+
+const SESSION_ID = /^(?:pn-)?([0-9a-f]{6})$/i
+const COMMENT_ID = /^c[1-9][0-9]{0,6}$/
+
+/** `pn-3f2a9c` from an id the agent typed (`pn-3F2A9C`, `3f2a9c`), or null when it is not one. */
+export function normalizePlannotatorSessionId(value: string): string | null {
+  const match = SESSION_ID.exec(value.trim())
+  return match ? `${PLANNOTATOR_SESSION_ID_PREFIX}${(match[1] as string).toLowerCase()}` : null
+}
+
+/** The session id for six hex digits a host drew for its launch. */
+export function plannotatorSessionId(hex6: string): string {
+  return `${PLANNOTATOR_SESSION_ID_PREFIX}${hex6.toLowerCase()}`
+}
+
+const TOOL_KEYS = ['action', 'target', 'gate', 'options', 'session', 'comment', 'text', 'resolve']
 const OPTION_KEYS = ['base', 'markdown']
+const ACTIONS: readonly PlannotatorToolAction[] = ['annotate', 'review', 'last', 'list', 'close', 'reply']
 
 export type PlannotatorToolParse = { ok: true; input: PlannotatorToolInput } | { ok: false; error: string }
 
@@ -80,6 +142,11 @@ function checkWord(name: string, value: unknown): string | null {
   return null
 }
 
+/** Whether the action opens a page (and so takes target, gate, options). */
+export function isPlannotatorToolOpenAction(action: PlannotatorToolAction): action is PlannotatorToolOpenAction {
+  return action === 'annotate' || action === 'review' || action === 'last'
+}
+
 /**
  * Validates a tool call strictly: unknown keys, wrong types, and a field the
  * action does not take are errors (a `false` the action ignores is allowed,
@@ -92,16 +159,30 @@ export function parsePlannotatorToolInput(value: unknown): PlannotatorToolParse 
     if (!TOOL_KEYS.includes(key)) return fail(`unknown field "${key}"`)
   }
   const action = value.action
-  if (action !== 'annotate' && action !== 'review' && action !== 'last') {
-    return fail('action must be "annotate", "review" or "last"')
+  if (typeof action !== 'string' || !ACTIONS.includes(action as PlannotatorToolAction)) {
+    return fail('action must be "annotate", "review", "last", "list", "close" or "reply"')
   }
-  const input: PlannotatorToolInput = { action }
+  const input: PlannotatorToolInput = { action: action as PlannotatorToolAction }
+  const opens = isPlannotatorToolOpenAction(input.action)
 
   if (value.target !== undefined) {
-    if (action === 'last') return fail('action "last" takes no target')
-    const problem = checkWord('target', value.target)
-    if (problem) return fail(problem)
-    input.target = (value.target as string).trim()
+    if (!opens || action === 'last') return fail(`action "${action}" takes no target`)
+    if (Array.isArray(value.target)) {
+      if (action !== 'annotate') return fail('a list of targets is for action "annotate" only')
+      if (value.target.length === 0) return fail('target must not be an empty list')
+      const targets: string[] = []
+      for (const [index, item] of value.target.entries()) {
+        const problem = checkWord(`target[${index}]`, item)
+        if (problem) return fail(problem)
+        const trimmed = (item as string).trim()
+        if (!targets.includes(trimmed)) targets.push(trimmed)
+      }
+      input.target = targets.length === 1 ? targets[0] : targets
+    } else {
+      const problem = checkWord('target', value.target)
+      if (problem) return fail(problem)
+      input.target = (value.target as string).trim()
+    }
   } else if (action === 'annotate') {
     return fail('action "annotate" needs a target (a file, folder or URL)')
   }
@@ -134,43 +215,186 @@ export function parsePlannotatorToolInput(value: unknown): PlannotatorToolParse 
     if (Object.keys(parsed).length > 0) input.options = parsed
   }
 
+  if (value.session !== undefined) {
+    if (action !== 'close' && action !== 'reply') return fail('session is for actions "close" and "reply" only')
+    if (typeof value.session !== 'string') return fail('session must be a string')
+    if (action === 'close' && value.session.trim().toLowerCase() === 'all') {
+      input.session = 'all'
+    } else {
+      const id = normalizePlannotatorSessionId(value.session)
+      if (!id) return fail(`session must be a session id such as "pn-3f2a9c"${action === 'close' ? ' or "all"' : ''}`)
+      input.session = id
+    }
+  } else if (action === 'close' || action === 'reply') {
+    return fail(`action "${action}" needs a session (the pn-... id ${action === 'close' ? 'a result named, or "all"' : 'the comment message named'})`)
+  }
+
+  if (action !== 'reply') {
+    if (value.comment !== undefined) return fail('comment is for action "reply" only')
+    if (value.text !== undefined) return fail('text is for action "reply" only')
+    if (value.resolve !== undefined) {
+      if (typeof value.resolve !== 'boolean') return fail('resolve must be true or false')
+      if (value.resolve) return fail('resolve is for action "reply" only')
+    }
+  } else {
+    if (typeof value.comment !== 'string' || !COMMENT_ID.test(value.comment.trim())) {
+      return fail('action "reply" needs comment, the id the comment message named (such as "c3")')
+    }
+    input.comment = value.comment.trim()
+    if (typeof value.text !== 'string' || value.text.trim() === '') return fail('action "reply" needs text, your answer')
+    if (value.text.length > PLANNOTATOR_TOOL_MAX_REPLY) return fail(`text is longer than ${PLANNOTATOR_TOOL_MAX_REPLY} characters`)
+    input.text = value.text
+    if (value.resolve !== undefined) {
+      if (typeof value.resolve !== 'boolean') return fail('resolve must be true or false')
+      if (value.resolve) input.resolve = true
+    }
+  }
+
   return { ok: true, input }
+}
+
+/** The files of an annotate call, in order (one or several). */
+export function plannotatorToolTargets(input: PlannotatorToolInput): string[] {
+  if (input.target === undefined) return []
+  return Array.isArray(input.target) ? [...input.target] : [input.target]
 }
 
 /**
  * The arguments the matching slash command would carry (`/plannotator-annotate
- * <these>`), one argument per element, never re-split. `last` has none.
+ * <these>`), one argument per element, never re-split. `last` has none, and
+ * neither do the actions that open nothing (list, close, reply).
  */
 export function plannotatorToolArgs(input: PlannotatorToolInput): string[] {
   switch (input.action) {
     case 'annotate':
       return [
-        input.target ?? '',
+        ...plannotatorToolTargets(input),
         ...(input.gate ? ['--gate'] : []),
         ...(input.options?.markdown ? ['--markdown'] : []),
       ]
     case 'review':
       return [
         ...(input.options?.base ? ['--base', input.options.base] : []),
-        ...(input.target ? [input.target] : []),
+        ...plannotatorToolTargets(input),
       ]
     case 'last':
+    case 'list':
+    case 'close':
+    case 'reply':
       return []
   }
 }
 
-/** The tool's result once the session is open (`url`) or still starting (no url). */
-export function plannotatorToolOpenedText(subject: string, url: string | undefined, gate: boolean): string {
+/** The tool's result once the session is open (`url`) or still starting (no url). `sessionId` leads it when given. */
+export function plannotatorToolOpenedText(subject: string, url: string | undefined, gate: boolean, sessionId?: string): string {
   const where = url ? `Opened ${subject} in Plannotator: ${url}` : `Plannotator is starting for ${subject}; it opens in the browser when ready.`
   const outcome = gate
     ? 'If they approve, an approval message arrives; if they send annotations, the feedback arrives. Closing it sends nothing.'
     : 'When they send annotations, the feedback arrives. Closing it with nothing to send sends nothing.'
   return [
+    ...(sessionId ? [`Session: ${sessionId}`] : []),
     where,
     'The reviewer is looking at it now. End your turn now and wait: their decision arrives later as a message from the plannotator plugin.',
     outcome,
     'Do not poll, reopen it, or run the plannotator CLI for this session.',
   ].join('\n')
+}
+
+/**
+ * The first line of every decision message a host delivers: what was
+ * reviewed, its session id, and the outcome (`Feedback · 3 comments`).
+ */
+export function plannotatorDecisionHeading(subject: string, sessionId: string | undefined, outcome: string): string {
+  return `Plannotator: ${subject}${sessionId ? ` (${sessionId})` : ''} — ${outcome}.`
+}
+
+/** What a host answers a list of several files with until it can open them as one review. */
+export const PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT =
+  'Plannotator did not open: opening several files in one review needs a newer Plannotator. Open them one at a time for now, or ask the user to update Plannotator.'
+
+/** What a host answers `reply` with until it delivers single comments. */
+export const PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT =
+  'Plannotator did not take the reply: this Plannotator does not send single comments yet, so there is no comment to answer. The reviewer\'s feedback arrives as one message when they send it.'
+
+/** One open review, as `list` reports it. */
+export interface PlannotatorSessionSummary {
+  id: string
+  kind: 'plan' | 'annotate' | 'review' | 'last'
+  /** What it shows: the file(s), folder, URL, PR, or "local changes". */
+  subject: string
+  url?: string
+  ageMs: number
+  /** starting: the server is not up yet. open: waiting for the reviewer. decided: the reviewer decided and it is closing. */
+  state: 'starting' | 'open' | 'decided'
+  /** Comments the reviewer wrote and has not sent; null when the server cannot say (an older Plannotator). */
+  unsent: number | null
+}
+
+function ageText(ms: number): string {
+  const minutes = Math.floor(Math.max(0, ms) / 60_000)
+  if (minutes < 1) return 'under a minute'
+  if (minutes < 60) return `${minutes} min`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 48) return `${hours} h`
+  return `${Math.floor(hours / 24)} days`
+}
+
+/** `list`'s result: one line per open review, or a sentence when there is none. */
+export function plannotatorToolListText(sessions: readonly PlannotatorSessionSummary[]): string {
+  if (sessions.length === 0) return 'No open Plannotator reviews from this conversation.'
+  const lines = sessions.map((session) =>
+    [
+      session.id,
+      session.kind,
+      session.subject,
+      session.url ?? 'no url yet',
+      ageText(session.ageMs),
+      session.state,
+      `unsent: ${session.unsent === null ? 'unknown' : session.unsent}`,
+    ].join(' · '),
+  )
+  const plans = sessions.some((session) => session.kind === 'plan')
+  return [
+    `${sessions.length} open Plannotator ${sessions.length === 1 ? 'review' : 'reviews'} from this conversation:`,
+    ...lines,
+    plans
+      ? 'Close one you no longer need with action "close" and its session id. Plan reviews close only with the reviewer\'s decision.'
+      : 'Close one you no longer need with action "close" and its session id.',
+  ].join('\n')
+}
+
+/** How one `close` went, for `plannotatorToolCloseText`. */
+export type PlannotatorCloseOutcome =
+  | { id: string; subject: string; closed: true; unsent: number | null }
+  | { id: string; subject: string; closed: false; reason: 'plan' | 'decided' | 'failed'; detail?: string }
+
+function savedText(unsent: number | null): string {
+  if (unsent === null) return 'any unsent comments stay saved as a draft'
+  if (unsent === 0) return 'no unsent comments'
+  return `${unsent} unsent ${unsent === 1 ? 'comment' : 'comments'} saved as a draft`
+}
+
+/** `close`'s result. Nothing is sent to the agent later for a review it closed. */
+export function plannotatorToolCloseText(outcomes: readonly PlannotatorCloseOutcome[]): string {
+  if (outcomes.length === 0) return 'No open Plannotator reviews from this conversation to close.'
+  const lines = outcomes.map((outcome) => {
+    if (outcome.closed) return `Closed ${outcome.subject} (${outcome.id}): ${savedText(outcome.unsent)}.`
+    switch (outcome.reason) {
+      case 'plan':
+        return `Not closed: ${outcome.subject} (${outcome.id}) is a plan review; it ends with the reviewer's decision.`
+      case 'decided':
+        return `Not closed: ${outcome.subject} (${outcome.id}) was already decided; its decision arrives as a message.`
+      case 'failed':
+        return `Could not close ${outcome.subject} (${outcome.id})${outcome.detail ? `: ${outcome.detail}` : ''}.`
+    }
+  })
+  const closedAny = outcomes.some((outcome) => outcome.closed)
+  return closedAny ? [...lines, 'Nothing more arrives for a review you closed.'].join('\n') : lines.join('\n')
+}
+
+/** `close` or `reply` naming a session this conversation did not open (or that already ended). */
+export function plannotatorUnknownSessionText(id: string): string {
+  return `No open Plannotator review ${id} from this conversation. Call the plannotator tool with action "list" to see yours.`
 }
 
 /**

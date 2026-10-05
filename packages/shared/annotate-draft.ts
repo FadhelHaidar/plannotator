@@ -184,20 +184,50 @@ export function createAnnotateDraftSession(options: AnnotateDraftSessionOptions)
       return reviewDraftState(keys);
     },
 
-    /** The client cleared the draft on screen (everything removed, or dismissed). */
+    /**
+     * The client cleared the draft on screen (everything removed, or
+     * dismissed). A no-op once the review is decided or closed by the agent:
+     * a closed tab must not delete the draft the agent close kept.
+     */
     remove(draftGeneration?: number): void {
+      if (settled) return;
       deleteReviewDraft(keys, draftGeneration);
     },
 
     /**
-     * A decision (feedback, approve, reviewer close): clear the session's keys
-     * and every document copy it covered, then refuse further document writes.
+     * The reviewer's decision (feedback, approve, Close): clear the session's
+     * keys and every document copy it covered, then refuse further saves and
+     * document writes.
      */
     settle(draftGeneration?: number): void {
       deleteReviewDraft(keys, draftGeneration);
       for (const path of coveredDocuments) clearDocumentCopy(path);
       coveredDocuments.clear();
       settled = true;
+    },
+
+    /**
+     * The agent closed the session (`POST /api/host/close`, closedBy
+     * "agent"): the review is over, so further saves and document writes are
+     * refused exactly as after a decision, but NOTHING is deleted. The
+     * reviewer's unsent comments stay in the session draft, its path copy
+     * and the document copies, and come back when the file is reopened.
+     */
+    closeKeepingDraft(): void {
+      settled = true;
+    },
+
+    /**
+     * The reviewer's unsent comments this session holds on disk: the session
+     * draft it would restore (content or path copy) plus every document copy
+     * it covered. `count` reads one stored draft (host-control's
+     * countUnsentDraftComments).
+     */
+    countUnsent(count: (draft: unknown) => number): number {
+      const loaded = loadReviewDraft(keys);
+      let total = loaded.found ? count(loaded.draft) : 0;
+      for (const path of coveredDocuments) total += count(loadDraft(annotateFileDraftKey(path)));
+      return total;
     },
 
     /** GET one document's copy (`?path=`). */

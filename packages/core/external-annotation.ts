@@ -38,7 +38,13 @@ export type ExternalAnnotationEvent<T = unknown> =
   | { type: "add"; annotations: T[] }
   | { type: "remove"; ids: string[] }
   | { type: "clear"; source?: string }
-  | { type: "update"; id: string; annotation: T };
+  | { type: "update"; id: string; annotation: T }
+  /**
+   * Not an annotation change: the agent session that opened this review
+   * closed it (`POST /api/host/close`, packages/shared/host-control.ts). The
+   * tab shows it; the reviewer's unsent comments stay in the draft.
+   */
+  | { type: "session-closed"; by: "agent"; unsentAnnotations: number };
 
 // ---------------------------------------------------------------------------
 // SSE helpers

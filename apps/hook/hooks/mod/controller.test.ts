@@ -362,7 +362,7 @@ describe('commands', () => {
     // The decision names what the reviewer could pick from, not "the last message".
     decide(host, launch!, { surface: 'annotate-last', decision: 'annotated', message: '# Message Annotations\n\nfix it', noop: false, annotationCount: 1 })
     await host.tick()
-    expect(host.submits[0]).toStartWith("Plannotator: Claude's recent messages — Feedback · 1 comment.")
+    expect(host.submits[0]).toStartWith("Plannotator: Claude's recent messages (pn-ababab) — Feedback · 1 comment.")
   })
 
   test('a message keeps its picker id as newer messages arrive, and the list stops at 25', async () => {
@@ -405,7 +405,7 @@ describe('commands', () => {
     await host.tick()
 
     expect(host.submits).toHaveLength(1)
-    expect(host.submits[0]).toStartWith('Plannotator: a.md — Feedback · 2 comments.')
+    expect(host.submits[0]).toStartWith('Plannotator: a.md (pn-ababab) — Feedback · 2 comments.')
     expect(host.logs.some((line) => line.includes('b.md closed with no annotations'))).toBe(true)
   })
 
@@ -489,7 +489,7 @@ describe('the plannotator tool', () => {
     await host.tick()
 
     expect(host.submits).toHaveLength(1)
-    expect(host.submits[0]).toStartWith('Plannotator: spec.md — Approved.')
+    expect(host.submits[0]).toStartWith('Plannotator: spec.md (pn-ababab) — Approved.')
     expect(host.submits[0]).toContain('The user approved.')
     expect(host.logs.some((line) => line.includes('notes.md closed with no annotations'))).toBe(true)
   })
@@ -649,5 +649,221 @@ describe('session boundaries and launch hygiene', () => {
     // Oversized feedback stays for Claude to Read.
     expect(cleanup?.argv).not.toContain('feedback.md')
     expect(order.indexOf('plannotator-cleanup')).toBeGreaterThan(order.indexOf('write feedback.md'))
+  })
+})
+
+describe('the plannotator tool: list and close (contract v2)', () => {
+  /** Answers the host-control endpoints of every launched server; records what was asked. */
+  function serveHostControl(host: FakeHost, unsent: number) {
+    const calls: string[] = []
+    host.onFetch = (url) => {
+      calls.push(url)
+      if (url.endsWith('/api/host/status')) return { status: 200, ok: true, text: JSON.stringify({ kind: 'annotate', documents: [], unsentAnnotations: unsent, decided: false }) }
+      if (url.endsWith('/api/host/close')) return { status: 200, ok: true, text: JSON.stringify({ unsentAnnotations: unsent }) }
+      return { status: 404, ok: false, text: '' }
+    }
+    return calls
+  }
+
+  function sessionIdIn(answer: { text: string } | { deny: string }): string {
+    return /Session: (pn-[0-9a-f]{6})/.exec('text' in answer ? answer.text : '')?.[1] ?? ''
+  }
+
+  function textOf(answer: { text: string } | { deny: string }): string {
+    return 'text' in answer ? answer.text : `DENY ${answer.deny}`
+  }
+
+  test('each open gets its own session id, and list reports them with the unsent counts', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    serveHostControl(host, 2)
+    const mod = new PlannotatorMod(host, SESSION)
+
+    const idA = sessionIdIn(await mod.runTool({ action: 'annotate', target: 'a.md' }))
+    const idB = sessionIdIn(await mod.runTool({ action: 'annotate', target: 'b.md' }))
+    expect(idA).toMatch(/^pn-[0-9a-f]{6}$/)
+    expect(idB).toMatch(/^pn-[0-9a-f]{6}$/)
+    expect(idB).not.toBe(idA)
+
+    const lines = textOf(await mod.runTool({ action: 'list' })).split('\n')
+    expect(lines.find((line) => line.startsWith(idA))).toContain('unsent: 2')
+    expect(lines.find((line) => line.startsWith(idB))).toContain('b.md')
+  })
+
+  // The failure: one conversation closes (or sees) a review another one opened.
+  test('another Claude session neither lists nor closes these reviews', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const calls = serveHostControl(host, 0)
+    const mine = new PlannotatorMod(host, SESSION)
+    const id = sessionIdIn(await mine.runTool({ action: 'annotate', target: 'a.md' }))
+
+    const other = new PlannotatorMod(host, { ...SESSION, sessionId: 'session-2' })
+    await other.restore()
+    expect(textOf(await other.runTool({ action: 'list' }))).not.toContain(id)
+    const close = await other.runTool({ action: 'close', session: id })
+    expect('deny' in close && close.deny).toContain(id)
+    expect(calls.some((url) => url.endsWith('/api/host/close'))).toBe(false)
+  })
+
+  test('close asks the server, reports the saved count, and delivers nothing when the server exits', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const calls = serveHostControl(host, 3)
+    const mod = new PlannotatorMod(host, SESSION)
+    const id = sessionIdIn(await mod.runTool({ action: 'annotate', target: 'a.md' }))
+    const [launch] = launches(host)
+
+    const closed = await mod.runTool({ action: 'close', session: id })
+    expect(textOf(closed)).toContain('3 unsent comments')
+    expect(calls.filter((url) => url.endsWith('/api/host/close'))).toHaveLength(1)
+
+    // The CLI publishes its dismissal and exits.
+    decide(host, launch!, { surface: 'annotate', decision: 'dismissed', message: '', noop: true, closedBy: 'agent', unsentAnnotations: 3 })
+    host.files.set(`${launchDirOf(launch!)}/exit`, '0')
+    await host.tick()
+    expect(host.submits).toHaveLength(0)
+    expect(textOf(await mod.runTool({ action: 'list' }))).not.toContain(id)
+  })
+
+  test('an older CLI without the endpoint is stopped with TERM instead', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    // 0.24+ answers an unknown /api/* path with a JSON 404.
+    host.onFetch = (url) => ({ status: 404, ok: false, text: JSON.stringify({ error: 'Not found', path: new URL(url).pathname }) })
+    const mod = new PlannotatorMod(host, SESSION)
+    const id = sessionIdIn(await mod.runTool({ action: 'annotate', target: 'a.md' }))
+    const [launch] = launches(host)
+    host.files.set(`${launchDirOf(launch!)}/pid`, '4242\n')
+
+    expect(textOf(await mod.runTool({ action: 'close', session: id }))).toContain('Closed a.md')
+    const stop = host.runs.find((call) => call.argv[3] === 'plannotator-stop')
+    // The pid, then the files whose presence means the reviewer already decided.
+    expect(stop?.argv.slice(4)).toEqual(['4242', `${launchDirOf(launch!)}/result.json`, `${launchDirOf(launch!)}/exit`])
+
+    host.files.set(`${launchDirOf(launch!)}/exit`, '143')
+    await host.tick()
+    expect(host.submits).toHaveLength(0)
+    // Not reported as a crash: Claude asked for it.
+    expect(host.logs.some((line) => line.includes('without a decision'))).toBe(false)
+  })
+
+  test('close all skips a plan review', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const calls = serveHostControl(host, 0)
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.onPlanCall({ tool_use_id: 't1', plan: PLAN })
+    await mod.runTool({ action: 'annotate', target: 'a.md' })
+
+    const text = textOf(await mod.runTool({ action: 'close', session: 'all' }))
+    expect(text).toMatch(/Not closed: Plan v1/)
+    expect(text).toMatch(/Closed a\.md/)
+    expect(calls.filter((url) => url.endsWith('/api/host/close'))).toHaveLength(1)
+  })
+
+  // The failure (#1709 review): a CLI before the /api/* 404 guard serves its
+  // app page with 200 for POST /api/host/close; read as "closed", the
+  // reviewer's later feedback was swallowed as Claude's close.
+  test('an app page (200 text/html) is not a close; it is an older CLI, stopped only after the checks', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    host.onFetch = () => ({ status: 200, ok: true, text: '<!DOCTYPE html><html><body>Plannotator</body></html>' })
+    const mod = new PlannotatorMod(host, SESSION)
+    const id = sessionIdIn(await mod.runTool({ action: 'annotate', target: 'a.md' }))
+    const [launch] = launches(host)
+    host.files.set(`${launchDirOf(launch!)}/pid`, '4242\n')
+    // The stop script finds the reviewer's decision already on disk (exit 3).
+    const onRun = host.onRun
+    host.onRun = (call) => (call.argv[3] === 'plannotator-stop' ? { exitCode: 3, stdout: '', stderr: '' } : onRun(call))
+
+    const answer = await mod.runTool({ action: 'close', session: id })
+    expect(textOf(answer)).toContain('already decided')
+
+    // Not marked closed: the reviewer's decision is delivered.
+    decide(host, launch!, { surface: 'annotate', decision: 'annotated', message: 'fix line 3', noop: false, annotationCount: 1 })
+    await host.tick()
+    expect(host.submits).toHaveLength(1)
+    expect(host.submits[0]).toContain('fix line 3')
+  })
+
+  test('nothing answering on the port: no TERM (the pid may be stale or reused)', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    host.onFetch = () => {
+      throw new Error('ECONNREFUSED')
+    }
+    const mod = new PlannotatorMod(host, SESSION)
+    const id = sessionIdIn(await mod.runTool({ action: 'annotate', target: 'a.md' }))
+    host.files.set(`${launchDirOf(launches(host)[0]!)}/pid`, '4242\n')
+
+    const answer = await mod.runTool({ action: 'close', session: id })
+    expect('deny' in answer).toBe(true)
+    expect(host.runs.some((call) => call.argv[3] === 'plannotator-stop')).toBe(false)
+  })
+
+  // A current CLI in remote mode turns /api/host/* off: its 404 is not an
+  // older CLI's, and its process must not be signalled.
+  test('host control turned off (remote mode): no TERM, the close says to use the tab', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    host.onFetch = () => ({ status: 404, ok: false, text: JSON.stringify({ error: 'Not found', code: 'host_control_disabled' }) })
+    const mod = new PlannotatorMod(host, SESSION)
+    const id = sessionIdIn(await mod.runTool({ action: 'annotate', target: 'a.md' }))
+    host.files.set(`${launchDirOf(launches(host)[0]!)}/pid`, '4242\n')
+
+    const answer = await mod.runTool({ action: 'close', session: id })
+    expect('deny' in answer && answer.deny).toContain('remote mode')
+    expect(host.runs.some((call) => call.argv[3] === 'plannotator-stop')).toBe(false)
+    expect(textOf(await mod.runTool({ action: 'list' }))).toContain(id)
+  })
+
+  test('ps cannot verify the pid: not closed, and the close says it was left running', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    host.onFetch = (url) => ({ status: 404, ok: false, text: JSON.stringify({ error: 'Not found', path: new URL(url).pathname }) })
+    const onRun = host.onRun
+    host.onRun = (call) => (call.argv[3] === 'plannotator-stop' ? { exitCode: 6, stdout: '', stderr: '' } : onRun(call))
+    const mod = new PlannotatorMod(host, SESSION)
+    const id = sessionIdIn(await mod.runTool({ action: 'annotate', target: 'a.md' }))
+    host.files.set(`${launchDirOf(launches(host)[0]!)}/pid`, '4242\n')
+
+    const answer = await mod.runTool({ action: 'close', session: id })
+    expect('deny' in answer && answer.deny).toContain('left running')
+    expect(textOf(await mod.runTool({ action: 'list' }))).toContain(id)
+  })
+
+  // The race a TERM can lose: the reviewer decided just before it, and the
+  // older CLI publishes the decision anyway. A record without closedBy is the
+  // reviewer's, not Claude's close.
+  test('after a TERM close, a decision record without closedBy is delivered, not swallowed', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    host.onFetch = (url) => ({ status: 404, ok: false, text: JSON.stringify({ error: 'Not found', path: new URL(url).pathname }) })
+    const mod = new PlannotatorMod(host, SESSION)
+    const id = sessionIdIn(await mod.runTool({ action: 'annotate', target: 'a.md' }))
+    const [launch] = launches(host)
+    host.files.set(`${launchDirOf(launch!)}/pid`, '4242\n')
+    expect(textOf(await mod.runTool({ action: 'close', session: id }))).toContain('Closed a.md')
+
+    decide(host, launch!, { surface: 'annotate', decision: 'annotated', message: 'fix line 3', noop: false, annotationCount: 1 })
+    await host.tick()
+
+    expect(host.submits).toHaveLength(1)
+    expect(host.submits[0]).toContain('fix line 3')
+  })
+
+  test('several files and reply answer with an error and launch nothing yet', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+
+    expect('deny' in (await mod.runTool({ action: 'annotate', target: ['a.md', 'b.md'] }))).toBe(true)
+    expect('deny' in (await mod.runTool({ action: 'reply', session: 'pn-ababab', comment: 'c1', text: 'done' }))).toBe(true)
+    expect(launches(host)).toHaveLength(0)
+
+    // A one-file list is the plain call.
+    await mod.runTool({ action: 'annotate', target: ['a.md'] })
+    expect(launches(host)[0]?.argv.slice(5)).toEqual(['plannotator', 'annotate', 'a.md'])
   })
 })

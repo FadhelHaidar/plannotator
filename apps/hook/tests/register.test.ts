@@ -13,7 +13,7 @@ const TOOL_PREFIX = 'mcp__plugin_plannotator_tools__'
 const TOOL = `${TOOL_PREFIX}plannotator`
 
 /** The world beneath the mod: a session, a file map, and a CLI that comes up at once. */
-function world(on: any, options: { files?: Map<string, string>; modEnv?: string; cliStderr?: string } = {}) {
+function world(on: any, options: { files?: Map<string, string>; modEnv?: string; cliStderr?: string; fetch?: (e: any) => any } = {}) {
   const files = options.files ?? new Map<string, string>()
   const runs: string[][] = []
   const submits: string[] = []
@@ -69,7 +69,7 @@ function world(on: any, options: { files?: Map<string, string>; modEnv?: string;
     return { value: undefined }
   })
   // The bridge: no server answers (an older binary), so the loop stops.
-  on('http.fetch', () => ({ value: { status: 404, ok: false, headers: {}, text: '' } }))
+  on('http.fetch', ($: any, e: any) => ({ value: options.fetch?.(e) ?? { status: 404, ok: false, headers: {}, text: '' } }))
   return { files, runs, submits, logs, clock, env, registered, tools }
 }
 
@@ -259,6 +259,40 @@ describe('register', () => {
 
     expect(ran).toEqual([...commands, 'plannotator review'])
     expect(w.runs.some((argv) => argv[3] === 'plannotator-launch')).toBe(false)
+  })
+
+  // list makes a GET through $.http.fetch with no body (the engine's real
+  // fetch shape); close a POST. Both reach the review's server, nothing else.
+  test('list and close go through $.http.fetch to the review\'s own server', async ($: any, on: any) => {
+    const asked: { method: string; url: string; body: unknown }[] = []
+    const w = world(on, {
+      fetch: (e: any) => {
+        asked.push({ method: e.init?.method, url: e.url, body: e.init?.body })
+        if (e.url.endsWith('/api/host/status')) {
+          return { status: 200, ok: true, headers: {}, text: JSON.stringify({ kind: 'annotate', documents: [], unsentAnnotations: 2, decided: false }) }
+        }
+        if (e.url.endsWith('/api/host/close')) return { status: 200, ok: true, headers: {}, text: JSON.stringify({ unsentAnnotations: 2 }) }
+        return undefined
+      },
+    })
+    await $.session.start(SESSION)
+    const opened = await $.tool.call({ tool: TOOL, action: 'annotate', target: 'notes.md' })
+    const id = /Session: (pn-[0-9a-f]{6})/.exec(opened.result)?.[1]
+    expect(id).toBeDefined()
+
+    const listed = await $.tool.call({ tool: TOOL, action: 'list' })
+    expect(listed.result).toContain(`${id} · annotate`)
+    expect(listed.result).toContain('unsent: 2')
+    const status = asked.find((call) => call.url.endsWith('/api/host/status'))
+    expect(status?.method).toBe('GET')
+    // The engine's fetch is handed no body for a GET.
+    expect(status?.body).toBeUndefined()
+
+    const closed = await $.tool.call({ tool: TOOL, action: 'close', session: id })
+    expect(closed.result).toContain('2 unsent comments')
+    expect(asked.find((call) => call.url.endsWith('/api/host/close'))?.method).toBe('POST')
+    expect(asked.every((call) => call.url.startsWith('http://127.0.0.1:4321/'))).toBe(true)
+    expect(w.submits).toEqual([])
   })
 
   test('knob off (PLANNOTATOR_CLAUDE_MOD=0): a Bash plannotator command runs as written', async ($: any, on: any) => {

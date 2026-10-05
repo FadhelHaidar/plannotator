@@ -151,6 +151,8 @@ import {
   PRArtifactDocumentError,
 } from "@plannotator/shared/pr-artifact-document";
 import { createAIRuntime } from "./ai-runtime";
+import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control";
+import { countUnsentDraftComments, hostSessionClosedEvent } from "@plannotator/shared/host-control";
 import { isAIEndpointPath, isLongLivedAIEndpointPath, type AIEndpoints, type SessionBridge } from "@plannotator/ai";
 import { isWSL } from "./browser";
 import { handleOpenInApps, handleOpenIn } from "./open-in";
@@ -178,6 +180,12 @@ export { handleServerReady as handleReviewServerReady } from "./shared-handlers"
 export interface ReviewServerOptions {
   /** "Ask this session": the host bridge to the agent session that opened this review (see packages/ai/session-bridge.ts). */
   sessionBridge?: SessionBridge;
+  /**
+   * The token `/api/host/status` and `/api/host/close` accept (see
+   * packages/shared/host-control.ts). Default: the pull-bridge token the host
+   * launched the CLI with; off in remote mode either way.
+   */
+  hostControlToken?: string;
   /**
    * The session is loopback-bound but published across the user's tailnet
    * (--tailscale), so its browser may be on another device: the app page is
@@ -299,9 +307,15 @@ export interface ReviewServerResult {
     annotations: unknown[];
     agentSwitch?: string;
     exit?: boolean;
+    /** The host closed the session (`POST /api/host/close`): an `exit` that keeps the draft. */
+    closedBy?: "agent";
+    /** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+    unsentAnnotations?: number;
   }>;
   /** Stop the server */
   stop: () => void;
+  /** Host-only status and close, called in-process by a host that runs this server itself. */
+  hostControl: HostControl;
 }
 
 // --- Server Implementation ---
@@ -1890,6 +1904,7 @@ export async function startReviewServer(
   }
 
   // Decision promise
+  let reviewDecided = false;
   let resolveDecision: (result: {
     approved: boolean;
     feedback: string;
@@ -1897,6 +1912,10 @@ export async function startReviewServer(
     annotations: unknown[];
     agentSwitch?: string;
     exit?: boolean;
+    /** The host closed the session (`POST /api/host/close`): an `exit` that keeps the draft. */
+    closedBy?: "agent";
+    /** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+    unsentAnnotations?: number;
   }) => void;
   const decisionPromise = new Promise<{
     approved: boolean;
@@ -1905,9 +1924,43 @@ export async function startReviewServer(
     annotations: unknown[];
     agentSwitch?: string;
     exit?: boolean;
+    /** The host closed the session (`POST /api/host/close`): an `exit` that keeps the draft. */
+    closedBy?: "agent";
+    /** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+    unsentAnnotations?: number;
   }>((resolve) => {
-    resolveDecision = resolve;
+    resolveDecision = (result) => {
+      reviewDecided = true;
+      resolve(result);
+    };
   });
+
+  const reviewAlreadyDecided = () =>
+    Response.json({ error: "This review session has already been decided." }, { status: 409 });
+
+  // Host-only session control (packages/shared/host-control.ts). Closing is
+  // the reviewer's Close, marked closedBy "agent", WITHOUT settling the draft
+  // or archiving a decision the reviewer never made.
+  const hostControlToken = resolveHostControlToken(options.hostControlToken);
+  const unsentReviewComments = (): number => {
+    const loaded = reviewDrafts.load(currentDraftKeys());
+    return loaded.found ? countUnsentDraftComments(loaded.draft) : 0;
+  };
+  const hostControl: HostControl = {
+    status: () => ({
+      kind: "review",
+      documents: isPRMode && prMetadata ? [prMetadata.url] : [],
+      unsentAnnotations: unsentReviewComments(),
+      decided: reviewDecided,
+    }),
+    close: () => {
+      if (reviewDecided) return { closed: false, reason: "decided" };
+      const unsentAnnotations = unsentReviewComments();
+      resolveDecision({ approved: false, feedback: "", annotations: [], exit: true, closedBy: "agent", unsentAnnotations });
+      externalAnnotations.broadcast(hostSessionClosedEvent(unsentAnnotations));
+      return { closed: true, unsentAnnotations };
+    },
+  };
 
   const server = await startBunServerOnAvailablePort((port) =>
     Bun.serve({
@@ -1920,6 +1973,13 @@ export async function startReviewServer(
 
         async fetch(req, server) {
           const url = new URL(req.url);
+
+          const hostControlResponse = handleHostControl(req, url, {
+            token: hostControlToken,
+            getServerPort: () => boundPort,
+            control: hostControl,
+          });
+          if (hostControlResponse) return hostControlResponse;
 
           // API: Get tour result
           if (url.pathname.match(/^\/api\/tour\/[^/]+$/) && req.method === "GET") {
@@ -3826,6 +3886,9 @@ export async function startReviewServer(
 
           // API: Exit review session without feedback
           if (url.pathname === "/api/exit" && req.method === "POST") {
+            // Already decided (the host closed it, or another tab decided):
+            // archiving or settling now would delete a draft the close kept.
+            if (reviewDecided) return reviewAlreadyDecided();
             // Decision-only line: a dismissal carries no content, and how
             // often reviews are closed without feedback is exactly the
             // behavior data the archive exists to answer.
@@ -3845,6 +3908,11 @@ export async function startReviewServer(
                 agentSwitch?: string;
                 draftGeneration?: number;
               };
+
+              // Checked after the body is read: a host close can land while
+              // it streams. A decided session must not archive, delete the
+              // draft, or answer ok for feedback nobody will receive.
+              if (reviewDecided) return reviewAlreadyDecided();
 
               // Archive BEFORE the draft delete: a failed write keeps the
               // draft as the reviewer's recovery copy (#678 ordering).
@@ -4076,5 +4144,6 @@ export async function startReviewServer(
     isRemote,
     waitForDecision: () => decisionPromise,
     stop,
+    hostControl,
   };
 }

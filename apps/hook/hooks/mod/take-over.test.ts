@@ -39,8 +39,12 @@ describe('Bash take-over', () => {
     expect(byBash?.argv.slice(5)).toEqual(byTool?.argv.slice(5))
     expect(byBash?.env?.PLANNOTATOR_SESSION_BRIDGE_TOKEN?.length).toBeGreaterThanOrEqual(32)
     expect(byBash?.env?.PLANNOTATOR_HOST_RESULT_FILE).toBe(`${byBash?.argv[4]}/result.json`)
-    // The Bash result is the tool's own text, in the Bash tool's record shape.
-    expect(answer).toEqual({ result: { stdout: 'text' in viaTool ? viaTool.text : '', stderr: '', interrupted: false } })
+    // The Bash result is the tool's own text, in the Bash tool's record shape
+    // (each launch names its own session id, so that line differs).
+    const withoutSession = (text: string) => text.replace(/^Session: pn-[0-9a-f]{6}\n/, '')
+    expect(answer).toEqual({ result: { stdout: expect.stringMatching(/^Session: pn-[0-9a-f]{6}\n/), stderr: '', interrupted: false } })
+    const bashText = 'result' in answer ? answer.result.stdout : ''
+    expect(withoutSession(bashText)).toBe(withoutSession('text' in viaTool ? viaTool.text : ''))
     expect(JSON.stringify(answer)).toContain('http://localhost:7070')
   })
 
