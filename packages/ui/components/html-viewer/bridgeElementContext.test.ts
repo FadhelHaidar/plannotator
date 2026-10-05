@@ -68,6 +68,11 @@ describe('ctxScrubUrl (bridge element context)', () => {
   test("a srcdoc session's asset route reads as the author's own relative path", () => {
     expect(scrub('/api/html-assets/d4d63ee508f145c5/img/team.png')).toBe('img/team.png');
     expect(scrub('/api/html-assets/d4d63ee508f145c5/team.png?v=2#x')).toBe('team.png?…');
+    // The route percent-encodes segments; the author wrote the decoded name.
+    expect(scrub('/api/html-assets/tok/avatars/jane%20doe.png')).toBe('avatars/jane doe.png');
+    // A malformed escape, or one that would decode to a query mark, stays raw.
+    expect(scrub('/api/html-assets/tok/bad%E0%A4%A.png')).toBe('bad%E0%A4%A.png');
+    expect(scrub('/api/html-assets/tok/what%3Fnow.png')).toBe('what%3Fnow.png');
     // A live app's own paths are real routes of that app and stay whole.
     expect(makeScrub({})('/api/html-assets/abc/team.png')).toBe('/api/html-assets/abc/team.png');
   });

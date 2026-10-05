@@ -116,6 +116,23 @@ describe("buildDefaultPrompt — pinpointed element identity", () => {
     expect(detail).toContain("`#logo`");
   });
 
+  test("Ask AI carries no query strings: not in the selector's href rung, not in the live route", () => {
+    const link = {
+      text: "Checkout",
+      anchor: { selector: 'a[href="/checkout?session=abc123#tok"]' },
+      context: {
+        tag: "a",
+        attrs: [["href", "/checkout?…"]],
+        page: { url: "/cart?coupon=SECRET", title: "Cart" },
+      },
+    };
+    const detail = elementIdentityForAskAI([link]);
+    expect(detail).toContain('a[href="/checkout?…"]');
+    expect(detail).toContain("`/cart?…`");
+    expect(detail).not.toContain("session=abc123");
+    expect(detail).not.toContain("SECRET");
+  });
+
   test("a selection with no element context asks exactly what it asked before", () => {
     expect(elementIdentityForAskAI([{ text: "plain words", anchor: null }])).toBe("");
     const scope = { kind: "selection" as const, label: "Selected HTML", text: "plain words" };

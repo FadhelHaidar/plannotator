@@ -897,6 +897,33 @@ const additionalTargetsExportBlock = (ann: any): string => {
   return block;
 };
 
+/** A URL with its query and fragment replaced by `?…`, the way the bridge
+ *  scrubs captured `href`/`src` values (tokens live in both). */
+const scrubUrlQuery = (url: string): string => {
+  const mark = url.search(/[?#]/);
+  return mark < 0 ? url : `${url.slice(0, mark)}?…`;
+};
+
+/** Ask AI sends no query strings: the live-app route line drops its query
+ *  (the persisted context keeps it, since that is the page that was reviewed). */
+const withoutRouteQuery = (context: unknown): unknown => {
+  const page = (context as any)?.page;
+  if (!page || typeof page.url !== 'string') return context;
+  return { ...(context as object), page: { ...page, url: scrubUrlQuery(page.url) } };
+};
+
+/** The anchor's `href`/`src` selector rung carries the raw attribute value,
+ *  query included (it must, to stay a working selector); Ask AI gets the
+ *  value with the query scrubbed instead. */
+const withoutSelectorQuery = (anchor: AskAIElementTarget['anchor']): AskAIElementTarget['anchor'] => {
+  if (!anchor || typeof anchor.selector !== 'string') return anchor;
+  const selector = anchor.selector.replace(
+    /(\[(?:href|src)=")((?:[^"\\]|\\.)*)(")/g,
+    (_m, open: string, value: string, close: string) => `${open}${scrubUrlQuery(value)}${close}`,
+  );
+  return { ...anchor, selector };
+};
+
 /** One pinpointed element as the Ask AI composer holds it (a draft target). */
 export interface AskAIElementTarget {
   text?: string;
@@ -918,7 +945,7 @@ export const elementIdentityForAskAI = (targets: readonly AskAIElementTarget[] |
     .map((target) => ({
       text: typeof target?.text === 'string' ? safeInline(target.text, 200) : '',
       lines: elementContextExportBlock(
-        { elementContext: target?.context, htmlAnchor: target?.anchor },
+        { elementContext: withoutRouteQuery(target?.context), htmlAnchor: withoutSelectorQuery(target?.anchor) },
         { includeOutline: false, includeRoute: true },
       ).trim(),
     }))

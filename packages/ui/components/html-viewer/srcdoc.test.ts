@@ -1409,6 +1409,8 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
       '<div id="l-container"><span>This text is far too long to serve as a hover label for anything</span></div>',
       '<div id="l-long" class="extraverboseclasstokennameone extraverboseclasstokennametwo">x</div>',
       "<p id=\"l-known\">Paragraph text</p>",
+      '<video id="l-video-aria" aria-label="Product demo"></video>',
+      '<video id="l-video"></video>',
       "</div>",
     ].join("");
     postBridge({ type: "plannotator-bridge-set-vim-mode", enabled: false });
@@ -1425,6 +1427,10 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
       // Class-token labels obey the 40-char cap like every other rung.
       ["#l-long", "extraverboseclasstokennameone extraverbo"],
       ["#l-known", "Paragraph"], // known tags keep their names
+      // A media element's accessible name beats its kind; the kind only
+      // replaces "container" when the page names nothing.
+      ["#l-video-aria", "Product demo"],
+      ["#l-video", "Video"],
     ];
     let x = 10;
     for (const [selector, expected] of cases) {
@@ -1510,6 +1516,9 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
       '<button id="b-icon" aria-label="Open menu"><svg></svg></button>',
       '<video id="v-title" title="Product demo"><source src="/media/demo.mp4?t=1"></video>',
       '<iframe id="f-src" src="prototype.html?step=2"></iframe>',
+      '<video id="v-aria" aria-label="Launch clip" src="/media/launch.mp4"></video>',
+      '<img id="i-srcset" srcset="small.png, large.png 2x">',
+      '<img id="i-srcset-w" srcset="hero-480.jpg 480w, hero-960.jpg 960w">',
       "</div>",
     ].join("");
     postBridge({ type: "plannotator-bridge-set-vim-mode", enabled: false });
@@ -1525,6 +1534,11 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
       ["#b-icon", '[element: Button "Open menu"]'],
       ["#v-title", '[element: Video "Product demo" (demo.mp4)]'],
       ["#f-src", "[element: Frame (prototype.html)]"],
+      // The aria-label is the label, so it is not repeated as the name.
+      ["#v-aria", "[element: Launch clip (launch.mp4)]"],
+      // srcset candidates split on commas first: no trailing comma.
+      ["#i-srcset", "[element: Image (small.png)]"],
+      ["#i-srcset-w", "[element: Image (hero-480.jpg)]"],
     ];
     let x = 10;
     for (const [selector, expected] of cases) {

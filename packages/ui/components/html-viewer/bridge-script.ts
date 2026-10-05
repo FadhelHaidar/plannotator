@@ -1215,7 +1215,11 @@ export const BRIDGE_SCRIPT = `(function() {
   }
 
   // Floating label naming the element under the cursor (like the markdown overlay).
-  var PINPOINT_LABELS = { H1:'Heading', H2:'Heading', H3:'Heading', H4:'Heading', H5:'Heading', H6:'Heading', P:'Paragraph', UL:'List', OL:'List', LI:'List item', A:'Link', BUTTON:'Button', IMG:'Image', TABLE:'Table', THEAD:'Table', TBODY:'Table', TR:'Row', TD:'Cell', TH:'Header cell', SECTION:'Section', NAV:'Navigation', HEADER:'Header', FOOTER:'Footer', ARTICLE:'Article', ASIDE:'Sidebar', BLOCKQUOTE:'Quote', PRE:'Code', CODE:'Code', FIGURE:'Figure', FIGCAPTION:'Caption', MAIN:'Main', FORM:'Form', INPUT:'Input', LABEL:'Label', VIDEO:'Video', AUDIO:'Audio', IFRAME:'Frame', CANVAS:'Canvas' };
+  var PINPOINT_LABELS = { H1:'Heading', H2:'Heading', H3:'Heading', H4:'Heading', H5:'Heading', H6:'Heading', P:'Paragraph', UL:'List', OL:'List', LI:'List item', A:'Link', BUTTON:'Button', IMG:'Image', TABLE:'Table', THEAD:'Table', TBODY:'Table', TR:'Row', TD:'Cell', TH:'Header cell', SECTION:'Section', NAV:'Navigation', HEADER:'Header', FOOTER:'Footer', ARTICLE:'Article', ASIDE:'Sidebar', BLOCKQUOTE:'Quote', PRE:'Code', CODE:'Code', FIGURE:'Figure', FIGCAPTION:'Caption', MAIN:'Main', FORM:'Form', INPUT:'Input', LABEL:'Label' };
+  // Media kinds name themselves only when the page gives no accessible name:
+  // unlike the semantic tags above, an aria-label on a <video> is a better
+  // label than "Video", and it keeps winning exactly as it did before.
+  var MEDIA_PINPOINT_LABELS = { VIDEO:'Video', AUDIO:'Audio', IFRAME:'Frame', CANVAS:'Canvas' };
 
   var MAX_HOVER_LABEL = 40;
   function truncateLabel(text) {
@@ -1251,6 +1255,8 @@ export const BRIDGE_SCRIPT = `(function() {
     if (known) return known;
     var aria = el.getAttribute && el.getAttribute('aria-label');
     if (aria && aria.trim()) return truncateLabel(aria.trim());
+    var media = MEDIA_PINPOINT_LABELS[el.tagName];
+    if (media) return media;
     var role = el.getAttribute && el.getAttribute('role');
     if (role && role.trim()) return truncateLabel(role.trim());
     var tokens = meaningfulClassTokens(el);
@@ -2922,7 +2928,18 @@ export const BRIDGE_SCRIPT = `(function() {
     // own, relative to the document, which is what an agent can find.
     if (!LIVE) {
       var asset = v.match(/^\\/api\\/html-assets\\/[^\\/?#]+\\/([^?#]*)/);
-      if (asset && asset[1]) v = asset[1] + v.slice(asset[0].length);
+      if (asset && asset[1]) {
+        // The route percent-encodes each segment; show the name the author
+        // wrote (jane doe.png, not jane%20doe.png). A malformed escape, or one
+        // that decodes to ? or # (which the query scrub below would cut), keeps
+        // the raw text.
+        var authored = asset[1];
+        try {
+          var decoded = decodeURIComponent(authored);
+          if (!/[?#]/.test(decoded)) authored = decoded;
+        } catch (ex) {}
+        v = authored + v.slice(asset[0].length);
+      }
     }
     if (/^data:/i.test(v)) {
       var comma = v.indexOf(',');
@@ -3402,7 +3419,10 @@ export const BRIDGE_SCRIPT = `(function() {
     if (lazy && (!src || /^data:/i.test(src))) src = lazy;
     if (!src && tag === 'IMG') {
       var srcset = (el.getAttribute('srcset') || '').trim();
-      if (srcset) src = srcset.split(/\\s+/)[0] || '';
+      // Candidates are comma-separated ("a.png, b.png 2x"); the URL is the
+      // first candidate's first word. A data: URL carries its own comma, so
+      // it is taken up to whitespace instead.
+      if (srcset) src = (/^data:/i.test(srcset) ? srcset : srcset.split(',')[0]).trim().split(/\\s+/)[0] || '';
     }
     if (!src && (tag === 'VIDEO' || tag === 'AUDIO')) {
       var child = el.querySelector && el.querySelector('source[src]');
