@@ -35,6 +35,7 @@ import {
 	PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT,
 } from "./generated/plannotator-tool.ts";
 import type { PlanReviewDecision } from "./plannotator-browser.ts";
+import { getProcessPiReviewRegistry } from "./plannotator-tool-host.ts";
 import { startAnnotateServer } from "./server/serverAnnotate.ts";
 import { startReviewServer } from "./server/serverReview.ts";
 
@@ -336,6 +337,20 @@ describe("plannotator tool on Pi", () => {
 		expect((await reloaded.call({ action: "close", session: id })).content[0]!.text).toContain(`Closed notes.md (${id})`);
 	});
 
+	test("a process registry left by another Plannotator version under the key is replaced, not used", () => {
+		const store = globalThis as unknown as Record<string, unknown>;
+		const key = "__plannotatorPiReviewRegistry_v1";
+		const saved = store[key];
+		try {
+			store[key] = { add: () => undefined };
+			const registry = getProcessPiReviewRegistry();
+			expect(typeof registry.openAll).toBe("function");
+			expect(getProcessPiReviewRegistry()).toBe(registry);
+		} finally {
+			store[key] = saved;
+		}
+	});
+
 	test("slash-command reviews are listed too, and close all skips a plan review", async () => {
 		const harness = createHarness();
 		harness.writeFile("PLAN.md", "# Plan\n\n- [ ] Step\n");
@@ -374,14 +389,14 @@ describe("plannotator tool on Pi", () => {
 		expect(harness.sent[0]!.options).toEqual({ deliverAs: "followUp" });
 	});
 
-	test("a review posted to the PR platform starts no turn (the mod's rule)", async () => {
+	test("review feedback carried only in the text (PR description or editor notes, no annotations) is still delivered", async () => {
 		const harness = createHarness();
 		await harness.command("plannotator-review", "");
 		const launch = harness.launches[0]!;
-		await postJson(`${launch.url}/api/feedback`, { approved: false, feedback: "Pull request reviewed on GitHub: https://github.com/o/r/pull/1", annotations: [] });
-		await until(() => harness.notices.some((notice) => notice.message.includes("Nothing was sent to the agent")));
-		expect(harness.notices.some((notice) => notice.message.includes("Pull request reviewed on GitHub"))).toBe(true);
-		expect(harness.sent).toHaveLength(0);
+		await postJson(`${launch.url}/api/feedback`, { approved: false, feedback: "## PR description\n\nSay why, not what.", annotations: [] });
+		await until(() => harness.sent.length > 0);
+		expect(firstLine(harness.sent[0]!.text)).toMatch(/^Plannotator: local changes \(pn-[0-9a-f]{6}\) — Changes requested\.$/);
+		expect(harness.sent[0]!.text).toContain("Say why, not what.");
 	});
 
 	test("the agent closes a code review: the draft is kept and nothing is delivered", async () => {
@@ -449,6 +464,11 @@ describe("plannotator tool on Pi", () => {
 		// Set after the first server bound a random port: no fixed-port bind happens here.
 		process.env.PLANNOTATOR_PORT = "19999";
 		await expect(harness.call({ action: "annotate", target: "spec.md" })).rejects.toThrow(`notes.md (${id}) is open`);
+		// Another Pi session cannot close it, so it is told to ask the user.
+		const other = harness.makeCtx(freshSessionId());
+		await expect(harness.call({ action: "annotate", target: "spec.md" }, other)).rejects.toThrow(
+			"ask the user to finish or close that review in its browser tab",
+		);
 		expect(harness.launches).toHaveLength(1);
 		delete process.env.PLANNOTATOR_PORT;
 		expect((await harness.call({ action: "annotate", target: "spec.md" })).terminate).toBe(true);

@@ -154,13 +154,27 @@ export function createPiReviewRegistry(
 	};
 }
 
-type RegistryGlobal = typeof globalThis & { __plannotatorPiReviewRegistry?: PiReviewRegistry };
+/**
+ * Versioned: an extension of another Plannotator version loaded into the same
+ * process (an update, then /reload) must never pick up a registry shaped
+ * differently. Bump the suffix whenever `PiReviewRegistry` changes shape.
+ */
+const REGISTRY_KEY = "__plannotatorPiReviewRegistry_v1";
+const REGISTRY_METHODS = ["add", "remove", "openFor", "openAll", "listText", "close"] as const;
+
+function isPiReviewRegistry(value: unknown): value is PiReviewRegistry {
+	return typeof value === "object" && value !== null
+		&& REGISTRY_METHODS.every((method) => typeof (value as Record<string, unknown>)[method] === "function");
+}
 
 /** The registry every extension instance in this process shares (see the file comment). */
 export function getProcessPiReviewRegistry(): PiReviewRegistry {
-	const store = globalThis as RegistryGlobal;
-	store.__plannotatorPiReviewRegistry ??= createPiReviewRegistry();
-	return store.__plannotatorPiReviewRegistry;
+	const store = globalThis as typeof globalThis & Record<string, unknown>;
+	const existing = store[REGISTRY_KEY];
+	if (isPiReviewRegistry(existing)) return existing;
+	const registry = createPiReviewRegistry();
+	store[REGISTRY_KEY] = registry;
+	return registry;
 }
 
 /**
@@ -170,7 +184,9 @@ export function getProcessPiReviewRegistry(): PiReviewRegistry {
  */
 export function fixedPortBusyText(open: PiOpenReview, ownedByCaller: boolean): string {
 	const lead = "Plannotator did not open: this Pi runs Plannotator on one fixed port (remote mode or PLANNOTATOR_PORT), so only one review can be open at a time.";
-	if (!ownedByCaller) return `${lead} Another Pi session has a review open; wait until it ends.`;
+	if (!ownedByCaller) {
+		return `${lead} A review that another Pi session opened is still open at ${open.url}. You cannot close it from here: ask the user to finish or close that review in its browser tab, then try again.`;
+	}
 	if (open.kind === "plan") return `${lead} The plan review ${open.id} is open; wait for the reviewer's decision.`;
 	return `${lead} ${open.subject} (${open.id}) is open: wait for the reviewer's decision, or close it first with action "close" and session "${open.id}".`;
 }

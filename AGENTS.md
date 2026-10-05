@@ -337,11 +337,11 @@ the same text, and from each revision) and never closed.
 Review, annotate and last decisions (commands included) now start with
 `plannotatorDecisionHeading` (`Plannotator: notes.md (pn-3f2a9c) — Feedback ·
 2 comments.`); outcomes follow the mod: a code review that is not an approval
-is `Changes requested · N comments`, and one with zero annotations is the
-PR-platform status post (the in-app general comment is an annotation too), which
-now starts no turn on Pi either: the user gets a notice, the agent nothing
-(slash commands included; Pi used to deliver the status line). Plan decisions
-are unchanged. Pi cannot take over an agent's
+is `Changes requested` (` · N comments` when it carries annotations). Pi still
+delivers every review decision whose feedback has content, zero annotations
+included: PR description notes, PR comment notes and VS Code editor comments
+ride only in the feedback text, so annotation count cannot identify a
+PR-platform status post. Plan decisions are unchanged. Pi cannot take over an agent's
 shell `plannotator` command: its `tool_call` event can only block a call, which
 the model reads as an error, so the skill's "use the tool" line is what steers
 it.

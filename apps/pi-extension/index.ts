@@ -966,18 +966,18 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 					safeNotify(ctx, "Code review closed (no feedback).", "info", origin);
 					return;
 				}
-				// Platform PR actions (approve/comment posted to GitHub, GitLab or
-				// Bitbucket) come back with an empty annotation set and a status
-				// message. Like the Claude Code mod, that starts no turn: the review
-				// went to the platform, not to the agent. (Every in-app comment,
-				// a general one included, is an annotation.)
-				if ((result.annotations?.length ?? 0) === 0) {
-					safeNotify(ctx, `Plannotator: ${result.feedback.trim()} Nothing was sent to the agent.`, "info", origin);
-					return;
+				// Append the verification-only suffix when the reviewer sent
+				// annotations to act on (PR mode included). Platform PR actions
+				// (approve/comment posted to the host) come back with an empty
+				// annotation set and a status message — don't tell the agent to
+				// "address" a platform action. Feedback with zero annotations is
+				// still delivered: PR description and PR comment notes and editor
+				// comments ride only in the feedback text.
+				let reviewFeedback = result.feedback;
+				if ((result.annotations?.length ?? 0) > 0) {
+					const { getReviewDeniedSuffix } = await loadPlannotatorPrompts();
+					reviewFeedback += getReviewDeniedSuffix("pi", loadConfig());
 				}
-				// The verification-only suffix: the reviewer sent annotations to act on.
-				const { getReviewDeniedSuffix } = await loadPlannotatorPrompts();
-				const reviewFeedback = result.feedback + getReviewDeniedSuffix("pi", loadConfig());
 				sendUserMessageWithCurrentSessionFallback(
 					pi,
 					withDecisionHeading(tracked, `Changes requested${commentCountSuffix(result.annotations)}`, reviewFeedback),
