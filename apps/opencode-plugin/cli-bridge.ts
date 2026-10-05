@@ -20,9 +20,13 @@ import {
   selectAnnotateTokenTarget,
 } from "@plannotator/shared/annotate-target";
 import { annotateBundleTargetText } from "@plannotator/shared/annotate-bundle";
-import { isOlderCliBundleRefusal, PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT } from "@plannotator/shared/plannotator-tool";
+import {
+  isOlderCliBundleRefusal,
+  PLANNOTATOR_OUTCOME_REVIEW_POSTED,
+  PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT,
+  plannotatorDecisionHeading,
+} from "@plannotator/shared/plannotator-tool";
 import { parseReviewArgs, resolveReviewTarget } from "@plannotator/shared/review-args";
-import { plannotatorDecisionHeading } from "@plannotator/shared/plannotator-tool";
 import {
   composeReviewApprovedMessage,
   getAnnotateApprovedWithNotesPrompt,
@@ -896,7 +900,7 @@ export function reviewDecisionOutcome(outcome: CliReviewOutcome): string {
     return outcome.feedback?.trim() ? `Approved with notes${comments}` : "Approved";
   }
   // The status post carries what was posted to the platform, not a request.
-  if (isPlatformPost(outcome)) return "Review posted";
+  if (isPlatformPost(outcome)) return PLANNOTATOR_OUTCOME_REVIEW_POSTED;
   return `Changes requested${comments}`;
 }
 

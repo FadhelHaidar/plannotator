@@ -39,6 +39,7 @@
     "plannotator-browser.ts",
     "plannotator-browser-runtime.ts",
     "plannotator-events.ts",
+    "plannotator-tool-host.ts",
     "server.ts",
     "tool-scope.ts",
     "config.ts",

@@ -25,6 +25,7 @@ import {
 } from "./server.ts";
 import { BROWSER_SESSION_STOPPED } from "./browser-session-error.ts";
 import type { SessionBridge } from "./generated/ai/session-bridge.ts";
+import type { HostControl } from "./generated/host-control.ts";
 import type { AnnotateBundleFile } from "./generated/annotate-bundle.ts";
 import { openBrowser, isRemoteSession } from "./server/network.ts";
 import { detectProjectName } from "./server/project.ts";
@@ -78,7 +79,29 @@ export interface BrowserDecisionSession<T> {
 	url: string;
 	waitForDecision: () => Promise<T>;
 	stop: () => void;
+	/**
+	 * The server's in-process host control (packages/shared/host-control.ts):
+	 * the `plannotator` tool's list reads `status()`, its close calls `close()`
+	 * (the reviewer's Close marked closedBy "agent", draft kept).
+	 */
+	hostControl?: HostControl;
 }
+
+/** Set on a decision the agent's own close produced (host control), with the unsent count kept in the draft. */
+interface AgentClosedFields {
+	closedBy?: "agent";
+	unsentAnnotations?: number;
+}
+
+export type AnnotateDecision = {
+	feedback: string;
+	annotations?: unknown[];
+	exit?: boolean;
+	approved?: boolean;
+	selectedMessageId?: string;
+	feedbackScope?: "message" | "messages";
+	nothingToSend?: boolean;
+} & AgentClosedFields;
 
 type CodeReviewOptions = {
 	/** "Ask this session": the bridge to the Pi session that opened this review. */
@@ -114,7 +137,7 @@ type CodeReviewOptions = {
 	gitRemoteCheck?: boolean;
 };
 
-type CodeReviewDecision = {
+export type CodeReviewDecision = {
 	approved: boolean;
 	feedback?: string;
 	reviewDirectory?: string;
@@ -123,7 +146,7 @@ type CodeReviewDecision = {
 	exit?: boolean;
 	/** The PR-platform status post (the review went to GitHub/GitLab/Bitbucket); `feedback` is only its status line. */
 	platform?: true;
-};
+} & AgentClosedFields;
 
 const CODE_REVIEW_PROGRESS_STATUS = "plannotator-review";
 // stop -> registration timestamp. The timestamp lets self-preemption skip
@@ -279,7 +302,7 @@ async function waitForDecisionWithCleanup<T>(
 }
 
 export function startBrowserDecisionSession<T>(
-	server: { url: string; stop: () => void },
+	server: { url: string; stop: () => void; hostControl?: HostControl },
 	ctx: ExtensionContext,
 	waitForResult: () => Promise<T>,
 	signal?: AbortSignal,
@@ -334,6 +357,7 @@ export function startBrowserDecisionSession<T>(
 			return decisionPromise;
 		},
 		stop,
+		...(server.hostControl ? { hostControl: server.hostControl } : {}),
 	};
 }
 
@@ -789,7 +813,7 @@ export async function openMarkdownAnnotation(
 	sourceInfo?: string,
 	sourceConverted?: boolean,
 	gate?: boolean,
-): Promise<{ feedback: string; exit?: boolean; approved?: boolean; selectedMessageId?: string; feedbackScope?: "message" | "messages" }> {
+): Promise<AnnotateDecision> {
 	const session = await startMarkdownAnnotationSession(
 		ctx,
 		filePath,
@@ -824,7 +848,7 @@ export async function startMarkdownAnnotationSession(
 	sessionBridge?: SessionBridge,
 	/** Several files reviewed as one (mode "annotate-bundle"), in review order. */
 	bundleFiles?: AnnotateBundleFile[],
-): Promise<BrowserDecisionSession<{ feedback: string; annotations?: unknown[]; exit?: boolean; approved?: boolean; selectedMessageId?: string; feedbackScope?: "message" | "messages" }>> {
+): Promise<BrowserDecisionSession<AnnotateDecision>> {
 	if (!ctx.hasUI) {
 		throw new Error("Plannotator annotation browser is unavailable in this session.");
 	}
@@ -895,7 +919,7 @@ export async function openLastMessageAnnotation(
 	lastText: string,
 	gate?: boolean,
 	recentMessages?: { messageId: string; text: string; timestamp?: string }[],
-): Promise<{ feedback: string; exit?: boolean; approved?: boolean; selectedMessageId?: string; feedbackScope?: "message" | "messages" }> {
+): Promise<AnnotateDecision> {
 	const session = await startLastMessageAnnotationSession(ctx, lastText, gate, recentMessages);
 	return session.waitForDecision();
 }
@@ -906,7 +930,7 @@ export async function startLastMessageAnnotationSession(
 	gate?: boolean,
 	recentMessages?: { messageId: string; text: string; timestamp?: string }[],
 	sessionBridge?: SessionBridge,
-): Promise<BrowserDecisionSession<{ feedback: string; exit?: boolean; approved?: boolean; selectedMessageId?: string; feedbackScope?: "message" | "messages" }>> {
+): Promise<BrowserDecisionSession<AnnotateDecision>> {
 	return startMarkdownAnnotationSession(
 		ctx,
 		"last-message",

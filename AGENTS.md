@@ -282,6 +282,81 @@ execute the unreviewed edits (to keep them, the user returns to plan mode and
 the agent resubmits). Auto-approved plans (no UI) keep the file as their
 source.
 
+### Pi: the `plannotator` tool
+
+The extension registers the shared tool contract
+(`packages/shared/plannotator-tool.ts`, vendored as
+`generated/plannotator-tool.ts`) with `pi.registerTool`: name, description,
+validation (`parsePlannotatorToolInput`), argument mapping and result text all
+come from it, and `parameters` is `PLANNOTATOR_TOOL_INPUT_SCHEMA` itself
+(plain JSON Schema, which Pi validates without a TypeBox Kind since 0.79.1,
+the peer floor; `plannotator-tool.test.ts` runs the installed Pi's
+`validateToolArguments` against it). `executionMode: "sequential"` (#1622: an
+"edit, then open" batch opens the edited file).
+
+**One launch path.** `/plannotator-review`, `/plannotator-annotate`,
+`/plannotator-last` and the tool share `launchCodeReview` / `launchAnnotate` /
+`launchLastMessage` in `apps/pi-extension/index.ts` (in-process server,
+"Ask this session" bridge, decision as a `followUp` message). The commands
+notify a launch error; the tool throws it, which Pi reports as an error
+result. Tool differences: the annotate target is ONE argument, so the #1182
+tolerant word split never runs on it (`tolerant: false`); an opened review
+returns `plannotatorToolOpenedText` with `terminate: true`, so the turn ends
+and the session is idle for Ask; a gated session the tool opened delivers a
+bare Approve as a message (`deliverApproval`, the mod's rule). The tool's
+`last` skips the assistant entry holding the calling tool call
+(`isAssistantEntryForToolCall` in `assistant-message.ts`): Pi saves an
+assistant message at message_end, before its tools run, so otherwise the
+agent's own "opening it now" message would open, and would head the picker.
+On one fixed port (remote mode or a single `PLANNOTATOR_PORT`, read from
+`getServerPorts`) a second open is refused while any review is open
+(`fixedPortBusyText` names it), because the new server would otherwise
+self-preempt the open one silently. A list target opens ONE `annotate-bundle`
+review through the same `launchAnnotate` the slash command uses: the list goes
+to the shared `selectAnnotateTokenTarget` as pre-split tokens (paths with
+spaces survive), only the `bundle` selection opens (a missing entry answers
+`buildMissingAnnotateFilesMessage`; a folder, URL or bare name refuses, so the
+tool never opens fewer files than named), `resolveAnnotateBundleFiles` checks
+types and size, and the subject is `plannotatorBundleSubject` (`2 files:
+spec.md, notes.md`) in the result, list, close and decision heading; feedback
+names every file (`Files:` + `annotateBundleTargetText`). `reply` answers
+`PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT` until live comments land; a session
+without UI (print/JSON mode) is refused, since nothing could deliver the
+decision later.
+
+**Sessions, list and close.** Every review the extension opens (tool,
+commands, `plannotator_submit_plan`) is recorded in ONE process-wide registry
+(`getProcessPiReviewRegistry` in `apps/pi-extension/plannotator-tool-host.ts`,
+on `globalThis`) with a `pn-` id until its decision settles. Process-wide
+because Pi builds a new extension instance on `/reload` and `/resume`, and a
+per-instance map would forget the open reviews of a session that merely
+reloaded. `list` and `close` see only entries whose owner is the calling ctx's
+`sessionManager.getSessionId()`, so another session's reviews (including the
+previous one after `/new`) are never in reach; the global `sessions/` registry
+is never read. `unsent` and `decided` come from the server's
+in-process `hostControl.status()`; `close` calls `hostControl.close()` (the
+reviewer's Close marked `closedBy: "agent"`, draft kept, tab told), so it
+works in remote mode too, where the HTTP endpoints are off. A review the agent
+closed delivers nothing: its decision handler notifies "the agent closed …"
+instead (user-facing notices name a last-message review "the agent's last
+message"; agent-facing texts say "your last message"). Plan reviews are listed
+as `Plan vN` (the history version, read from `updatePlan`'s no-op answer for
+the same text, and from each revision) and never closed.
+Review, annotate and last decisions (commands included) now start with
+`plannotatorDecisionHeading` (`Plannotator: notes.md (pn-3f2a9c) — Feedback ·
+2 comments.`); outcomes follow the mod: a code review that is not an approval
+is `Changes requested` (` · N comments` when it carries annotations), and the
+PR-platform status post, which the review server marks `platform: true`
+(#1719, `classifyReviewOutcome` in `apps/pi-extension/review-outcome.ts`), is
+`Review posted` (`PLANNOTATOR_OUTCOME_REVIEW_POSTED`, shared with OpenCode 2) and delivered verbatim, without the verification
+suffix. Every review decision whose feedback has content is delivered,
+zero annotations included (PR description, PR comment and editor notes ride
+only in the feedback text); nothing is inferred from the annotation count.
+Plan decisions are unchanged. Pi cannot take over an agent's
+shell `plannotator` command: its `tool_call` event can only block a call, which
+the model reads as an error, so the skill's "use the tool" line is what steers
+it.
+
 ### Claude Code mod: non-blocking plan review, annotate, review and last
 
 Where Claude Code runs hooks modules ("Claude Mods": function hooks, CLI only,
@@ -666,7 +741,8 @@ strict gates keep the real CLI and its exit codes. With the mod off, in `-p`/SDK
 runs and on Windows nothing is taken over. The CLI the mod launches runs in the
 session's cwd (`$.process.run`'s default), the same as for the tool. Pi and
 OpenCode do not take over shell runs: there an agent-run `plannotator` command
-still runs the CLI.
+still runs the CLI (Pi registers the tool itself; see "Pi: the `plannotator`
+tool").
 
 **Plan review.** The `tool.call` hook on the main loop's ExitPlanMode resolves
 the plan (the plan file when it is an absolute `.md` regular file within the
@@ -847,7 +923,7 @@ comments`, `Approved`, and for code review (local or PR) `Changes requested ·
 N comments`. The count comes from the CLI's additive `annotationCount` on the
 `annotate --json`, `opencode-annotate-last` and `opencode-review` records (an
 older CLI omits it and the heading has no count). A PR-platform status post
-reads `Review posted` and is decided by the record's `platform` flag (#1719;
+reads `Review posted` (`PLANNOTATOR_OUTCOME_REVIEW_POSTED`, the same words as Pi) and is decided by the record's `platform` flag (#1719;
 `isPlatformPost`, falling back to `isPRMode` only for a CLI without the flag),
 never inferred from zero annotations, so description-only PR feedback is
 `Changes requested`. `list` and

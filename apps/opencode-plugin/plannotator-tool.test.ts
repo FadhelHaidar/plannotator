@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  PLANNOTATOR_OUTCOME_REVIEW_POSTED,
   PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT,
   PLANNOTATOR_TOOL_DESCRIPTION,
   PLANNOTATOR_TOOL_INPUT_SCHEMA,
@@ -423,7 +424,8 @@ describe.skipIf(isWindows)("the tool through the real launch path (stub CLI)", (
     const posted = await runPlannotatorTool({ action: "review", target: pr }, { sessionID: "ses_a" }, host.toolDeps);
     await decide(portOf(posted), { decision: "annotated", approved: false, isPRMode: true, platform: true, feedback: "Review posted to GitHub.", annotationCount: 2 });
     const second = await waitFor(() => host.prompts[1]);
-    expect(second.text).toBe(`Plannotator: PR #12 (${sessionIdOf(posted)}) — Review posted.\n\nReview posted to GitHub.`);
+    // The shared outcome, so Pi and OpenCode name the platform post the same way.
+    expect(second.text).toBe(`Plannotator: PR #12 (${sessionIdOf(posted)}) — ${PLANNOTATOR_OUTCOME_REVIEW_POSTED}.\n\nReview posted to GitHub.`);
   }, 30_000);
 
   // Failure caught: a subagent's review owned by (and delivered to) the

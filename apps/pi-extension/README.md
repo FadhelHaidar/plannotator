@@ -216,7 +216,6 @@ Use these inside `instructions` strings. They render once, when the phase is ent
 ### Code review
 
 Run `/plannotator-review` to open your current VCS changes in the code review UI. Annotate specific lines, switch between the modes supported by the detected Git, GitButler, or JJ provider, and submit feedback that gets sent to the agent. Pass `--git` or `--gitbutler` to force that provider; GitButler requires `but` 0.21.0 or newer on `PATH`. Pass `--patch-file <path>` to review a static caller-supplied unified diff without a repository.
-
 ### Ask this session
 
 In plan review, code review, annotate and `/plannotator-last`, Ask AI is answered by your Pi session ("Ask this session"). It is the only Ask AI option there, so there is no provider picker. Your question shows in Pi's chat. If the agent is busy, choose **Ask when it finishes** or **Interrupt and ask now**. In remote mode you pick a separate provider instead. Review agents, Code Tour and Guided Review still run their own models.
@@ -297,6 +296,16 @@ URL targets work too. A loopback `http` URL that answers with an HTML page (a ru
 
 Run `/plannotator-last` to annotate the agent's most recent response. The message opens in the annotation UI where you can highlight text, add comments, and send structured feedback back to the agent.
 
+### The `plannotator` tool
+
+The agent has a `plannotator` tool. When you ask it to "open notes.md in Plannotator", it calls the tool instead of running the CLI:
+
+- **Open:** `annotate` a file, folder or URL (`gate: true` adds an Approve button), `review` changes or a PR (`options.base` sets the compare ref), or `last` (the agent's last answer; the message in which the agent calls the tool is skipped). The review opens exactly as the matching slash command opens it, with Ask this session. The tool returns at once with a session id (`pn-3f2a9c`) and the URL, and the agent's turn ends. Your decision arrives later as a new message that starts with `Plannotator: notes.md (pn-3f2a9c) — Feedback · 2 comments.` If the agent asked for a gated sign-off, a plain Approve is sent to it too.
+- **List:** the reviews this Pi session opened that are still open, including the ones you opened with `/plannotator-*` commands and plan reviews. Each line shows the id, what it shows, the URL, its age and how many comments you have not sent yet.
+- **Close:** one review by id, or `"all"`. This is the same as your Close, except that your unsent comments stay saved as a draft. Nothing is sent to the agent. Plan reviews are not closed this way: they end with your decision or when you leave plan mode.
+
+Another Pi session cannot list or close these reviews. After `/reload` or `/resume` of the same session, the agent still sees the reviews that are open. After `/new` it does not, because that is another session. In remote mode (or with a single `PLANNOTATOR_PORT`) every review uses the same port, so the tool opens only one review at a time and tells the agent which one to close first. The tool needs an interactive Pi session: in print or JSON mode it refuses, because nothing could deliver your decision later. To review several files together, the agent passes a list as `target` (for example `["spec.md", "mock.html"]`); they open as one review in that order, with one decision. Decisions from the slash commands now also start with the same `Plannotator: … (pn-…) — …` line.
+
 ### Archive browser
 
 The Plannotator archive browser is available through the shared event API as `archive`, which opens the saved plan/decision browser for future callers. The orchestrator does not expose a dedicated archive command yet.
@@ -313,6 +322,8 @@ During execution, the agent marks completed steps with `[DONE:n]` markers. Progr
 | `/plannotator-review [DIRECTORY \| PR_URL]` | Open code review UI for current changes, another repository/worktree, or a PR |
 | `/plannotator-annotate <file>` | Open markdown file in annotation UI |
 | `/plannotator-last` | Annotate the last assistant message |
+
+The agent opens, lists and closes reviews with the `plannotator` tool (see above).
 
 ## Flags
 
