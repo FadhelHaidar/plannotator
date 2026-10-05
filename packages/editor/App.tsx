@@ -270,7 +270,7 @@ import {
   buildAnnotateApprovalBody,
   buildCompleteAnnotateFeedback,
 } from './annotateSubmission';
-import { blocksForDocument, collectSubmittedAnnotations, mergeExternalAnnotations, resolveFeedbackSections } from './feedbackDocuments';
+import { blocksForDocument, collectSubmittedAnnotations, mergeExternalAnnotations, mergeExternalsIntoMessageEntries, resolveFeedbackSections } from './feedbackDocuments';
 import { buildDecisionSpec, type DecisionActionId, type DecisionMenuItem } from '@plannotator/ui/utils/decisionSpec';
 import { DecisionNoteDialog, type DecisionHandler } from '@plannotator/ui/components/DecisionControl';
 import {
@@ -2176,6 +2176,14 @@ const App: React.FC = () => {
     [annotations, externalAnnotations],
   );
 
+  // Multi-message annotate-last entries for the export and the submit body.
+  // Each message's entry is built from LOCAL annotations only, so SSE
+  // externals (agent / WebMCP comments) ride the current message's entry.
+  const buildFeedbackMessageEntries = useCallback(
+    () => mergeExternalsIntoMessageEntries(buildMessageAnnotationEntries(), selectedMessageId, externalAnnotations),
+    [buildMessageAnnotationEntries, selectedMessageId, externalAnnotations],
+  );
+
   // Plan diff state — memoize filtered annotation lists to avoid new references per render
   const diffAnnotations = useMemo(() => allAnnotations.filter(a => !!a.diffContext), [allAnnotations]);
   const viewerAnnotations = useMemo(() => allAnnotations.filter(a => !a.diffContext), [allAnnotations]);
@@ -2184,7 +2192,7 @@ const App: React.FC = () => {
   const messageMultiSelectMode = annotateSource === 'message' && recentMessages.length > 1;
   const hasAnyAnnotations = useMemo(
     () => messageMultiSelectMode
-      ? messageFeedbackAnnotationCount > 0 || editorAnnotations.length > 0
+      ? messageFeedbackAnnotationCount > 0 || externalAnnotations.length > 0 || editorAnnotations.length > 0
       : allAnnotations.length > 0
         || codeAnnotations.length > 0
         || editorAnnotations.length > 0
@@ -2193,6 +2201,7 @@ const App: React.FC = () => {
     [
       messageMultiSelectMode,
       messageFeedbackAnnotationCount,
+      externalAnnotations.length,
       allAnnotations.length,
       codeAnnotations.length,
       editorAnnotations.length,
@@ -3254,14 +3263,14 @@ const App: React.FC = () => {
       directEditsSection: buildEditsSection(),
       savedFileChangesSection: buildSavedChangesSection(checkedSavedFileChanges),
       ...(messageMultiSelectMode && !discard
-        ? { messageEntries: buildMessageAnnotationEntries() }
+        ? { messageEntries: buildFeedbackMessageEntries() }
         : {}),
       ...(options?.approvalFraming ? { approvalFraming: true } : {}),
     });
   }, [
     annotateSource,
     buildEditsSection,
-    buildMessageAnnotationEntries,
+    buildFeedbackMessageEntries,
     buildSavedChangesSection,
     codeAnnotations,
     editorAnnotations,
@@ -3275,8 +3284,8 @@ const App: React.FC = () => {
   // exports, so host counts and the feedback archive match it.
   const getSubmittedAnnotations = useCallback(() => collectSubmittedAnnotations(
     getFeedbackSections(),
-    messageMultiSelectMode ? buildMessageAnnotationEntries() : undefined,
-  ), [getFeedbackSections, messageMultiSelectMode, buildMessageAnnotationEntries]);
+    messageMultiSelectMode ? buildFeedbackMessageEntries() : undefined,
+  ), [getFeedbackSections, messageMultiSelectMode, buildFeedbackMessageEntries]);
 
   const withDraftGeneration = useCallback((path: string): string => {
     const separator = path.includes('?') ? '&' : '?';

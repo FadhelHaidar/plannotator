@@ -39,6 +39,9 @@ interface ReviewDecision {
 interface AnnotateDecision {
   decision: "approved" | "dismissed" | "annotated";
   feedback?: string;
+  /** A Done with nothing to send (#1701): `feedback` is the zero-state
+   *  sentence and nothing is delivered. Absent from an older CLI. */
+  nothingToSend?: boolean;
 }
 
 interface ExitState {
@@ -210,7 +213,11 @@ function parseAnnotateDecision(raw: string): AnnotateDecision | null {
         parsed.decision === "annotated") &&
       (parsed.feedback === undefined || typeof parsed.feedback === "string")
     ) {
-      return { decision: parsed.decision, feedback: parsed.feedback };
+      return {
+        decision: parsed.decision,
+        feedback: parsed.feedback,
+        ...(parsed.nothingToSend === true && { nothingToSend: true }),
+      };
     }
   } catch {
     return null;
@@ -226,6 +233,9 @@ export function formatAnnotationFeedback(
   // Approved-with-notes carries reviewer guidance in `feedback` (#1092); only
   // dismissed decisions and note-less approvals have nothing to surface.
   if (decision.decision !== "annotated" && decision.decision !== "approved") return null;
+  // A Done with nothing to send carries the zero-state sentence as feedback;
+  // there is nothing for the agent (#1701).
+  if (decision.decision === "annotated" && decision.nothingToSend === true) return null;
 
   const feedback = decision.feedback?.trim();
   if (!feedback) return null;

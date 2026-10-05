@@ -16,7 +16,7 @@ import { AnnotationType, type Annotation, type ImageAttachment } from '@plannota
 import type { CachedDocState, FeedbackDocuments } from '@plannotator/ui/hooks/useLinkedDoc';
 import { parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 import { buildCompleteAnnotateFeedback } from './annotateSubmission';
-import { collectSubmittedAnnotations, resolveFeedbackSections } from './feedbackDocuments';
+import { collectSubmittedAnnotations, mergeExternalsIntoMessageEntries, resolveFeedbackSections } from './feedbackDocuments';
 
 const A_PATH = '/repo/docs/a.md';
 const B_PATH = '/repo/docs/b.md';
@@ -288,5 +288,49 @@ describe('collectSubmittedAnnotations', () => {
       [entry('x', A_TEXT, [m1]), entry('y', B_TEXT, [m2])],
     );
     expect(submitted.map((x) => x.id)).toEqual(['m1', 'm2']);
+  });
+});
+
+// #1701 review: multi-message annotate-last built its entries from LOCAL
+// annotations only, so an agent / WebMCP comment reached neither the exported
+// feedback nor the submit body, and a session holding only such a comment
+// posted the "no feedback" sentence marked nothing-to-send.
+describe('mergeExternalsIntoMessageEntries', () => {
+  const entry = (messageId: string, text: string, annotations: Annotation[]) =>
+    ({ messageId, text, annotations, globalAttachments: [] as ImageAttachment[] });
+  const external = (id: string, text: string): Annotation => ({ ...global(id, text), source: 'browser-agent' });
+
+  function exportMessages(entries: ReturnType<typeof entry>[]): string {
+    return buildCompleteAnnotateFeedback({
+      blocks: [], annotations: [], globalAttachments: [], linkedDocuments: new Map(),
+      editorAnnotations: [], codeAnnotations: [], title: 'Message Feedback', subject: 'message',
+      sourceConverted: false, directEditsSection: '', savedFileChangesSection: '',
+      messageEntries: entries,
+    });
+  }
+
+  test('an external comment rides the current message into the export and the submit body', () => {
+    const entries = [entry('latest', A_TEXT, []), entry('older', B_TEXT, [])];
+    const merged = mergeExternalsIntoMessageEntries(entries, 'older', [external('x1', 'AGENT-NOTE')]);
+
+    const out = exportMessages(merged);
+    expect(out).toContain('AGENT-NOTE');
+    expect(out).not.toContain('has no feedback');
+    expect(collectSubmittedAnnotations({ annotations: [], linkedDocuments: new Map() }, merged).map((a) => a.id))
+      .toEqual(['x1']);
+    expect(merged[1]!.annotations.map((a) => a.id)).toEqual(['x1']);
+    expect(merged[0]!.annotations).toEqual([]);
+  });
+
+  test('a draft-restored copy of the same external is not exported twice', () => {
+    const restored = { ...external('old-id', 'AGENT-NOTE') };
+    const merged = mergeExternalsIntoMessageEntries([entry('latest', A_TEXT, [restored])], 'latest', [external('x1', 'AGENT-NOTE')]);
+    expect(merged[0]!.annotations.map((a) => a.id)).toEqual(['x1']);
+  });
+
+  test('with no current match the latest message carries them; no externals changes nothing', () => {
+    const entries = [entry('latest', A_TEXT, []), entry('older', B_TEXT, [])];
+    expect(mergeExternalsIntoMessageEntries(entries, null, [external('x1', 'N')])[0]!.annotations.map((a) => a.id)).toEqual(['x1']);
+    expect(mergeExternalsIntoMessageEntries(entries, 'older', [])).toBe(entries);
   });
 });

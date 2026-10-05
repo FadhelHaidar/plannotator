@@ -114,6 +114,27 @@ export function resolveFeedbackSections(input: FeedbackSectionsInput): FeedbackS
 }
 
 /**
+ * Multi-message annotate-last: the per-message entries are built from each
+ * message's LOCAL annotations, so SSE externals (agent / WebMCP comments)
+ * reached neither the export nor the submit body. They are about what is on
+ * screen, so they ride the CURRENT message's entry (the first entry, the
+ * latest message, when the current one is not among them), deduped against
+ * draft-restored copies exactly like the single-document path.
+ */
+export function mergeExternalsIntoMessageEntries(
+  entries: MessageAnnotationEntry[],
+  currentMessageId: string | null | undefined,
+  externalAnnotations: Annotation[],
+): MessageAnnotationEntry[] {
+  if (externalAnnotations.length === 0 || entries.length === 0) return entries;
+  const found = entries.findIndex((entry) => entry.messageId === currentMessageId);
+  const index = found === -1 ? 0 : found;
+  return entries.map((entry, i) => i === index
+    ? { ...entry, annotations: mergeExternalAnnotations(entry.annotations, externalAnnotations) }
+    : entry);
+}
+
+/**
  * One submitted annotation. `documentPath` is set on comments made on a
  * document OTHER than the session's own (a folder session's files, a linked
  * document); absent means the session's own document or message. Additive:
