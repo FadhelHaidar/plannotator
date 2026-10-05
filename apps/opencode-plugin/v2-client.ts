@@ -717,6 +717,13 @@ export function createV2BridgeClient(input: {
   sessionID?: string;
   /** Best-effort warning sink; defaults to stderr. */
   warn?: (message: string) => void;
+  /**
+   * Deliver feedback with `FEEDBACK_DELIVERY` ("queue") even while a notice of
+   * ours is still pending. For the `plannotator` tool, whose session is
+   * mid-turn when the notice is posted, so the notice is promoted inside that
+   * turn and a steer would push a late decision into a running turn instead.
+   */
+  alwaysQueue?: boolean;
 }): V2BridgeClient {
   const warn = input.warn ?? ((message: string) => console.error(message));
   const loggedUrls = new Set<string>();
@@ -781,7 +788,7 @@ export function createV2BridgeClient(input: {
         const delivered = await prompt({
           sessionID,
           text: joinTextParts(Array.isArray(body.parts) ? body.parts : []),
-          delivery: notice.pending() ? CO_PROMOTED_DELIVERY : FEEDBACK_DELIVERY,
+          delivery: notice.pending() && !input.alwaysQueue ? CO_PROMOTED_DELIVERY : FEEDBACK_DELIVERY,
         });
         // Admitted: the notice is no longer the row ahead of us, so any later
         // delivery on this client is a plain late arrival again.

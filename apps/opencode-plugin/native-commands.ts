@@ -141,7 +141,16 @@ export async function runNativeCommand(
   // `sessionID` is what lets the bridge put the session URL where the user can
   // actually see it. Without it (and on a host with no `session.synthetic`) a
   // remote review would only print its URL into a stream OpenCode discards.
-  const client = createV2BridgeClient({ ctx: deps.ctx, getAgents: deps.getAgents, sessionID });
+  // A tool launch always queues its decision: its session is mid-turn when
+  // the URL notice is posted (the tool call itself, or the root waiting on a
+  // subagent), so the notice is promoted inside that turn and never needs the
+  // co-promoting steer, which would push a late decision into a running turn.
+  const client = createV2BridgeClient({
+    ctx: deps.ctx,
+    getAgents: deps.getAgents,
+    sessionID,
+    ...(tool ? { alwaysQueue: true } : {}),
+  });
 
   // A slash command's own review is recorded like a tool launch, so the
   // tool's list/close cover it ("opened in this conversation").

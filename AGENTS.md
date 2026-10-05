@@ -770,7 +770,12 @@ review, gets its decision and lists or closes it; only `last` is refused from a
 subagent (`PLANNOTATOR_TOOL_SUBAGENT_LAST_TEXT`, the mod's wording), since it
 reads the main session's messages. Ask this session for such a review asks the
 root session. Not verified live: delivery to the root while it still waits on
-the subagent relies on the same `queue` delivery the slash commands use. No
+the subagent relies on `queue` delivery. Tool launches always queue their
+decision (`createV2BridgeClient`'s `alwaysQueue`), even while their session-URL
+notice is still a pending steer: the session is mid-turn when a tool launch
+posts that notice (the tool call itself, or the root waiting on a subagent), so
+the notice is promoted inside that turn, and the slash commands' co-promoting
+steer (#1515) would instead push a late decision into a running turn. No
 shell take-over: nothing in the OpenCode 2 plugin API can answer a shell call.
 
 **Session ids, list and close.** `OpenCodeLaunchRegistry` (one per plugin

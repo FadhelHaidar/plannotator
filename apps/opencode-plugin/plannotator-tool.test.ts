@@ -456,7 +456,11 @@ describe.skipIf(isWindows)("the tool through the real launch path (stub CLI)", (
     const olderId = sessionIdOf(older);
     const stopped = await runPlannotatorTool({ action: "close", session: olderId }, { sessionID: "ses_a" }, host.toolDeps);
     expect(stopped).toContain(`Closed notes.md (${olderId}): any unsent comments stay saved as a draft.`);
-    await waitFor(() => host.registry.openFor("ses_a").length === 0);
+    // The close hides it from the list at once; the stopped child exits a
+    // moment later, and only then is its exit logged. Wait for that line.
+    expect(host.registry.openFor("ses_a")).toHaveLength(0);
+    const closedLine = `The agent closed notes.md (${olderId})`;
+    await waitFor(() => errors.mock.calls.some((call) => String(call[0]).includes(closedLine)));
     const olderPort = portOf(older);
     await expect(fetch(`http://127.0.0.1:${olderPort}/nothing`)).rejects.toThrow();
     expect(host.prompts).toHaveLength(0);
