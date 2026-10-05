@@ -265,7 +265,7 @@ describe.if(hasDom)("annotate decision control", () => {
     expect(body.feedback).toBe(ANNOTATE_NO_FEEDBACK_SENTENCE);
     expect(body.annotations).toEqual([]);
     expect(body.codeAnnotations).toEqual([]);
-    // #1700: marked so a host can skip the agent turn without reading the sentence.
+    // #1701: marked so a host can skip the agent turn without reading the sentence.
     expect(body.nothingToSend).toBe(true);
   });
 

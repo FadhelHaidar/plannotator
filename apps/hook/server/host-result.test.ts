@@ -46,7 +46,7 @@ describe("annotateHostResult", () => {
     expect(last.message).not.toContain("{{");
   });
 
-  // #1700: the editor's Done posts the zero-state sentence as feedback and
+  // #1701: the editor's Done posts the zero-state sentence as feedback and
   // marks the body; that must not start a turn on either surface.
   test("a Done marked nothingToSend is a no-op even though feedback carries the sentence", () => {
     const sentence = "User reviewed the document and has no feedback.";

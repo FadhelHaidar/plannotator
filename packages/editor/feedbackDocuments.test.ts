@@ -246,7 +246,7 @@ describe('plain session with a linked document', () => {
   });
 });
 
-// #1700: the submit body's `annotations` drives the host's "N comments" and the
+// #1701: the submit body's `annotations` drives the host's "N comments" and the
 // feedback archive's counts; it used to be the open document's comments only.
 describe('collectSubmittedAnnotations', () => {
   test("a folder session submits every document's comments, each tagged with its document", () => {

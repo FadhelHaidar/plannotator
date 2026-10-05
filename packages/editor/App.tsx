@@ -4249,7 +4249,7 @@ const App: React.FC = () => {
           ...getFeedbackMessageScope(),
           // Done with nothing to send: `feedback` stays the legacy zero-state
           // sentence (CLI stdout and --json print it), and this marks it so a
-          // host that must not start an agent turn for it can tell (#1700).
+          // host that must not start an agent turn for it can tell (#1701).
           ...(isEmptyFeedbackSentinel(feedback) ? { nothingToSend: true } : {}),
         }),
       });

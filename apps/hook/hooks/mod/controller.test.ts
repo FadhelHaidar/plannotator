@@ -527,7 +527,7 @@ describe('a CLI older than the host result file', () => {
     expect(host.logs.some((line) => line.includes('b.md closed with no annotations'))).toBe(true)
   })
 
-  // #1700: what such a CLI prints for an annotate Done with nothing to send.
+  // #1701: what such a CLI prints for an annotate Done with nothing to send.
   test('its printed zero-feedback sentence starts no turn', async () => {
     const host = fakeHost()
     serveOnLaunch(host)
@@ -544,7 +544,7 @@ describe('a CLI older than the host result file', () => {
   })
 })
 
-// #1700, end to end over the record the CLI builds: the editor's Done posts the
+// #1701, end to end over the record the CLI builds: the editor's Done posts the
 // zero-state sentence as feedback, marked nothingToSend; the session must not
 // receive a "please address the annotation feedback" turn.
 describe('annotate Done with nothing to send (CLI record → mod)', () => {

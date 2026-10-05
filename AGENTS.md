@@ -375,7 +375,7 @@ or deliver those bytes; the editor additionally marks that body
 alongside empty `annotations`/`codeAnnotations` (`isNothingToSendFeedbackBody`,
 `packages/shared/annotate-decision.ts`), and `annotateHostResult` turns it into
 a `noop` record. The mod's `legacyResult` recognizes the two zero-state
-sentences printed by a CLI older than the result file (#1700). The submit
+sentences printed by a CLI older than the result file (#1701). The submit
 body's `annotations` carries every document's comments (folder sessions,
 linked documents, every message in multi-message annotate-last;
 `collectSubmittedAnnotations` in `packages/editor/feedbackDocuments.ts`), so
