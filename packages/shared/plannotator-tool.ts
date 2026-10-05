@@ -67,12 +67,12 @@ export interface PlannotatorToolInput {
 }
 
 export const PLANNOTATOR_TOOL_DESCRIPTION = [
-  'Open Plannotator, the browser review UI, for the user, and return at once. Also lists and closes the reviews you opened.',
+  'Open Plannotator, the browser review UI, for the user, and return at once. Also lists and closes the reviews opened in this conversation (by this tool or the user\'s /plannotator-* commands).',
   '- action "annotate": annotate a file (markdown, text, config, HTML), a folder, or a URL; `target` is required. `gate: true` adds an Approve button for an explicit sign-off. `options.markdown: true` converts HTML or a URL to markdown first.',
   '- action "review": review code changes; `target` is an optional repository directory or a GitHub/GitLab/Bitbucket pull request URL (default: the current repository). `options.base` sets the compare branch or ref (git only).',
   '- action "last": annotate your own last assistant message; no target.',
-  '- action "list": the reviews you opened in this conversation that are still open, one line each: session id, what it shows, url, age, state, and how many comments the reviewer has not sent yet.',
-  '- action "close": close a review you opened and no longer need; `session` is its id (pn-...) or "all". Nothing is sent to you, and the reviewer\'s unsent comments are kept for when it is reopened. Plan reviews are not closed this way: they end with the reviewer\'s decision.',
+  '- action "list": the reviews opened in this conversation that are still open, one line each: session id, what it shows, url, age, state, and how many comments the reviewer has not sent yet.',
+  '- action "close": close a review opened in this conversation that is no longer needed; `session` is its id (pn-...) or "all". Nothing is sent to you, and the reviewer\'s unsent comments stay saved as a draft. Plan reviews are not closed this way: they end with the reviewer\'s decision.',
   'Opening only opens the page and names its session id (pn-...). The reviewer\'s feedback arrives later as a message from the plannotator plugin that names the same id, so end your turn after opening and wait for it. Use this tool instead of running the `plannotator` CLI. Plan review is not done with this tool: it opens by itself when you exit plan mode.',
 ].join('\n')
 
@@ -105,7 +105,7 @@ export const PLANNOTATOR_TOOL_INPUT_SCHEMA = {
     },
     session: {
       type: 'string',
-      description: 'close: the session id (pn-...) of a review you opened, or "all". reply: the session id.',
+      description: 'close: the session id (pn-...) of a review opened in this conversation, or "all". reply: the session id.',
     },
     comment: {
       type: 'string',
@@ -188,7 +188,7 @@ export function parsePlannotatorToolInput(value: unknown): PlannotatorToolParse 
   }
   const action = value.action
   if (typeof action !== 'string' || !ACTIONS.includes(action as PlannotatorToolAction)) {
-    return fail('action must be "annotate", "review", "last", "list" or "close"')
+    return fail('action must be "annotate", "review", "last", "list", "close" or "reply"')
   }
   const input: PlannotatorToolInput = { action: action as PlannotatorToolAction }
   const opens = isPlannotatorToolOpenAction(input.action)
@@ -397,9 +397,9 @@ export type PlannotatorCloseOutcome =
   | { id: string; subject: string; closed: false; reason: 'plan' | 'decided' | 'failed'; detail?: string }
 
 function savedText(unsent: number | null): string {
-  if (unsent === null) return 'any unsent comments are kept in its draft'
+  if (unsent === null) return 'any unsent comments stay saved as a draft'
   if (unsent === 0) return 'no unsent comments'
-  return `${unsent} unsent ${unsent === 1 ? 'comment' : 'comments'} saved for when it is reopened`
+  return `${unsent} unsent ${unsent === 1 ? 'comment' : 'comments'} saved as a draft`
 }
 
 /** `close`'s result. Nothing is sent to the agent later for a review it closed. */

@@ -7456,7 +7456,7 @@ const App: React.FC = () => {
           }
           subtitle={
             submitted === 'exited' && agentClosed
-              ? agentClosedSubtitle(agentClosed.unsentAnnotations)
+              ? agentClosedSubtitle(agentClosed.unsentAnnotations, 'document')
             : submitted === 'exited'
               ? 'Annotation session closed without feedback.'
               : archive.archiveMode

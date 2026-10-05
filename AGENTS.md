@@ -431,6 +431,24 @@ released 0.27.25 and 0.27.10 binaries as processes:
   mod's bridge stops, and Ask AI offers only its providers.
 - A CLI before 0.19.24 writes no ready file: commands wait their full 45 s /
   15 s and say "Starting…", and decisions still arrive at exit.
+- The tool's `list` and `close` (contract v2): a CLI without
+  `/api/host/status` lists its reviews with `unsent: unknown`. `close` counts as
+  closed ONLY a JSON answer with a numeric `unsentAnnotations`
+  (`classifyHostCloseAnswer` in `controller.ts`): 0.24–0.28.3 answer a JSON
+  `404` and 0.19.24–0.23.x (before the `/api/*` 404 guard, #748) their app page
+  with `200 text/html`, and both read as "an older Plannotator", never as
+  closed. Only then does the mod TERM the process (`STOP_SCRIPT`), and only if
+  the launch's `result.json` / `exit` is still absent and the pid still names a
+  `plannotator` process (`ps -o args=`); nothing answering on the port (a stale
+  or reused pid after a reboot) is never signalled, and the close reports
+  failure. After a TERM close, a decision record without `closedBy` (or an
+  older CLI's exit 0) is the reviewer's and is delivered as usual. **Remaining
+  window:** these CLIs publish a decision only after a 1.5 s post-decision
+  sleep and nothing on their HTTP surface says a decision is pending, so a
+  decision the reviewer makes in the ~1.5 s before the TERM is lost (and those
+  CLIs had already deleted the draft on submit; the feedback archive record
+  survives where it is on). A CLI with the endpoint has no such window: its
+  close is refused with `409` once the reviewer decided.
 
 **Commands.** `/plannotator-review`, `/plannotator-annotate` and
 `/plannotator-last` keep their names (spec open question 7, conservative): when
@@ -524,21 +542,30 @@ launch id (`sessionIdOf` in `controller.ts`; unique among the session's open
 launches). The tool result's first line is `Session: pn-3f2a9c`, and every
 decision turn's first line names it (`plannotatorDecisionHeading`:
 `Plannotator: notes.md (pn-3f2a9c) — Feedback · 3 comments.`); slash-command
-output is unchanged. `action: "list"` reports the reviews THIS Claude session
-opened (the launch store is already per session id; the global `sessions/`
-registry is never read): id, kind, subject, url, age, state and `unsent: N` from
-the server's `GET /api/host/status` (`unknown` for an older CLI).
+output is unchanged. `action: "list"` reports the reviews opened in THIS Claude
+session, by the tool or by the user's `/plannotator-*` commands (the launch
+store is already per session id; the global `sessions/` registry is never
+read): id, kind, subject, url, age, state and `unsent: N` from the server's
+`GET /api/host/status` (`unknown` for an older CLI). `unsent` counts only the
+reviewer's own draft comments (`countUnsentDraftComments`: entries without a
+`source`, so review-agent, WebMCP and linter findings are not counted, plus
+code review's PR description and PR comment notes).
 `action: "close"` takes `session: "pn-…"` or `"all"` and calls
 `POST /api/host/close` (see "Host session control" under Server API): the
 reviewer's Close, marked `closedBy: "agent"`, with the draft KEPT and the open
 tab told over the external-annotation SSE (`session-closed`, which the editor
 and review app show as "Closed by the Agent" with the unsent count). The result
-reports how many unsent comments were saved; nothing is delivered for that
-review afterwards (the launch is marked `closedByAgent` and settles with one log
-line). Plan reviews are listed but never closed (`close all` skips them, a plan
-id is refused). An id this session did not open is "not found". Against a CLI
-without the endpoint (`404`) the mod sends the CLI `TERM` (`stopArgv`), which
-ends the server without a decision and never deletes a draft. The contract also
+reports how many unsent comments stay saved as a draft. The copy promises no
+restore beyond each surface's own draft key (`agentClosedSubtitle`: annotate
+drafts come back for the same unchanged document, code review drafts for the
+same changes; path-keyed annotate drafts are #1710). Nothing is delivered for
+that review afterwards (the launch is marked `closedByAgent` and settles with
+one log line), except a decision record WITHOUT `closedBy`, which is the
+reviewer's and is delivered. Plan reviews are listed but never closed (`close
+all` skips them, a plan id is refused). An id this session did not open is "not
+found". Against an older CLI the mod falls back to `TERM` under the checks
+described in "Version skew" above (`stopArgv`), which ends the server without a
+decision and never deletes a draft. The contract also
 accepts `target` as a list for annotate (validated, duplicates dropped, a
 one-item list is the plain call) and reserves `action: "reply"` (`session`,
 `comment`, `text`, `resolve`) for live comments; until bundles and live
@@ -1449,7 +1476,12 @@ loopback Host naming the server's port (`403`), no `Origin` (`403`), and
 `Authorization: Bearer <token>` (`401`), the launch's `PLANNOTATOR_SESSION_BRIDGE_TOKEN`
 (Bun default; servers also take `hostControlToken`). Without a token the paths answer
 `404`, which a host reads as an older Plannotator; they are off in remote mode, and
-`--tailscale` discards the env token. Close settles the decision as `exit` with
+`--tailscale` discards the env token. Unlike the pull bridge they still answer under
+`PLANNOTATOR_AI=disabled` (closing a review is not an AI feature). Once a session is
+decided (a host close included), the review servers refuse a late `/api/feedback` or
+`/api/exit` with `409` (both runtimes, like annotate), so a tab still open after the
+close neither deletes the kept draft nor gets an ok for feedback nobody receives.
+Close settles the decision as `exit` with
 `closedBy: "agent"` and `unsentAnnotations` (no draft delete, no feedback-archive
 record: the reviewer decided nothing), broadcasts `{ type: "session-closed", by:
 "agent", unsentAnnotations }` on the external-annotation stream (`broadcast` on both

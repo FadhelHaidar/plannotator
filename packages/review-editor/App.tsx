@@ -5936,7 +5936,7 @@ const ReviewApp: React.FC = () => {
           }
           subtitle={
             submitted === 'exited' && agentClosed
-              ? agentClosedSubtitle(agentClosed.unsentAnnotations)
+              ? agentClosedSubtitle(agentClosed.unsentAnnotations, 'changes')
             : submitted === 'exited'
               ? 'Review session closed without feedback.'
               : platformMode
