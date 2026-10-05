@@ -33,44 +33,4 @@ describe("OpenCode package entrypoints", () => {
       "./skills/plannotator/SKILL.md",
     );
   });
-
-  // `bun install` in this monorepo runs workspace postinstalls, which used to
-  // copy the stubs into the DEVELOPER's real ~/.config/opencode/commands.
-  // Failure caught: the script writing anywhere when it is not an installed
-  // package, or no longer writing when it is one.
-  test.skipIf(process.platform === "win32")("postinstall writes only from an installed package", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "plannotator-oc-postinstall-"));
-    try {
-      const layOut = (dir: string) => {
-        mkdirSync(path.join(dir, "commands"), { recursive: true });
-        mkdirSync(path.join(dir, "skills", "plannotator"), { recursive: true });
-        writeFileSync(path.join(dir, "commands", "plannotator-review.md"), "stub\n");
-        writeFileSync(path.join(dir, "skills", "plannotator", "SKILL.md"), "skill\n");
-      };
-      const run = (cwd: string, config: string) => {
-        const result = spawnSync("sh", ["-c", packageJson.scripts.postinstall], {
-          cwd,
-          // A sandboxed config dir; HOME too, in case the fallback is taken.
-          env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: path.join(root, "home"), XDG_CONFIG_HOME: config },
-          encoding: "utf-8",
-        });
-        expect(result.status).toBe(0);
-      };
-
-      const workspace = path.join(root, "repo", "apps", "opencode-plugin");
-      layOut(workspace);
-      const workspaceConfig = path.join(root, "workspace-config");
-      run(workspace, workspaceConfig);
-      expect(existsSync(workspaceConfig)).toBe(false);
-
-      const installed = path.join(root, "prefix", "node_modules", "@plannotator", "opencode");
-      layOut(installed);
-      const installedConfig = path.join(root, "installed-config");
-      run(installed, installedConfig);
-      expect(existsSync(path.join(installedConfig, "opencode", "commands", "plannotator-review.md"))).toBe(true);
-      expect(existsSync(path.join(installedConfig, "opencode", "skills", "plannotator", "SKILL.md"))).toBe(true);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
 });

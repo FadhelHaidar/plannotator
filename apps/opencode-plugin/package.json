@@ -36,12 +36,11 @@
     "plannotator.html",
     "review-editor.html"
   ],
-  "//postinstall": "postinstall copies the command stubs and the knowledge skill into the user's OpenCode config, so it only runs for an INSTALLED package (a path under node_modules). A `bun install` in this monorepo runs workspace postinstalls from apps/opencode-plugin and must never write into the developer's real ~/.config/opencode.",
   "scripts": {
     "build": "bun run build:skill && mkdir -p dist && cp ../hook/dist/index.html ./plannotator.html && cp ../review/dist/index.html ./review-editor.html && bun build embedded.ts --outfile dist/embedded.js --target bun --external @opencode-ai/plugin && bun build index.ts --outfile dist/index.js --target node && bun build server.ts --outfile dist/server.js --target node --external @opencode/plugin",
     "build:skill": "rm -rf skills && mkdir -p skills && cp -R ../skills/core/plannotator skills/plannotator",
     "smoke:v2": "bun fixtures/v2-installed-smoke.ts",
-    "postinstall": "case \"$PWD\" in */node_modules/*) ;; *) exit 0 ;; esac; mkdir -p ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/commands && cp ./commands/*.md ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/commands/ 2>/dev/null || true; mkdir -p ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills/plannotator && cp ./skills/plannotator/SKILL.md ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills/plannotator/ 2>/dev/null || true",
+    "postinstall": "mkdir -p ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/commands && cp ./commands/*.md ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/commands/ 2>/dev/null || true; mkdir -p ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills/plannotator && cp ./skills/plannotator/SKILL.md ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills/plannotator/ 2>/dev/null || true",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
