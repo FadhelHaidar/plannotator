@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { resolveClaudeCodeMod } from '@plannotator/shared/config'
-import { resolveClaudeModEnabled } from './enabled'
+import { AGENT_TOOL_DEFAULT as SHARED_AGENT_TOOL_DEFAULT, resolveAgentTool, resolveClaudeCodeMod } from '@plannotator/shared/config'
+import { AGENT_TOOL_DEFAULT, resolveAgentToolEnabled, resolveClaudeModEnabled } from './enabled'
 
 // The mod cannot import packages/shared, so it mirrors resolveClaudeCodeMod.
 // The failure this guards: the two drift, and the CLI docs/settings say the
@@ -35,5 +35,30 @@ describe('on/off knob', () => {
     expect(resolveClaudeModEnabled(undefined, '{"claudeCodeMod":"0"}')).toBe(false)
     expect(resolveClaudeModEnabled('1', '{"claudeCodeMod":false}')).toBe(true)
     expect(resolveClaudeModEnabled('0', '{"claudeCodeMod":true}')).toBe(false)
+  })
+})
+
+// Same mirror for the `plannotator` tool switch: the failure is the mod
+// registering the tool for a user who turned it off (or the reverse), or the
+// owner flipping the default in one place only.
+describe('agent tool switch', () => {
+  const envs = [undefined, '', '1', 'true', 'ON', ' on ', '0', 'false', 'off', 'disabled', 'yes', 'garbage']
+  const configs: unknown[] = [undefined, true, false, 'true', 'false', '1', '0', 'yes', 1, null]
+
+  test('the mod and packages/shared resolve every combination the same way', () => {
+    for (const env of envs) {
+      for (const value of configs) {
+        const config = value === undefined ? {} : { agentTool: value }
+        const shared = resolveAgentTool(config as never, env === undefined ? {} : { PLANNOTATOR_AGENT_TOOL: env })
+        expect([env, value, resolveAgentToolEnabled(env, JSON.stringify(config))]).toEqual([env, value, shared])
+      }
+    }
+    expect(resolveAgentToolEnabled(undefined, '{ not json')).toBe(resolveAgentTool({}, {}))
+    expect(AGENT_TOOL_DEFAULT).toBe(SHARED_AGENT_TOOL_DEFAULT)
+  })
+
+  test('agentTool is its own key: it never reads claudeCodeMod, and the mod switch never reads agentTool', () => {
+    expect(resolveAgentToolEnabled(undefined, '{"claudeCodeMod":false}')).toBe(AGENT_TOOL_DEFAULT)
+    expect(resolveClaudeModEnabled(undefined, '{"agentTool":false}')).toBe(true)
   })
 })

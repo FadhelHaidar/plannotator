@@ -60,7 +60,6 @@ import {
   plannotatorToolTargets,
   plannotatorUnknownSessionText,
   PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT,
-  PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT,
   scriptOnlyAnnotateFlag,
   scriptOnlyAnnotateFlagText,
   type PlannotatorCloseOutcome,
@@ -442,9 +441,6 @@ export class PlannotatorMod {
         return { text: await this.listText() }
       case 'close':
         return this.closeSessions(call.session as string)
-      case 'reply':
-        // Reserved for live comments: no comment is ever delivered yet.
-        return { deny: PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT }
       case 'annotate':
       case 'review':
       case 'last':

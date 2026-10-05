@@ -22,3 +22,8 @@ afterAll(() => {
 // Keep the archive off by default, even when enabled in the contributor's shell.
 // Archive tests opt back in inside their bodies and restore it in afterEach.
 process.env.PLANNOTATOR_FEEDBACK_HISTORY = "0";
+
+// The agent tool switch decides whether the plannotator tool is registered at
+// all; a contributor who turned it off in their shell must not fail the tool
+// tests. Tests of the switch set it inside their bodies.
+delete process.env.PLANNOTATOR_AGENT_TOOL;

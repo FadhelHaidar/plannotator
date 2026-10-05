@@ -12,6 +12,12 @@
  * extension-only (npm) install still gets the skill and a CLI + extension
  * install loads exactly one copy: the installer's, which carries the user's
  * model-invocation choice.
+ *
+ * The bundled copy itself is user-invoked only: vendor.sh adds
+ * `disable-model-invocation: true` to its frontmatter, so an npm-only install
+ * keeps the #842 promise (no Plannotator skill in Pi's system prompt) while
+ * `/skill:plannotator` still loads it. The model learns the tool from the
+ * `plannotator` tool's own description.
  */
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";

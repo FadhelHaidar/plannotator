@@ -197,6 +197,8 @@ On OpenCode 2 the plugin also gives the agent a `plannotator` tool, in every wor
 
 Plan review still goes through `submit_plan`. The tool needs the CLI, like the slash commands. OpenCode 1 does not get the tool.
 
+To keep the tool out of the agent's tool list, set `PLANNOTATOR_AGENT_TOOL=0` or add `{ "agentTool": false }` to `~/.plannotator/config.json` (the environment variable wins). The slash commands are unchanged. OpenCode reads the setting when it starts, so restart OpenCode after you change it.
+
 ## Ask this session
 
 On OpenCode 2, Ask AI in code review, annotate and `/plannotator-last` is answered by your OpenCode session ("Ask this session"), and it is the only Ask AI option there. In plan review the session is waiting for your decision, so it gives a quick answer from its context only. OpenCode 1 and remote sessions use a separate provider you pick. See [Ask this session](/docs/guides/ai-features/#ask-this-session).

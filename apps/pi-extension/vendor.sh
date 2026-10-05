@@ -173,6 +173,15 @@ done
 # comment makes the skill unparseable to every loader that reads it. The copy
 # is kept honest the same way plannotator.html and call-flow-runtime/ are —
 # it is gitignored, so the only copy that can ever exist is this one.
+#
+# The copy is user-invoked only (`disable-model-invocation: true`, added to its
+# frontmatter here; the source stays model-invocable for the hosts whose
+# installer asks the user, #1377). An npm-only Pi install never answered that
+# question, so the #842 promise holds: no Plannotator skill in Pi's system
+# prompt unless the user chose it. `/skill:plannotator` still loads it, and the
+# `plannotator` tool's own description is what the model sees.
 rm -rf skills
 mkdir -p skills
 cp -R ../skills/core/plannotator skills/plannotator
+awk 'NR == 1 && $0 != "---" { exit 1 } NR == 2 && $0 !~ /^name: / { exit 1 } { print } NR == 2 { print "disable-model-invocation: true" }' \
+  ../skills/core/plannotator/SKILL.md > skills/plannotator/SKILL.md

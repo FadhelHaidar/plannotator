@@ -30,9 +30,13 @@
  * - The `plannotator` tool (`$.tool.register`, tool.ts): when Claude itself is
  *   asked to open something in Plannotator it calls this tool instead of the
  *   CLI; the call goes through the same detached launch and returns at once.
- *   A main-loop Bash call that runs the CLI in a form the tool can represent
- *   (`plannotator annotate|review|last ...`, take-over.ts) is answered the
- *   same way instead of running.
+ *   Not registered when the user turned the agent tool off
+ *   (`PLANNOTATOR_AGENT_TOOL=0` / `{ "agentTool": false }`, read once with the
+ *   mod switch). A main-loop Bash call that runs the CLI in a form the tool
+ *   can represent (`plannotator annotate|review|last ...`, take-over.ts) is
+ *   answered the same way instead of running, with or without the tool: the
+ *   take-over adds nothing to Claude's context, it only changes what a
+ *   command Claude already chose to run does.
  * - "Ask this session": each launched server gets a pull-bridge token; the
  *   mod polls it and runs the reviewer's questions as turns (bridge.ts).
  * - `PLANNOTATOR_SESSION_TAG=claude-code:<session id>` in the environment
@@ -44,7 +48,7 @@
  */
 
 import { PlannotatorMod } from './controller'
-import { resolveClaudeModEnabled } from './enabled'
+import { resolveAgentToolEnabled, resolveClaudeModEnabled } from './enabled'
 import type { Host } from './host'
 import { COMMANDS, dataDirOf, isModCommand, waitArgv } from './launch'
 import { PLAN_TOOL } from './plan'
@@ -120,6 +124,8 @@ function hostOf($: Engine, debugPath: string | null): Host {
 interface Allowed {
   dataDir: string
   debugPath: string | null
+  /** Register Claude's `plannotator` tool (the agent tool switch, on by default). */
+  agentTool: boolean
 }
 
 // One plugin instance per Claude Code process.
@@ -170,12 +176,17 @@ async function resolveAllowed($: Engine, e: { isInteractive?: unknown }): Promis
   })
   if (!dataDir) return null
   // On by default; nothing happens when the user turned the mod off.
-  const configText = await $.fs.read(`${dataDir}/config.json`).catch(() => null)
-  if (!resolveClaudeModEnabled(await $.env.get('PLANNOTATOR_CLAUDE_MOD'), typeof configText === 'string' ? configText : null)) {
+  const read = await $.fs.read(`${dataDir}/config.json`).catch(() => null)
+  const configText = typeof read === 'string' ? read : null
+  if (!resolveClaudeModEnabled(await $.env.get('PLANNOTATOR_CLAUDE_MOD'), configText)) {
     return null
   }
   const debug = await $.env.get('PLANNOTATOR_MOD_DEBUG')
-  return { dataDir, debugPath: debug && debug !== '0' ? `${dataDir}/claude-code-mod/debug.log` : null }
+  return {
+    dataDir,
+    debugPath: debug && debug !== '0' ? `${dataDir}/claude-code-mod/debug.log` : null,
+    agentTool: resolveAgentToolEnabled(await $.env.get('PLANNOTATOR_AGENT_TOOL'), configText),
+  }
 }
 
 /** Register the slash commands no one holds (the user's own skills keep theirs; command.run answers them). */
@@ -229,7 +240,9 @@ export function register(on: On) {
     const instance = await currentMod($)
     if (!instance) return result
     await registerCommands($)
-    await registerTool($)
+    // Decided once per process, here: the tool list is part of Claude's
+    // prompt, so it never changes under a running session.
+    if (allowed.agentTool) await registerTool($)
     return result
   })
 

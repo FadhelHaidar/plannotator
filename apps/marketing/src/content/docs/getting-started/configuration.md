@@ -20,6 +20,7 @@ Plannotator is configured through environment variables, hook/plugin configurati
 | `PLANNOTATOR_SHARE` | enabled | Set to `disabled` to turn off URL sharing entirely. Can also be set via `~/.plannotator/config.json` (`{ "share": "disabled" }`). |
 | `PLANNOTATOR_SHARE_URL` | `https://share.plannotator.ai` | Point share links at a self-hosted portal. |
 | `PLANNOTATOR_CLAUDE_MOD` | on | Set to `0` to turn off the [Plannotator mod](/docs/guides/claude-code/#the-plannotator-mod) for Claude Code and use the classic hook, where Claude waits for your decision. Can also be set via `~/.plannotator/config.json` (`{ "claudeCodeMod": false }`). |
+| `PLANNOTATOR_AGENT_TOOL` | on | Set to `0` to keep the `plannotator` tool out of the agent's tool list on Pi, OpenCode 2 and Claude Code (the slash commands are unchanged). Read when a session starts. Can also be set via `~/.plannotator/config.json` (`{ "agentTool": false }`). |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Respected by the install script when placing hooks. |
 
 See the [environment variables reference](/docs/reference/environment-variables/) for full details, port resolution order, and examples.

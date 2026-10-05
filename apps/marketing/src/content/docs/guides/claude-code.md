@@ -38,6 +38,8 @@ Set `PLANNOTATOR_CLAUDE_MOD=0` in the shell that starts Claude Code (or in the `
 
 The environment variable wins over the config file. Claude Code reads the setting when it starts, so restart Claude Code after you change it. With the mod off, the classic hook and the slash command skills work as described below.
 
+To keep only the `plannotator` tool out of Claude's tool list and leave the rest of the mod on, set `PLANNOTATOR_AGENT_TOOL=0` or add `{ "agentTool": false }` to `~/.plannotator/config.json`. The slash commands, plan review, Ask this session, and Bash `plannotator` commands that Claude runs work as before. Restart Claude Code after you change it.
+
 ## The classic hook
 
 Without the mod, Plannotator uses Claude Code's hooks system. When Claude calls `ExitPlanMode`, a `PermissionRequest` hook intercepts the call and opens the Plannotator UI.

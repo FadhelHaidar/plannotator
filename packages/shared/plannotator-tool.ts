@@ -34,9 +34,8 @@
  * CLI's arguments, which open a bundle when every one is an existing file).
  * A host whose CLI predates bundles recognizes its refusal
  * (`isOlderCliBundleRefusal`) and answers
- * `PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT`. `reply` (with `comment`, `text`,
- * `resolve`) is reserved for live comments and validated, but no host answers
- * it yet (`PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT`).
+ * `PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT`. Replying to a single comment is
+ * not part of the contract yet: it comes back with the comment loop.
  *
  * Pure and dependency-free: everything below the CONTRACT marker is copied
  * byte for byte into the Claude Code mod.
@@ -46,7 +45,7 @@
 
 export const PLANNOTATOR_TOOL_NAME = 'plannotator'
 
-export type PlannotatorToolAction = 'annotate' | 'review' | 'last' | 'list' | 'close' | 'reply'
+export type PlannotatorToolAction = 'annotate' | 'review' | 'last' | 'list' | 'close'
 
 /** The actions that open a review page. */
 export type PlannotatorToolOpenAction = 'annotate' | 'review' | 'last'
@@ -62,14 +61,8 @@ export interface PlannotatorToolInput {
   target?: string | string[]
   gate?: boolean
   options?: { base?: string; markdown?: boolean }
-  /** close: a session id (`pn-` + 6 hex, as the results name it) or "all". reply: a session id. */
+  /** close: a session id (`pn-` + 6 hex, as the results name it) or "all". */
   session?: string
-  /** reply: the comment id the comment turn named (`c3`). Reserved: no host answers replies yet. */
-  comment?: string
-  /** reply: the answer shown under the comment. */
-  text?: string
-  /** reply: also mark the thread settled. */
-  resolve?: boolean
 }
 
 export const PLANNOTATOR_TOOL_DESCRIPTION = [
@@ -87,7 +80,7 @@ export const PLANNOTATOR_TOOL_INPUT_SCHEMA = {
   properties: {
     action: {
       type: 'string',
-      enum: ['annotate', 'review', 'last', 'list', 'close', 'reply'],
+      enum: ['annotate', 'review', 'last', 'list', 'close'],
       description: 'What to do: open a file/folder/URL to annotate, code changes or a PR to review, or your last message; list your open reviews; close one.',
     },
     target: {
@@ -111,19 +104,7 @@ export const PLANNOTATOR_TOOL_INPUT_SCHEMA = {
     },
     session: {
       type: 'string',
-      description: 'close: the session id (pn-...) of a review opened in this conversation, or "all". reply: the session id.',
-    },
-    comment: {
-      type: 'string',
-      description: 'reply only: the comment id named in the reviewer\'s comment message.',
-    },
-    text: {
-      type: 'string',
-      description: 'reply only: your answer to the comment.',
-    },
-    resolve: {
-      type: 'boolean',
-      description: 'reply only: also mark the comment thread resolved.',
+      description: 'close: the session id (pn-...) of a review opened in this conversation, or "all".',
     },
   },
   required: ['action'],
@@ -132,8 +113,6 @@ export const PLANNOTATOR_TOOL_INPUT_SCHEMA = {
 
 /** Longest target or base accepted; a real path or URL is far shorter. */
 export const PLANNOTATOR_TOOL_MAX_TEXT = 4096
-/** Longest reply text accepted. */
-export const PLANNOTATOR_TOOL_MAX_REPLY = 32 * 1024
 
 /**
  * A session id as every host names it: `pn-` and six lowercase hex digits, a
@@ -143,7 +122,6 @@ export const PLANNOTATOR_TOOL_MAX_REPLY = 32 * 1024
 export const PLANNOTATOR_SESSION_ID_PREFIX = 'pn-'
 
 const SESSION_ID = /^(?:pn-)?([0-9a-f]{6})$/i
-const COMMENT_ID = /^c[1-9][0-9]{0,6}$/
 
 /** `pn-3f2a9c` from an id the agent typed (`pn-3F2A9C`, `3f2a9c`), or null when it is not one. */
 export function normalizePlannotatorSessionId(value: string): string | null {
@@ -156,9 +134,9 @@ export function plannotatorSessionId(hex6: string): string {
   return `${PLANNOTATOR_SESSION_ID_PREFIX}${hex6.toLowerCase()}`
 }
 
-const TOOL_KEYS = ['action', 'target', 'gate', 'options', 'session', 'comment', 'text', 'resolve']
+const TOOL_KEYS = ['action', 'target', 'gate', 'options', 'session']
 const OPTION_KEYS = ['base', 'markdown']
-const ACTIONS: readonly PlannotatorToolAction[] = ['annotate', 'review', 'last', 'list', 'close', 'reply']
+const ACTIONS: readonly PlannotatorToolAction[] = ['annotate', 'review', 'last', 'list', 'close']
 
 export type PlannotatorToolParse = { ok: true; input: PlannotatorToolInput } | { ok: false; error: string }
 
@@ -194,7 +172,7 @@ export function parsePlannotatorToolInput(value: unknown): PlannotatorToolParse 
   }
   const action = value.action
   if (typeof action !== 'string' || !ACTIONS.includes(action as PlannotatorToolAction)) {
-    return fail('action must be "annotate", "review", "last", "list", "close" or "reply"')
+    return fail('action must be "annotate", "review", "last", "list" or "close"')
   }
   const input: PlannotatorToolInput = { action: action as PlannotatorToolAction }
   const opens = isPlannotatorToolOpenAction(input.action)
@@ -250,38 +228,17 @@ export function parsePlannotatorToolInput(value: unknown): PlannotatorToolParse 
   }
 
   if (value.session !== undefined) {
-    if (action !== 'close' && action !== 'reply') return fail('session is for actions "close" and "reply" only')
+    if (action !== 'close') return fail('session is for action "close" only')
     if (typeof value.session !== 'string') return fail('session must be a string')
     if (action === 'close' && value.session.trim().toLowerCase() === 'all') {
       input.session = 'all'
     } else {
       const id = normalizePlannotatorSessionId(value.session)
-      if (!id) return fail(`session must be a session id such as "pn-3f2a9c"${action === 'close' ? ' or "all"' : ''}`)
+      if (!id) return fail('session must be a session id such as "pn-3f2a9c" or "all"')
       input.session = id
     }
-  } else if (action === 'close' || action === 'reply') {
-    return fail(`action "${action}" needs a session (the pn-... id ${action === 'close' ? 'a result named, or "all"' : 'the comment message named'})`)
-  }
-
-  if (action !== 'reply') {
-    if (value.comment !== undefined) return fail('comment is for action "reply" only')
-    if (value.text !== undefined) return fail('text is for action "reply" only')
-    if (value.resolve !== undefined) {
-      if (typeof value.resolve !== 'boolean') return fail('resolve must be true or false')
-      if (value.resolve) return fail('resolve is for action "reply" only')
-    }
-  } else {
-    if (typeof value.comment !== 'string' || !COMMENT_ID.test(value.comment.trim())) {
-      return fail('action "reply" needs comment, the id the comment message named (such as "c3")')
-    }
-    input.comment = value.comment.trim()
-    if (typeof value.text !== 'string' || value.text.trim() === '') return fail('action "reply" needs text, your answer')
-    if (value.text.length > PLANNOTATOR_TOOL_MAX_REPLY) return fail(`text is longer than ${PLANNOTATOR_TOOL_MAX_REPLY} characters`)
-    input.text = value.text
-    if (value.resolve !== undefined) {
-      if (typeof value.resolve !== 'boolean') return fail('resolve must be true or false')
-      if (value.resolve) input.resolve = true
-    }
+  } else if (action === 'close') {
+    return fail('action "close" needs a session (the pn-... id a result named, or "all")')
   }
 
   return { ok: true, input }
@@ -298,7 +255,7 @@ export function plannotatorToolTargets(input: PlannotatorToolInput): string[] {
  * <these>`), one argument per element, never re-split. A list of annotate
  * targets passes a bare word as `./word`, so the CLI reads every entry as a
  * path. `last` has none, and neither do the actions that open nothing (list,
- * close, reply).
+ * close).
  */
 export function plannotatorToolArgs(input: PlannotatorToolInput): string[] {
   switch (input.action) {
@@ -321,7 +278,6 @@ export function plannotatorToolArgs(input: PlannotatorToolInput): string[] {
     case 'last':
     case 'list':
     case 'close':
-    case 'reply':
       return []
   }
 }
@@ -407,10 +363,6 @@ export function looksLikeFilePath(word: string): boolean {
   return /\.[A-Za-z0-9]{1,12}$/.test(word)
 }
 
-/** What a host answers `reply` with until it delivers single comments. */
-export const PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT =
-  'Plannotator did not take the reply: this Plannotator does not send single comments yet, so there is no comment to answer. The reviewer\'s feedback arrives as one message when they send it.'
-
 /** One open review, as `list` reports it. */
 export interface PlannotatorSessionSummary {
   id: string
@@ -487,7 +439,7 @@ export function plannotatorToolCloseText(outcomes: readonly PlannotatorCloseOutc
   return closedAny ? [...lines, 'Nothing more arrives for a review you closed.'].join('\n') : lines.join('\n')
 }
 
-/** `close` or `reply` naming a session this conversation did not open (or that already ended). */
+/** `close` naming a session this conversation did not open (or that already ended). */
 export function plannotatorUnknownSessionText(id: string): string {
   return `No open Plannotator review ${id} from this conversation. Call the plannotator tool with action "list" to see yours.`
 }

@@ -191,6 +191,29 @@ describe('register', () => {
     expect(w.tools).toEqual([])
   })
 
+  // The agent tool switch turns off ONLY the tool: a user who wants it out of
+  // Claude's tool list keeps the slash commands, non-blocking plan review and
+  // the Bash take-over (which adds nothing to Claude's context).
+  test('agentTool off in config.json: no plannotator tool; plan review, commands and the Bash take-over still run', async ($: any, on: any) => {
+    const files = new Map<string, string>([['/home/me/.plannotator', ''], ['/home/me/.plannotator/config.json', '{"agentTool": false}']])
+    const w = world(on, { files })
+    const ran: string[] = []
+    on('tool.call', ($: any, e: any) => {
+      ran.push(e.tool)
+      return { result: 'the classic flow ran' }
+    })
+    await $.session.start(SESSION)
+
+    expect(w.tools).toEqual([])
+    const plan = await $.tool.call({ tool: 'ExitPlanMode', plan: '# Plan\n\n1. Ship.\n' })
+    expect(plan.deny).toContain('NOT approved')
+    const command = await $.command.run({ command: 'plannotator-review', args: '', origin: { kind: 'composer' } })
+    expect(command.text).toContain('http://localhost:4321')
+    const bash = await $.tool.call({ tool: 'Bash', command: 'plannotator annotate /work/a.md' })
+    expect(bash.result.stdout).toContain('http://localhost:4321')
+    expect(ran).toEqual([])
+  })
+
   // Version skew: the plugin updates from main, the binary on its own. A CLI
   // with no claude-mod-plan (0.27.25 prints this) must leave plan review to the
   // classic flow, every time, instead of failing the call.

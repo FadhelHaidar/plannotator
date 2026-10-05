@@ -350,7 +350,6 @@ interface PendingPlanReview {
 	tracked?: PiOpenReview;
 }
 
-/** Host seams for tests. Production passes nothing. */
 /**
  * `defaultActive: false` for `pi.registerTool`, spread in rather than written
  * as a literal key because the Pi floor's types (0.79.1) do not declare it.
@@ -359,6 +358,7 @@ interface PendingPlanReview {
  */
 const NOT_ACTIVE_ON_REGISTRATION = { defaultActive: false } as const;
 
+/** Host seams for tests. Production passes nothing. */
 export interface PlannotatorExtensionDeps {
 	startPlanReview?: typeof startPlanReviewBrowserSession;
 	hasPlanBrowserHtml?: () => boolean;

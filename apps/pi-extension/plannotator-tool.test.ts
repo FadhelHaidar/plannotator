@@ -32,7 +32,6 @@ import {
 	PLANNOTATOR_TOOL_DESCRIPTION,
 	PLANNOTATOR_TOOL_INPUT_SCHEMA,
 	PLANNOTATOR_TOOL_NAME,
-	PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT,
 } from "./generated/plannotator-tool.ts";
 import type { PlanReviewDecision } from "./plannotator-browser.ts";
 import { getProcessPiReviewRegistry } from "./plannotator-tool-host.ts";
@@ -554,7 +553,7 @@ describe("plannotator tool on Pi", () => {
 	test("refuses what it cannot open: bad calls, reply, no UI, a missing file", async () => {
 		const harness = createHarness();
 		await expect(harness.call({ action: "list", target: "x.md" })).rejects.toThrow('action "list" takes no target');
-		await expect(harness.call({ action: "reply", session: "pn-abcdef", comment: "c1", text: "done" })).rejects.toThrow(PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT);
+		await expect(harness.call({ action: "reply", session: "pn-abcdef", comment: "c1", text: "done" })).rejects.toThrow("Invalid plannotator call");
 		await expect(harness.call({ action: "annotate", target: "missing.md" })).rejects.toThrow("Plannotator did not open: File not found");
 		// One target is one argument: words are never split into a tolerant search.
 		harness.writeFile("notes.md", "# Notes\n");

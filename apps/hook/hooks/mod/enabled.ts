@@ -47,3 +47,40 @@ export function parseClaudeModConfig(configText: string | null | undefined): boo
 export function resolveClaudeModEnabled(envValue: string | undefined, configText: string | null | undefined): boolean {
   return parseClaudeModEnv(envValue) ?? parseClaudeModConfig(configText)
 }
+
+/**
+ * Whether the mod registers Claude's `plannotator` tool when nothing is set.
+ * Mirrors `AGENT_TOOL_DEFAULT` in packages/shared/config.ts (enabled.test.ts
+ * keeps them equal); the owner may flip it there and here together.
+ */
+export const AGENT_TOOL_DEFAULT = true
+
+/**
+ * Whether the mod registers the `plannotator` tool (the rest of the mod is
+ * unaffected). Off with:
+ *
+ *   PLANNOTATOR_AGENT_TOOL=0            (env; also false/off/disabled; wins over the config file)
+ *   { "agentTool": false }              (config.json in the data dir)
+ *
+ * Mirrors `resolveAgentTool` in packages/shared/config.ts. Read once, at the
+ * first session.start of the Claude Code process: the tool list is part of
+ * the prompt, so it never changes under a running session.
+ */
+export function resolveAgentToolEnabled(envValue: string | undefined, configText: string | null | undefined): boolean {
+  const fromEnv = parseClaudeModEnv(envValue)
+  if (fromEnv !== undefined) return fromEnv
+  if (!configText) return AGENT_TOOL_DEFAULT
+  let value: unknown
+  try {
+    value = (JSON.parse(configText) as Record<string, unknown> | null)?.agentTool
+  } catch {
+    return AGENT_TOOL_DEFAULT
+  }
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string') {
+    const v = value.trim().toLowerCase()
+    if (v === 'true' || v === '1') return true
+    if (v === 'false' || v === '0') return false
+  }
+  return AGENT_TOOL_DEFAULT
+}

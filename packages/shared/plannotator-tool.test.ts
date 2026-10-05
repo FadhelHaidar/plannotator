@@ -62,8 +62,8 @@ describe('plannotator tool: strict validation', () => {
   })
 
   test('the schema names exactly the fields the validator accepts', () => {
-    expect(Object.keys(PLANNOTATOR_TOOL_INPUT_SCHEMA.properties).sort()).toEqual(['action', 'comment', 'gate', 'options', 'resolve', 'session', 'target', 'text'])
-    expect([...PLANNOTATOR_TOOL_INPUT_SCHEMA.properties.action.enum].sort()).toEqual(['annotate', 'close', 'last', 'list', 'reply', 'review'])
+    expect(Object.keys(PLANNOTATOR_TOOL_INPUT_SCHEMA.properties).sort()).toEqual(['action', 'gate', 'options', 'session', 'target'])
+    expect([...PLANNOTATOR_TOOL_INPUT_SCHEMA.properties.action.enum].sort()).toEqual(['annotate', 'close', 'last', 'list', 'review'])
     expect(Object.keys(PLANNOTATOR_TOOL_INPUT_SCHEMA.properties.options.properties).sort()).toEqual(['base', 'markdown'])
   })
 })
@@ -129,15 +129,15 @@ describe('plannotator tool v2: list, close, reply', () => {
     expect(one.ok && one.input.session).toBe('pn-3f2a9c')
   })
 
-  test('reply is validated even though no host answers it yet', () => {
-    const ok = parsePlannotatorToolInput({ action: 'reply', session: 'pn-3f2a9c', comment: 'c3', text: 'Done.', resolve: true })
-    expect(ok.ok && ok.input).toEqual({ action: 'reply', session: 'pn-3f2a9c', comment: 'c3', text: 'Done.', resolve: true })
-    expect(error({ action: 'reply', session: 'all', comment: 'c3', text: 'x' })).toContain('session id')
-    expect(error({ action: 'reply', session: 'pn-3f2a9c', comment: 'ann-1', text: 'x' })).toContain('comment')
-    expect(error({ action: 'reply', session: 'pn-3f2a9c', comment: 'c3', text: ' ' })).toContain('text')
-    expect(error({ action: 'annotate', target: 'a.md', text: 'x' })).toContain('"reply" only')
-    // A false default a model fills in is not an error.
-    expect(args({ action: 'review', resolve: false })).toEqual([])
+  // `reply` was reserved for live comments and always errored; it is out of
+  // the contract until the comment loop delivers single comments. A model
+  // that still sends it gets a validation error, not a host-specific refusal.
+  test('reply and its fields are not part of the contract', () => {
+    expect(error({ action: 'reply', session: 'pn-3f2a9c', comment: 'c3', text: 'Done.' })).toContain('unknown field "comment"')
+    expect(error({ action: 'reply', session: 'pn-3f2a9c' })).toContain('action must be')
+    for (const field of ['comment', 'text', 'resolve']) {
+      expect(error({ action: 'annotate', target: 'a.md', [field]: 'x' })).toContain(`unknown field "${field}"`)
+    }
   })
 
   test('session ids normalize from what an agent may type', () => {

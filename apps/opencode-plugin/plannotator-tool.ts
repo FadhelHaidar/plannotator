@@ -34,7 +34,6 @@ import {
 } from "@plannotator/shared/host-control";
 import {
   PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT,
-  PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT,
   parsePlannotatorToolInput,
   plannotatorSessionId,
   plannotatorToolArgs,
@@ -394,11 +393,6 @@ export async function runPlannotatorTool(
   const parsed = parsePlannotatorToolInput(input);
   if (!parsed.ok) return parsed.error;
   const call = parsed.input;
-  if (call.action === "reply") {
-    // Reserved for live comments: no comment is ever delivered yet.
-    return PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT;
-  }
-
   let owner: ToolSessionOwner = { root: context.sessionID, subagent: false };
   try {
     owner = (await deps.resolveOwner?.(context.sessionID)) ?? owner;

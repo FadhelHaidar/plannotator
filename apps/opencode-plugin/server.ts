@@ -2,7 +2,7 @@ import type { Plugin } from "@opencode/plugin";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { loadConfig, resolveSharingEnabled } from "@plannotator/shared/config";
+import { loadConfig, resolveAgentTool, resolveSharingEnabled } from "@plannotator/shared/config";
 import { readImprovementHook } from "@plannotator/shared/improvement-hooks";
 import { composeImproveContext } from "@plannotator/shared/pfm-reminder";
 import { composeSystemPrompt, stripConflictingPlanModeRules } from "./plan-mode";
@@ -153,8 +153,10 @@ const serverPlugin = {
     // The `plannotator` tool (annotate / review / last / list / close), for
     // every workflow: it opens reviews through the slash commands' own launch
     // and returns at once. Wrapped like the commands: a failed registration
-    // must not take the plugin down.
-    if (hasToolTransform) {
+    // must not take the plugin down. Off with PLANNOTATOR_AGENT_TOOL=0 or
+    // `{ "agentTool": false }`, decided here once per plugin setup: the tool
+    // list is part of the prompt, so a change applies when OpenCode restarts.
+    if (hasToolTransform && resolveAgentTool(loadConfig())) {
       try {
         await registerPlannotatorTool(ctx.tool as unknown as ToolDomainLike, v2, {
           registry: launches,

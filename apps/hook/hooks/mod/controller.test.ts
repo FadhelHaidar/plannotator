@@ -854,12 +854,13 @@ describe('the plannotator tool: list and close (contract v2)', () => {
     expect(host.submits[0]).toContain('fix line 3')
   })
 
-  test('reply answers with an error and launches nothing yet', async () => {
+  test('reply is not an action: refused as an invalid call, nothing launches', async () => {
     const host = fakeHost()
     serveOnLaunch(host)
     const mod = new PlannotatorMod(host, SESSION)
 
-    expect('deny' in (await mod.runTool({ action: 'reply', session: 'pn-ababab', comment: 'c1', text: 'done' }))).toBe(true)
+    const refused = await mod.runTool({ action: 'reply', session: 'pn-ababab', comment: 'c1', text: 'done' })
+    expect('deny' in refused && refused.deny).toContain('Invalid plannotator call')
     expect(launches(host)).toHaveLength(0)
 
     // A one-file list is the plain call.

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUNDLED_SKILL_NAME, bundledSkillPaths } from "./bundled-skill.ts";
+import { BUNDLED_SKILL_NAME, BUNDLED_SKILL_PATH, bundledSkillPaths } from "./bundled-skill.ts";
 
 // #1642: the CLI installer writes ~/.agents/skills/plannotator, which Pi loads
 // ahead of package skills. The extension must not offer its copy then, or Pi
@@ -73,5 +73,20 @@ describe("bundledSkillPaths", () => {
 			"utf-8",
 		);
 		expect(source).toMatch(new RegExp(`^---\\nname: ${BUNDLED_SKILL_NAME}\\n`));
+	});
+
+	// #842: an npm-only Pi install must not put a Plannotator skill in Pi's
+	// system prompt (Pi lists every skill without this line under
+	// <available_skills>). The source stays model-invocable for the installers
+	// that ask the user (#1377), so vendor.sh adds the line to the copy only.
+	// Like every import from ./generated, this reads what vendor.sh produced.
+	test("the vendored copy is user-invoked only and otherwise the source, byte for byte", () => {
+		const source = readFileSync(join(import.meta.dir, "..", "skills", "core", "plannotator", "SKILL.md"), "utf-8");
+		const vendored = readFileSync(BUNDLED_SKILL_PATH, "utf-8");
+		const lines = vendored.split("\n");
+		const frontmatter = lines.slice(1, lines.indexOf("---", 1));
+		expect(frontmatter).toContain("disable-model-invocation: true");
+		expect(source).not.toContain("disable-model-invocation");
+		expect(lines.filter((line) => line !== "disable-model-invocation: true").join("\n")).toBe(source);
 	});
 });
