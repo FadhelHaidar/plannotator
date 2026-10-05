@@ -418,6 +418,8 @@ To update it later, run `pi update --extensions` (a plain `pi update` updates on
 
 Start plan mode with `pi --plan`, or toggle mid-session with `/plannotator-plan-mode` or `Ctrl+Alt+P`. Plan review does not make the agent wait: the agent ends its turn, and your decision arrives later as a message. The extension provides file-based plan review, code review (`/plannotator-review`), markdown annotation (`/plannotator-annotate`), bash safety gating during planning, and progress tracking during execution.
 
+The agent can also open Plannotator itself with its `plannotator` tool, for example when you ask it to "open notes.md in Plannotator". The tool returns at once, and your feedback arrives later as a message. The agent can list the reviews it opened and close one it no longer needs; closing keeps your unsent comments as a draft.
+
 See [Plannotator Meets Pi](/blog/plannotator-meets-pi) for the full walkthrough.
 
 ## Amp

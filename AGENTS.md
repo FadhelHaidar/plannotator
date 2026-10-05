@@ -281,6 +281,51 @@ execute the unreviewed edits (to keep them, the user returns to plan mode and
 the agent resubmits). Auto-approved plans (no UI) keep the file as their
 source.
 
+### Pi: the `plannotator` tool
+
+The extension registers the shared tool contract
+(`packages/shared/plannotator-tool.ts`, vendored as
+`generated/plannotator-tool.ts`) with `pi.registerTool`: name, description,
+validation (`parsePlannotatorToolInput`), argument mapping and result text all
+come from it, and `parameters` is `PLANNOTATOR_TOOL_INPUT_SCHEMA` itself
+(plain JSON Schema, which Pi validates without a TypeBox Kind since 0.79.1,
+the peer floor; `plannotator-tool.test.ts` runs the installed Pi's
+`validateToolArguments` against it). `executionMode: "sequential"` (#1622: an
+"edit, then open" batch opens the edited file).
+
+**One launch path.** `/plannotator-review`, `/plannotator-annotate`,
+`/plannotator-last` and the tool share `launchCodeReview` / `launchAnnotate` /
+`launchLastMessage` in `apps/pi-extension/index.ts` (in-process server,
+"Ask this session" bridge, decision as a `followUp` message). The commands
+notify a launch error; the tool throws it, which Pi reports as an error
+result. Tool differences: the annotate target is ONE argument, so the #1182
+tolerant word split never runs on it (`tolerant: false`); an opened review
+returns `plannotatorToolOpenedText` with `terminate: true`, so the turn ends
+and the session is idle for Ask; a gated session the tool opened delivers a
+bare Approve as a message (`deliverApproval`, the mod's rule). A list of
+files answers `PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT` and `reply`
+`PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT` until those PRs land; a session
+without UI (print/JSON mode) is refused, since nothing could deliver the
+decision later.
+
+**Sessions, list and close.** Every review the extension instance opens (tool,
+commands, `plannotator_submit_plan`) is recorded in `createPiReviewRegistry`
+(`apps/pi-extension/plannotator-tool-host.ts`) with a `pn-` id until its
+decision settles. `list` and `close` see only entries whose owner is the
+calling ctx's `sessionManager.getSessionId()` in this extension instance, never
+the global `sessions/` registry. `unsent` and `decided` come from the server's
+in-process `hostControl.status()`; `close` calls `hostControl.close()` (the
+reviewer's Close marked `closedBy: "agent"`, draft kept, tab told), so it
+works in remote mode too, where the HTTP endpoints are off. A review the agent
+closed delivers nothing: its decision handler notifies "the agent closed …"
+instead. Plan reviews are listed (subject `plan <file>`) and never closed.
+Review, annotate and last decisions (commands included) now start with
+`plannotatorDecisionHeading` (`Plannotator: notes.md (pn-3f2a9c) — Feedback ·
+2 comments.`); plan decisions are unchanged. Pi cannot take over an agent's
+shell `plannotator` command: its `tool_call` event can only block a call, which
+the model reads as an error, so the skill's "use the tool" line is what steers
+it.
+
 ### Claude Code mod: non-blocking plan review, annotate, review and last
 
 Where Claude Code runs hooks modules ("Claude Mods": function hooks, CLI only,
@@ -614,7 +659,8 @@ strict gates keep the real CLI and its exit codes. With the mod off, in `-p`/SDK
 runs and on Windows nothing is taken over. The CLI the mod launches runs in the
 session's cwd (`$.process.run`'s default), the same as for the tool. Pi and
 OpenCode do not take over shell runs: there an agent-run `plannotator` command
-still runs the CLI.
+still runs the CLI (Pi registers the tool itself; see "Pi: the `plannotator`
+tool").
 
 **Plan review.** The `tool.call` hook on the main loop's ExitPlanMode resolves
 the plan (the plan file when it is an absolute `.md` regular file within the

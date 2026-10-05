@@ -297,6 +297,16 @@ URL targets work too. A loopback `http` URL that answers with an HTML page (a ru
 
 Run `/plannotator-last` to annotate the agent's most recent response. The message opens in the annotation UI where you can highlight text, add comments, and send structured feedback back to the agent.
 
+### The `plannotator` tool
+
+The agent has a `plannotator` tool. When you ask it to "open notes.md in Plannotator", it calls the tool instead of running the CLI:
+
+- **Open:** `annotate` a file, folder or URL (`gate: true` adds an Approve button), `review` changes or a PR (`options.base` sets the compare ref), or `last` (the agent's last message). The review opens exactly as the matching slash command opens it, with Ask this session. The tool returns at once with a session id (`pn-3f2a9c`) and the URL, and the agent's turn ends. Your decision arrives later as a new message that starts with `Plannotator: notes.md (pn-3f2a9c) — Feedback · 2 comments.` If the agent asked for a gated sign-off, a plain Approve is sent to it too.
+- **List:** the reviews this Pi session opened that are still open, including the ones you opened with `/plannotator-*` commands and plan reviews. Each line shows the id, what it shows, the URL, its age and how many comments you have not sent yet.
+- **Close:** one review by id, or `"all"`. This is the same as your Close, except that your unsent comments stay saved as a draft. Nothing is sent to the agent. Plan reviews are not closed this way: they end with your decision or when you leave plan mode.
+
+Another Pi session cannot list or close these reviews. The tool needs an interactive Pi session: in print or JSON mode it refuses, because nothing could deliver your decision later. Several files in one review are not supported yet. Decisions from the slash commands now also start with the same `Plannotator: … (pn-…) — …` line.
+
 ### Archive browser
 
 The Plannotator archive browser is available through the shared event API as `archive`, which opens the saved plan/decision browser for future callers. The orchestrator does not expose a dedicated archive command yet.
@@ -313,6 +323,8 @@ During execution, the agent marks completed steps with `[DONE:n]` markers. Progr
 | `/plannotator-review [DIRECTORY \| PR_URL]` | Open code review UI for current changes, another repository/worktree, or a PR |
 | `/plannotator-annotate <file>` | Open markdown file in annotation UI |
 | `/plannotator-last` | Annotate the last assistant message |
+
+The agent opens, lists and closes reviews with the `plannotator` tool (see above).
 
 ## Flags
 
