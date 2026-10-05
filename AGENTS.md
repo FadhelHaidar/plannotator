@@ -365,9 +365,31 @@ annotationCount?, platform?, withNotes?, approvedPlan?, permissionMode? }`.
 approved-with-notes prompts OpenCode and Pi use; plan: `composePlanDeniedMessage`
 / the approved prompts), so the mod never re-implements prompts. Stdout is
 unchanged for every caller. `noop` marks what never starts a turn: Done with
-nothing to send, review LGTM, Close, and a review posted straight to the PR
-platform (`platform: true`, logged plus a `$.prompt.suggest` to address the
-comments). An annotate Done with nothing to send still posts the legacy
+nothing to send, review LGTM, Close, a truly empty review submit (no feedback
+text and no annotations), and a review posted straight to the PR platform
+(`platform: true`, logged plus a `$.prompt.suggest` to address the comments).
+**The platform post is marked explicitly, never inferred from zero
+annotations:** the review editor puts only code comments in `annotations`, while
+PR description comments, PR comment notes and VS Code editor comments ride only
+in the feedback markdown, so a review made only of those has an empty
+`annotations` and is ordinary feedback (delivered, `noop: false`,
+`annotationCount: 0`, and given the request-changes suffix). The platform path's
+status post sends `platform: true` in its `/api/feedback` body; both review
+servers carry it onto the decision only when it is boolean `true`, and every
+consumer decides on that flag: `reviewHostResult` (noop + `platform`),
+`buildReviewOutput` (CLI stdout and `--json`, which Amp reads; the status line
+gets no suffix), OpenCode's embedded `/plannotator-review`, the OpenCode CLI
+bridge (`opencode-review` always emits `platform` as a boolean; a missing field
+means an older CLI and falls back to the old `isPRMode` rule), Pi
+(`classifyReviewOutcome`, `apps/pi-extension/review-outcome.ts`; the event API's
+`code-review` result carries the same field). Client and server ship together
+in each binary and package, so the flag is always present where it is needed.
+The mod's `legacyResult` (an older CLI's stdout) never inferred the platform
+post; there a status line arrives as a feedback turn, as before. The feedback
+archive does not classify the platform post either: its decision comes from
+`approved` and whether the body has content. Introduced in 0.28.0, where zero
+annotations read as the platform post and the mod sent nothing (fixed 0.28.4).
+An annotate Done with nothing to send still posts the legacy
 zero-state sentence ("User reviewed the document and has no feedback.") as
 `feedback`, because plain stdout, `--json` and the OpenCode/Pi consumers print
 or deliver those bytes; the editor additionally marks that body
@@ -1397,7 +1419,7 @@ During normal plan review, an Archive sidebar tab provides the same browsing via
 | `/api/review-image`   | GET    | One side of a changed image as raw bytes for the Before/After preview (`?path=&side=old\|new&snapshot=`; #1598). Serves only a file in the current patch whose chunk has no hunks and whose path is `png jpg jpeg gif webp svg avif bmp ico apng`; the old path is taken from the chunk, never the client. `Content-Type` is sniffed from magic bytes; every image response carries `nosniff`, `Content-Security-Policy: sandbox; …` and `Cross-Origin-Resource-Policy: same-origin`, plus `ETag` (304 on `If-None-Match`) and `X-Image-Width`/`X-Image-Height` when the header parses. Errors are JSON `{ reason, error }`: `400 unavailable\|bad-request`, `404 not-in-diff\|absent\|missing`, `409 stale`, `413 too-large` (10 MB per side or 50 megapixels), `415 not-image\|lfs-pointer`, `502 fetch-failed`. Advertised by `imagePreviewSupported` on every diff payload (false for static-patch and P4 sessions). |
 | `/api/git-add`        | POST   | Stage/unstage a file (body: `{ filePath, undo? }`) |
 | `/api/review-progress?snapshot=<snapshotId>` | GET/POST | Load or save durable viewed-file progress. GET returns `{ available, key?, fingerprints?, viewedFiles?, suppressedFiles? }`; POST takes `{ key, changes: [{ path, fingerprint, viewed }] }`. Stale snapshots return 409. |
-| `/api/feedback`       | POST   | Submit review (body: feedback, annotations, agentSwitch) |
+| `/api/feedback`       | POST   | Submit review (body: feedback, annotations, agentSwitch, platform?). `platform: true` (boolean only) marks the status post the PR-platform path sends after `/api/pr-action`; it rides onto the decision so hosts log it instead of delivering it. Never infer it from empty `annotations` (see "Host result file") |
 | `/api/image`          | GET    | Serve image by path query param            |
 | `/api/upload`         | POST   | Upload image, returns `{ path, originalName }` |
 | `/api/draft`          | GET/POST/DELETE | Auto-save annotation drafts to survive server crashes |

@@ -120,6 +120,8 @@ type CodeReviewDecision = {
 	annotations?: unknown[];
 	agentSwitch?: string;
 	exit?: boolean;
+	/** The PR-platform status post (the review went to GitHub/GitLab/Bitbucket); `feedback` is only its status line. */
+	platform?: true;
 };
 
 const CODE_REVIEW_PROGRESS_STATUS = "plannotator-review";

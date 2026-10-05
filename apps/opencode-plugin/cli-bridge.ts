@@ -128,6 +128,8 @@ export interface CliReviewOutcome {
   feedback?: string;
   agentSwitch?: string;
   isPRMode?: boolean;
+  /** The PR-platform status post (always a boolean from a CLI that knows it; absent from an older one). */
+  platform?: boolean;
 }
 
 export interface RecentAssistantMessage {
@@ -700,8 +702,13 @@ export function buildReviewPromptFromBridgeOutcome(outcome: CliReviewOutcome): {
     };
   }
 
+  // The platform status post goes through verbatim; everything else the
+  // reviewer sent gets the suffix. A CLI older than the `platform` field only
+  // said `isPRMode`, so that stays the fallback (PR-mode feedback then keeps
+  // its old suffix-less shape).
+  const platformPost = typeof outcome.platform === "boolean" ? outcome.platform : outcome.isPRMode === true;
   return {
-    message: outcome.isPRMode
+    message: platformPost
       ? outcome.feedback
       : `${outcome.feedback}${getReviewDeniedSuffix("opencode")}`,
     ...(targetAgent && { agent: targetAgent }),

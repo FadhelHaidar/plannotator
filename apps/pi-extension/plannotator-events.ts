@@ -185,6 +185,13 @@ export interface PlannotatorCodeReviewResult {
 	feedback?: string;
 	annotations?: unknown[];
 	agentSwitch?: string;
+	/**
+	 * Present (true) only when the reviewer posted the review to the PR
+	 * platform; `feedback` is then just the status line. Use this, never an
+	 * empty `annotations`, to tell it apart: PR description, PR comment and
+	 * editor comments ride only in `feedback`.
+	 */
+	platform?: true;
 }
 
 export interface PlannotatorAnnotatePayload {

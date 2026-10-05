@@ -5,6 +5,7 @@ import path from "path";
 import { spawnSync } from "child_process";
 import { handleAnnotateCommand, handleAnnotateLastCommand, handleReviewCommand } from "./commands";
 import { OpenCodePromptDeliveryError } from "./prompt-delivery-error";
+import { getReviewDeniedSuffix } from "@plannotator/shared/prompts";
 
 // Inject the annotate-server stub through CommandDeps rather than
 // `mock.module`. Bun's module mocks are process-global and cannot be unset,
@@ -212,6 +213,43 @@ describe("handleReviewCommand open state (--base / --diff-type)", () => {
     expect(options.rawPatch).toContain("caller-only");
     expect(options.includeReviewDirectory).toBe(false);
     expect(deps.client.tui.showToast).not.toHaveBeenCalled();
+  });
+
+  // Feedback made only of PR description / PR comment / editor comments has
+  // an empty `annotations` (those ride only in `feedback`). It must be
+  // delivered like any feedback; only the server-marked platform status post
+  // goes through without the suffix.
+  test("zero-annotation feedback gets the suffix; the platform status post does not", async () => {
+    const previousDataDir = process.env.PLANNOTATOR_DATA_DIR;
+    process.env.PLANNOTATOR_DATA_DIR = makeTempDir();
+    try {
+      const caller = initGitRepo("caller");
+      writeFileSync(path.join(caller, "caller.ts"), "caller-only\n");
+      const runWith = async (decision: Record<string, unknown>) => {
+        const deps = {
+          ...makeDeps(),
+          directory: caller,
+          startReviewServer: mock(async (_options: any) => ({
+            port: 0, url: "http://localhost", isRemote: false,
+            waitForDecision: async () => ({ approved: false, annotations: [], ...decision }),
+            stop: () => {},
+          })),
+        };
+        await handleReviewCommand({ properties: { arguments: "", sessionID: "s" } }, deps as any);
+        expect(deps.client.session.prompt).toHaveBeenCalledTimes(1);
+        return (deps.client.session.prompt.mock.calls[0]?.[0] as any).body.parts[0].text as string;
+      };
+
+      const descriptionOnly = await runWith({ feedback: "## PR description\n\nExplain the fallback." });
+      expect(descriptionOnly).toContain("Explain the fallback.");
+      expect(descriptionOnly).toContain(getReviewDeniedSuffix("opencode"));
+
+      const status = "Pull request reviewed on GitHub: https://github.com/o/r/pull/1";
+      expect(await runWith({ feedback: status, platform: true })).toBe(status);
+    } finally {
+      if (previousDataDir === undefined) delete process.env.PLANNOTATOR_DATA_DIR;
+      else process.env.PLANNOTATOR_DATA_DIR = previousDataDir;
+    }
   });
 });
 

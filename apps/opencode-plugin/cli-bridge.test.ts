@@ -352,6 +352,32 @@ process.exit(1);
       isPRMode: true,
       feedback: "PR comment only.",
     });
+    // An older CLI sends no `platform`; isPRMode stays the fallback.
     expect(prFeedback.message).toBe("PR comment only.");
+  });
+
+  // A CLI that knows the flag always sends it as a boolean, so PR-mode
+  // feedback (including PR description / PR comment notes, which carry no
+  // code annotations) gets the suffix, and only the platform status post
+  // goes through verbatim.
+  test("the CLI's platform flag, not isPRMode, decides the verbatim status post", () => {
+    const prFeedback = buildReviewPromptFromBridgeOutcome({
+      decision: "annotated",
+      approved: false,
+      isPRMode: true,
+      platform: false,
+      feedback: "## PR description\n\n> Adds the parser\n\nExplain the fallback.",
+    });
+    expect(prFeedback.message).toContain("Explain the fallback.");
+    expect(prFeedback.message).toContain(getReviewDeniedSuffix("opencode"));
+
+    const statusPost = buildReviewPromptFromBridgeOutcome({
+      decision: "annotated",
+      approved: false,
+      isPRMode: true,
+      platform: true,
+      feedback: "Pull request reviewed on GitHub: https://github.com/o/r/pull/1",
+    });
+    expect(statusPost.message).toBe("Pull request reviewed on GitHub: https://github.com/o/r/pull/1");
   });
 });

@@ -312,15 +312,17 @@ export async function handleReviewCommand(
         directory,
       });
 
-      // Append the verification-only suffix when the reviewer sent annotations to
-      // act on (PR mode included). Platform PR actions post a status message
-      // with no annotations — those go through verbatim, no suffix.
+      // Append the verification-only suffix to everything the reviewer sent
+      // (PR mode included, and feedback with no code annotations: PR
+      // description, PR comment and editor comments ride only in `feedback`).
+      // The platform path's status post, which the review server marks
+      // `platform: true`, goes through verbatim, no suffix.
       // Approvals carry the reviewer's approve-time notes after the prompt.
       const message = result.approved
         ? composeReviewApprovedMessage("opencode", result.feedback)
-        : result.annotations.length > 0
-          ? `${result.feedback}${getReviewDeniedSuffix("opencode")}`
-          : result.feedback;
+        : result.platform === true
+          ? result.feedback
+          : `${result.feedback}${getReviewDeniedSuffix("opencode")}`;
 
       try {
         await client.session.prompt({

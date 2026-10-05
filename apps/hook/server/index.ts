@@ -2185,6 +2185,9 @@ if (args[0] === "sessions") {
         : "annotated",
     approved: result.approved,
     isPRMode,
+    // Always a boolean, so the plugin can tell "not a platform post" from an
+    // older CLI that never sends the field (it then falls back to isPRMode).
+    platform: result.platform === true,
     ...(result.feedback && { feedback: withReviewDirectory(result.feedback, result.reviewDirectory) }),
     ...(result.agentSwitch && { agentSwitch: result.agentSwitch }),
   }));

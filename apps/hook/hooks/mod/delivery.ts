@@ -175,6 +175,8 @@ export const LEGACY_ANNOTATE_NO_FEEDBACK_TEXTS: readonly string[] = [
  * review approval (the default approved prompt) is an LGTM, as the newer CLI
  * reports it, rather than "Changes requested". A user-customized approved
  * prompt cannot be told apart from feedback and is delivered as feedback.
+ * Stdout does not say whether a review was the PR-platform status post, so
+ * that line also arrives as feedback; nothing here infers it from the text.
  */
 export function legacyResult(kind: SessionKind, printed: string): HostResultRecord {
   const surface = kind === 'review' ? 'review' : kind === 'last' ? 'annotate-last' : 'annotate'

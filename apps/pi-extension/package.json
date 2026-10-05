@@ -31,6 +31,7 @@
     "index.ts",
     "bundled-skill.ts",
     "annotate-outcome.ts",
+    "review-outcome.ts",
     "assistant-message.ts",
     "browser-session-error.ts",
     "current-pi-session.ts",

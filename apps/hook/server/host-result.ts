@@ -128,6 +128,8 @@ interface ReviewOutcomeLike {
   exit?: boolean;
   closedBy?: "agent";
   unsentAnnotations?: number;
+  /** Set by the review server only for the platform path's status post. */
+  platform?: boolean;
 }
 
 /**
@@ -145,10 +147,17 @@ export function reviewHostResult(result: ReviewOutcomeLike, output: ReviewOutput
     const noop = !hasFeedback;
     return { v: 1, surface: "review", decision: "approved", message: noop ? "" : output.message, noop, annotationCount };
   }
-  // Annotated with zero annotations: the platform path's status post (the
-  // review went to GitHub/GitLab/Bitbucket) or an empty submit.
-  if (annotationCount === 0) {
-    return { v: 1, surface: "review", decision: "annotated", message: output.message, noop: true, annotationCount, platform: hasFeedback };
+  // The platform path's status post (the review went to GitHub/GitLab/
+  // Bitbucket): the review server marks it `platform: true`. Never inferred
+  // from zero annotations: PR description, PR comment and editor comments
+  // ride only in `feedback`, so feedback made only of those has an empty
+  // annotation list and must still reach the agent.
+  if (result.platform === true) {
+    return { v: 1, surface: "review", decision: "annotated", message: output.message, noop: true, annotationCount, platform: true };
+  }
+  // A truly empty submit: nothing to send.
+  if (!hasFeedback && annotationCount === 0) {
+    return { v: 1, surface: "review", decision: "annotated", message: output.message, noop: true, annotationCount };
   }
   return { v: 1, surface: "review", decision: "annotated", message: output.message, noop: false, annotationCount };
 }

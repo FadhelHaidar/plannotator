@@ -313,6 +313,8 @@ export interface ReviewServerResult {
 		closedBy?: "agent";
 		/** With `closedBy`: the reviewer's unsent comments kept in the draft. */
 		unsentAnnotations?: number;
+		/** The review was posted to the PR platform (`POST /api/pr-action`); `feedback` is only its status line. */
+		platform?: true;
 	}>;
 	stop: () => void;
 	/** Host-only status and close (packages/shared/host-control.ts), for Pi to call in-process. */
@@ -1869,6 +1871,8 @@ export async function startReviewServer(options: {
 		closedBy?: "agent";
 		/** With `closedBy`: the reviewer's unsent comments kept in the draft. */
 		unsentAnnotations?: number;
+		/** The review was posted to the PR platform (`POST /api/pr-action`); `feedback` is only its status line. */
+		platform?: true;
 	}) => void;
 	const decisionPromise = new Promise<{
 		approved: boolean;
@@ -1881,6 +1885,8 @@ export async function startReviewServer(options: {
 		closedBy?: "agent";
 		/** With `closedBy`: the reviewer's unsent comments kept in the draft. */
 		unsentAnnotations?: number;
+		/** The review was posted to the PR platform (`POST /api/pr-action`); `feedback` is only its status line. */
+		platform?: true;
 	}>((r) => {
 		resolveDecision = (result) => {
 			reviewDecided = true;
@@ -3870,6 +3876,11 @@ export async function startReviewServer(options: {
 						? { reviewDirectory: resolveAgentCwd() } : {}),
 					annotations: annotationList,
 					agentSwitch: body.agentSwitch as string | undefined,
+					// The platform path's status post marks itself; only a real
+					// boolean true counts, so consumers never infer it from an
+					// empty annotation list (PR description, PR comment and
+					// editor comments ride only in `feedback`).
+					...(body.platform === true && { platform: true as const }),
 				});
 				json(res, { ok: true });
 			} catch (err) {

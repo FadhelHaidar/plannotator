@@ -79,6 +79,7 @@ import {
 import { isRemoteSession, isUrlHostOverridden } from "./server/network.ts";
 import { isBrowserSessionStoppedError } from "./browser-session-error.ts";
 import { classifyAnnotateOutcome } from "./annotate-outcome.ts";
+import { classifyReviewOutcome } from "./review-outcome.ts";
 import { createPiSessionBridgeHub } from "./pi-session-bridge.ts";
 import type { PlanReviewBrowserSession, PlanReviewDecision } from "./plannotator-browser.ts";
 
@@ -825,11 +826,12 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 					.then(async (result) => {
 						try {
 							if (result.feedback) result.feedback = withReviewDirectory(result.feedback, result.reviewDirectory);
-							if (result.exit) {
+							const outcome = classifyReviewOutcome(result);
+							if (outcome.kind === "closed") {
 								safeNotify(ctx, "Code review session closed.", "info", origin);
 								return;
 							}
-							if (result.approved) {
+							if (outcome.kind === "approved") {
 								// PR5 delivery (spec §6.4, consumer #4): bare approvals send
 								// the approved prompt alone; approvals carrying reviewer notes
 								// send the approved-with-notes framing (non-blocking guidance).
@@ -843,17 +845,15 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 								);
 								return;
 							}
-							if (!result.feedback) {
+							if (outcome.kind === "no-feedback") {
 								safeNotify(ctx, "Code review closed (no feedback).", "info", origin);
 								return;
 							}
-							// Append the verification-only suffix when the reviewer sent
-							// annotations to act on (PR mode included). Platform PR actions
-							// (approve/comment posted to the host) come back with an empty
-							// annotation set and a status message — don't tell the agent to
-							// "address" a platform action.
-							let reviewFeedback = result.feedback;
-							if ((result.annotations?.length ?? 0) > 0) {
+							// The verification-only suffix goes on everything the reviewer
+							// sent; only the platform status post, which the review server
+							// marks, goes through verbatim (see classifyReviewOutcome).
+							let reviewFeedback = result.feedback ?? "";
+							if (outcome.appendDeniedSuffix) {
 								const { getReviewDeniedSuffix } = await loadPlannotatorPrompts();
 								reviewFeedback += getReviewDeniedSuffix("pi", loadConfig());
 							}
