@@ -1,5 +1,14 @@
 import { describe, expect, test } from 'bun:test'
-import { parsePlannotatorToolInput, plannotatorToolArgs, PLANNOTATOR_TOOL_INPUT_SCHEMA } from './plannotator-tool'
+import {
+  normalizePlannotatorSessionId,
+  parsePlannotatorToolInput,
+  plannotatorDecisionHeading,
+  plannotatorToolArgs,
+  plannotatorToolCloseText,
+  plannotatorToolListText,
+  plannotatorToolOpenedText,
+  PLANNOTATOR_TOOL_INPUT_SCHEMA,
+} from './plannotator-tool'
 
 function args(value: unknown): string[] {
   const parsed = parsePlannotatorToolInput(value)
@@ -51,7 +60,93 @@ describe('plannotator tool: strict validation', () => {
   })
 
   test('the schema names exactly the fields the validator accepts', () => {
-    expect(Object.keys(PLANNOTATOR_TOOL_INPUT_SCHEMA.properties).sort()).toEqual(['action', 'gate', 'options', 'target'])
+    expect(Object.keys(PLANNOTATOR_TOOL_INPUT_SCHEMA.properties).sort()).toEqual(['action', 'comment', 'gate', 'options', 'resolve', 'session', 'target', 'text'])
+    expect([...PLANNOTATOR_TOOL_INPUT_SCHEMA.properties.action.enum].sort()).toEqual(['annotate', 'close', 'last', 'list', 'reply', 'review'])
     expect(Object.keys(PLANNOTATOR_TOOL_INPUT_SCHEMA.properties.options.properties).sort()).toEqual(['base', 'markdown'])
+  })
+})
+
+describe('plannotator tool v2: several targets', () => {
+  // The failure: a list is re-split, reordered, or a list where it means
+  // nothing (review) is silently flattened into one argument.
+  test('annotate keeps the list in order, one argument per file, duplicates dropped', () => {
+    expect(args({ action: 'annotate', target: ['spec.md', 'mock.html', 'notes.md'] })).toEqual(['spec.md', 'mock.html', 'notes.md'])
+    expect(args({ action: 'annotate', target: ['b.md', 'a.md', 'b.md'], gate: true })).toEqual(['b.md', 'a.md', '--gate'])
+  })
+
+  test('a one-file list is the plain single-target call', () => {
+    const parsed = parsePlannotatorToolInput({ action: 'annotate', target: ['notes.md', ' notes.md '] })
+    expect(parsed.ok && parsed.input.target).toBe('notes.md')
+  })
+
+  test('refuses an empty list, a bad entry, and a list outside annotate', () => {
+    expect(error({ action: 'annotate', target: [] })).toContain('empty list')
+    expect(error({ action: 'annotate', target: ['a.md', '--hook'] })).toContain('target[1]')
+    expect(error({ action: 'annotate', target: ['a.md', 3] })).toContain('target[1]')
+    expect(error({ action: 'review', target: ['a', 'b'] })).toContain('annotate')
+  })
+})
+
+describe('plannotator tool v2: list, close, reply', () => {
+  test('list and close take no open fields; close needs a session id or "all"', () => {
+    expect(args({ action: 'list' })).toEqual([])
+    expect(error({ action: 'list', target: 'x.md' })).toContain('no target')
+    expect(error({ action: 'list', session: 'pn-3f2a9c' })).toContain('session')
+    expect(error({ action: 'close' })).toContain('needs a session')
+    expect(error({ action: 'close', session: 'notes.md' })).toContain('pn-3f2a9c')
+    expect(error({ action: 'close', session: 'pn-3f2a9c', gate: true })).toContain('gate')
+    const all = parsePlannotatorToolInput({ action: 'close', session: 'ALL' })
+    expect(all.ok && all.input.session).toBe('all')
+    const one = parsePlannotatorToolInput({ action: 'close', session: ' PN-3F2A9C ' })
+    expect(one.ok && one.input.session).toBe('pn-3f2a9c')
+  })
+
+  test('reply is validated even though no host answers it yet', () => {
+    const ok = parsePlannotatorToolInput({ action: 'reply', session: 'pn-3f2a9c', comment: 'c3', text: 'Done.', resolve: true })
+    expect(ok.ok && ok.input).toEqual({ action: 'reply', session: 'pn-3f2a9c', comment: 'c3', text: 'Done.', resolve: true })
+    expect(error({ action: 'reply', session: 'all', comment: 'c3', text: 'x' })).toContain('session id')
+    expect(error({ action: 'reply', session: 'pn-3f2a9c', comment: 'ann-1', text: 'x' })).toContain('comment')
+    expect(error({ action: 'reply', session: 'pn-3f2a9c', comment: 'c3', text: ' ' })).toContain('text')
+    expect(error({ action: 'annotate', target: 'a.md', text: 'x' })).toContain('"reply" only')
+    // A false default a model fills in is not an error.
+    expect(args({ action: 'review', resolve: false })).toEqual([])
+  })
+
+  test('session ids normalize from what an agent may type', () => {
+    expect(normalizePlannotatorSessionId('3F2A9C')).toBe('pn-3f2a9c')
+    expect(normalizePlannotatorSessionId('pn-3f2a9')).toBeNull()
+    expect(normalizePlannotatorSessionId('pn-3f2a9cz')).toBeNull()
+  })
+})
+
+describe('plannotator tool v2: texts name the session id', () => {
+  // The failure: the agent cannot tie a decision message or a list line back
+  // to the review it opened, so it cannot close the right one.
+  test('opened text leads with the id; the decision heading carries it', () => {
+    expect(plannotatorToolOpenedText('notes.md', 'http://localhost:1', false, 'pn-3f2a9c').split('\n')[0]).toBe('Session: pn-3f2a9c')
+    expect(plannotatorToolOpenedText('notes.md', 'http://localhost:1', false)).not.toContain('Session:')
+    expect(plannotatorDecisionHeading('notes.md', 'pn-3f2a9c', 'Feedback · 3 comments')).toBe('Plannotator: notes.md (pn-3f2a9c) — Feedback · 3 comments.')
+    expect(plannotatorDecisionHeading('notes.md', undefined, 'Approved')).toBe('Plannotator: notes.md — Approved.')
+  })
+
+  test('list reports each review once with its unsent count, unknown when the server cannot say', () => {
+    const text = plannotatorToolListText([
+      { id: 'pn-aaaaaa', kind: 'annotate', subject: 'notes.md', url: 'http://localhost:1', ageMs: 5 * 60_000, state: 'open', unsent: 2 },
+      { id: 'pn-bbbbbb', kind: 'plan', subject: 'Plan v1', ageMs: 0, state: 'starting', unsent: null },
+    ])
+    const lines = text.split('\n')
+    expect(lines.filter((line) => line.startsWith('pn-aaaaaa'))[0]).toContain('unsent: 2')
+    expect(lines.filter((line) => line.startsWith('pn-bbbbbb'))[0]).toContain('unsent: unknown')
+    expect(text).toContain('5 min')
+  })
+
+  test('close reports the saved count per review and refuses plan reviews', () => {
+    const text = plannotatorToolCloseText([
+      { id: 'pn-aaaaaa', subject: 'notes.md', closed: true, unsent: 3 },
+      { id: 'pn-bbbbbb', subject: 'Plan v2', closed: false, reason: 'plan' },
+    ])
+    expect(text).toContain('pn-aaaaaa')
+    expect(text).toContain('3 unsent comments')
+    expect(text).toMatch(/Not closed: Plan v2 \(pn-bbbbbb\)/)
   })
 })

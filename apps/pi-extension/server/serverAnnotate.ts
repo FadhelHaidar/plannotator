@@ -15,7 +15,9 @@ import {
 import { startLiveAppProxyNode } from "../generated/live-proxy-node.ts";
 import type { LiveAppProxy } from "../generated/live-proxy-core.ts";
 
-import { contentHash, deleteDraft } from "../generated/draft.ts";
+import { contentHash, deleteDraft, loadDraft } from "../generated/draft.ts";
+import { countUnsentDraftComments, hostSessionClosedEvent } from "../generated/host-control.ts";
+import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control.ts";
 import { getPlanVersion, getVersionCount, listVersions } from "../generated/storage.ts";
 import { computeAnnotateHistory, deriveAnnotateHistorySlug, persistAnnotateSubmission, type AnnotateHistoryResult } from "../generated/annotate-history.ts";
 import { htmlDiff } from "../generated/html-diff.ts";
@@ -97,8 +99,10 @@ export interface AnnotateServerResult {
 	port: number;
 	portSource: "env" | "remote-default" | "random";
 	url: string;
-	waitForDecision: () => Promise<{ feedback: string; annotations: unknown[]; exit?: boolean; approved?: boolean; selectedMessageId?: string; feedbackScope?: "message" | "messages" }>;
+	waitForDecision: () => Promise<{ feedback: string; annotations: unknown[]; exit?: boolean; approved?: boolean; selectedMessageId?: string; feedbackScope?: "message" | "messages"; closedBy?: "agent"; unsentAnnotations?: number }>;
 	stop: () => void;
+	/** Host-only status and close (packages/shared/host-control.ts), for Pi to call in-process. */
+	hostControl: HostControl;
 }
 
 function parseOptionalApprovalBody(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -240,6 +244,8 @@ function createHtmlAssetRegistry() {
 export async function startAnnotateServer(options: {
 	/** "Ask this session": the in-process bridge to the Pi session that opened this annotation. */
 	sessionBridge?: SessionBridge;
+	/** Turns on `/api/host/status` and `/api/host/close` for a caller in another process (never in remote mode). */
+	hostControlToken?: string;
 	markdown: string;
 	filePath: string;
 	htmlContent: string;
@@ -302,6 +308,10 @@ export async function startAnnotateServer(options: {
 		feedbackScope?: "message" | "messages";
 		/** A Done with nothing to send (see isNothingToSendFeedbackBody). */
 		nothingToSend?: boolean;
+		/** The host closed the session: an `exit` that keeps the draft. */
+		closedBy?: "agent";
+		/** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+		unsentAnnotations?: number;
 	}) => void;
 	const decisionPromise = new Promise<{
 		feedback: string;
@@ -312,6 +322,10 @@ export async function startAnnotateServer(options: {
 		feedbackScope?: "message" | "messages";
 		/** A Done with nothing to send (see isNothingToSendFeedbackBody). */
 		nothingToSend?: boolean;
+		/** The host closed the session: an `exit` that keeps the draft. */
+		closedBy?: "agent";
+		/** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+		unsentAnnotations?: number;
 	}>((r) => {
 		resolveDecision = r;
 	});
@@ -364,6 +378,36 @@ export async function startAnnotateServer(options: {
 				? `folder:${resolvePath(options.folderPath)}`
 				: options.renderHtml && options.rawHtml ? options.rawHtml : options.markdown;
 	const draftKey = contentHash(draftSource);
+
+	// Host-only session control: mirrors packages/server/annotate.ts. Closing
+	// is the reviewer's Close, marked closedBy "agent", WITHOUT deleting the
+	// draft or archiving a decision the reviewer never made.
+	const hostControlToken = resolveHostControlToken(options.hostControlToken);
+	const hostDocuments = (): string[] =>
+		options.mode === "annotate-last"
+			? []
+			: options.mode === "annotate-folder" && options.folderPath
+				? [options.folderPath]
+				: options.mode === "annotate-app" && options.liveApp
+					? [options.liveApp.targetUrl]
+					: options.filePath ? [options.filePath] : [];
+	const hostControl: HostControl = {
+		status: () => ({
+			kind: options.mode === "annotate-last" ? "annotate-last" : "annotate",
+			documents: hostDocuments(),
+			unsentAnnotations: countUnsentDraftComments(loadDraft(draftKey)),
+			decided: decision.isSettled(),
+		}),
+		close: () => {
+			const unsentAnnotations = countUnsentDraftComments(loadDraft(draftKey));
+			if (!decision.settle({ feedback: "", annotations: [], exit: true, closedBy: "agent", unsentAnnotations })) {
+				return { closed: false, reason: "decided" };
+			}
+			clientLease.cancel();
+			externalAnnotations.broadcast(hostSessionClosedEvent(unsentAnnotations));
+			return { closed: true, unsentAnnotations };
+		},
+	};
 
 	// Per-file version history → powers the native version diff in annotate mode.
 	// Unlike the plan flow (slug = first-heading + date), annotate keys history by
@@ -720,6 +764,7 @@ export async function startAnnotateServer(options: {
 	const server = createServer(async (req, res) => {
 		const url = requestUrl(req);
 
+		if (handleHostControl(req, res, url, { token: hostControlToken, getServerPort: () => boundPort, control: hostControl })) return;
 		if (await externalAnnotations.handle(req, res, url)) return;
 		if (url.pathname.startsWith("/api/ai/") && await handlePiAIRequest(req, res, url, aiRuntime)) return;
 
@@ -1273,6 +1318,7 @@ export async function startAnnotateServer(options: {
 		portSource,
 		url: buildAdvertisedUrl(port),
 		waitForDecision: () => decisionPromise,
+		hostControl,
 		stop: () => {
 			// Per-step guard (mirrors the Bun server's runGuardedShutdown): one
 			// throwing disposal must not skip the steps after it — agent-terminal

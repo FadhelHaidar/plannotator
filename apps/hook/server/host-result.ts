@@ -55,6 +55,19 @@ export interface HostResultRecord {
   approvedPlan?: string;
   /** Plan only: the permission mode the reviewer chose for execution. */
   permissionMode?: string;
+  /** A `dismissed` the host itself asked for (`POST /api/host/close`), not the reviewer. */
+  closedBy?: "agent";
+  /** With `closedBy`: the reviewer's unsent comments, kept in the draft. */
+  unsentAnnotations?: number;
+}
+
+/** The `closedBy` / `unsentAnnotations` pair a host close adds to a dismissal. */
+function closedByFields(result: { closedBy?: unknown; unsentAnnotations?: unknown }): Pick<HostResultRecord, "closedBy" | "unsentAnnotations"> {
+  if (result.closedBy !== "agent") return {};
+  return {
+    closedBy: "agent",
+    ...(typeof result.unsentAnnotations === "number" ? { unsentAnnotations: result.unsentAnnotations } : {}),
+  };
 }
 
 let takenPath: string | undefined;
@@ -113,6 +126,8 @@ interface ReviewOutcomeLike {
   feedback: string;
   annotations: readonly unknown[];
   exit?: boolean;
+  closedBy?: "agent";
+  unsentAnnotations?: number;
 }
 
 /**
@@ -123,7 +138,7 @@ export function reviewHostResult(result: ReviewOutcomeLike, output: ReviewOutput
   const annotationCount = result.annotations.length;
   const hasFeedback = !!result.feedback && result.feedback.trim() !== "";
   if (output.decision === "dismissed") {
-    return { v: 1, surface: "review", decision: "dismissed", message: "", noop: true, annotationCount: 0 };
+    return { v: 1, surface: "review", decision: "dismissed", message: "", noop: true, annotationCount: 0, ...closedByFields(result) };
   }
   if (output.decision === "approved") {
     // A bare approval (LGTM) carries nothing the agent must act on.
@@ -147,6 +162,8 @@ interface AnnotateOutcomeLike {
    *  legacy zero-state sentence (stdout and `--json` keep it), but there is
    *  nothing for the agent. */
   nothingToSend?: boolean;
+  closedBy?: "agent";
+  unsentAnnotations?: number;
 }
 
 export interface AnnotateHostContext {
@@ -169,7 +186,7 @@ export function annotateHostResult(result: AnnotateOutcomeLike, context: Annotat
   const feedback = (result.feedback ?? "").trim() ? result.feedback ?? "" : "";
   const runtime = context.origin ?? "claude-code";
   if (result.exit) {
-    return { v: 1, surface, decision: "dismissed", message: "", noop: true, ...(annotationCount !== undefined && { annotationCount }) };
+    return { v: 1, surface, decision: "dismissed", message: "", noop: true, ...(annotationCount !== undefined && { annotationCount }), ...closedByFields(result) };
   }
   const header = context.kind === "folder" ? "Folder" : context.kind === "url" ? "URL" : "File";
   if (result.approved) {

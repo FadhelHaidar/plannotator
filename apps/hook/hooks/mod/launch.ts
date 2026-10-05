@@ -133,6 +133,14 @@ export function aliveArgv(pid: string): string[] {
   return ['/bin/sh', '-c', 'kill -0 "$1" 2>/dev/null', 'plannotator-alive', pid]
 }
 
+/**
+ * Stops a CLI that has no host close endpoint (an older Plannotator): TERM,
+ * which ends the server without a decision and never deletes its draft.
+ */
+export function stopArgv(pid: string): string[] {
+  return ['/bin/sh', '-c', 'kill -TERM "$1" 2>/dev/null', 'plannotator-stop', pid]
+}
+
 export function launchDirOf(dataDir: string, sessionId: string, launchId: string): string {
   const safe = (value: string) => value.replace(/[^A-Za-z0-9._-]/g, '_')
   return `${dataDir}/claude-code-mod/${safe(sessionId)}/${safe(launchId)}`

@@ -82,3 +82,14 @@ describe("isAllowedHostResultPath", () => {
     expect(isAllowedHostResultPath(`${data}/claude-code-mod-evil/result.json`, data)).toBe(false);
   });
 });
+
+// The failure: a review the agent closed reads, to the host, like the
+// reviewer's own Close, and the unsent count the agent was told is lost.
+describe("host close", () => {
+  test("an agent close is a dismissal marked closedBy, with the unsent count", () => {
+    const review = { approved: false, feedback: "", annotations: [], exit: true, closedBy: "agent" as const, unsentAnnotations: 2 };
+    expect(reviewHostResult(review, buildReviewOutput(review, "claude-code"))).toMatchObject({ decision: "dismissed", noop: true, closedBy: "agent", unsentAnnotations: 2 });
+    expect(annotateHostResult({ feedback: "", exit: true, closedBy: "agent", unsentAnnotations: 0 }, { kind: "file", target: "/a.md" })).toMatchObject({ decision: "dismissed", closedBy: "agent", unsentAnnotations: 0 });
+    expect(annotateHostResult({ feedback: "", exit: true }, { kind: "file", target: "/a.md" })).not.toHaveProperty("closedBy");
+  });
+});

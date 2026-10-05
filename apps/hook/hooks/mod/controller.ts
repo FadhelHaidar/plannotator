@@ -13,6 +13,7 @@ import type { Host } from './host'
 import {
   aliveArgv,
   cleanupArgv,
+  stopArgv,
   cliArgvFor,
   failedText,
   fileIn,
@@ -47,10 +48,19 @@ import {
 } from './plan'
 import {
   parsePlannotatorToolInput,
+  plannotatorSessionId,
   plannotatorToolArgs,
+  plannotatorToolCloseText,
+  plannotatorToolListText,
   plannotatorToolOpenedText,
+  plannotatorToolTargets,
+  plannotatorUnknownSessionText,
+  PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT,
+  PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT,
   scriptOnlyAnnotateFlag,
   scriptOnlyAnnotateFlagText,
+  type PlannotatorCloseOutcome,
+  type PlannotatorSessionSummary,
 } from './tool'
 import { TurnTracker, type EnteredPrompt } from './turns'
 
@@ -76,7 +86,23 @@ export interface LaunchRecord {
    * slash command's bare approval only logs).
    */
   deliverApproval?: boolean
+  /**
+   * Claude closed this review (the `plannotator` tool's `close`): nothing is
+   * delivered for it, and it is gone from `list` and the status line while
+   * the server shuts down.
+   */
+  closedByAgent?: boolean
 }
+
+/** The `pn-` session id of a launch: the six hex digits that end its launch id. */
+export function sessionIdOf(launch: { id: string }): string {
+  const hex = /([0-9a-f]{6})$/i.exec(launch.id)?.[1] ?? '000000'
+  return plannotatorSessionId(hex)
+}
+
+/** The host-only endpoints of the CLI's server (packages/shared/host-control.ts). */
+export const HOST_STATUS_PATH = '/api/host/status'
+export const HOST_CLOSE_PATH = '/api/host/close'
 
 export const STORE_LAUNCHES = 'launches'
 export const STORE_APPROVALS = 'approvals'
@@ -207,9 +233,17 @@ export class PlannotatorMod {
     }
   }
 
+  /** A launch id whose last six hex digits (its `pn-` session id) no open launch of this session uses. */
   private async newLaunchId(): Promise<string> {
     this.sequence += 1
-    return `${await this.host.now()}-${this.sequence}-${this.host.randomHex(3)}`
+    const used = new Set([...this.launches.values()].map((launch) => sessionIdOf(launch)))
+    let value = Number.parseInt(this.host.randomHex(3), 16) || 0
+    let hex = value.toString(16).padStart(6, '0')
+    while (used.has(plannotatorSessionId(hex))) {
+      value = (value + 1) % 0x1000000
+      hex = value.toString(16).padStart(6, '0')
+    }
+    return `${await this.host.now()}-${this.sequence}-${hex}`
   }
 
   // --- Launch --------------------------------------------------------------
@@ -351,17 +385,158 @@ export class PlannotatorMod {
     const parsed = parsePlannotatorToolInput(input)
     if (!parsed.ok) return { deny: parsed.error }
     const call = parsed.input
+    switch (call.action) {
+      case 'list':
+        return { text: await this.listText() }
+      case 'close':
+        return this.closeSessions(call.session as string)
+      case 'reply':
+        // Reserved for live comments: no comment is ever delivered yet.
+        return { deny: PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT }
+      case 'annotate':
+      case 'review':
+      case 'last':
+        break
+    }
+    // Several files as one review need a CLI with bundles; none has them yet.
+    if (Array.isArray(call.target)) return { deny: PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT }
+    const action = call.action
     const gate = call.gate === true
-    const subject = subjectFor(call.action, call.target ? [call.target] : [])
-    const opened = await this.open(call.action, plannotatorToolArgs(call), subject, gate ? { deliverApproval: true } : {})
+    const subject = subjectFor(action, plannotatorToolTargets(call))
+    const opened = await this.open(action, plannotatorToolArgs(call), subject, gate ? { deliverApproval: true } : {})
     switch (opened.state) {
       case 'error':
         return { deny: opened.text }
       case 'starting':
-        return { text: plannotatorToolOpenedText(opened.subject, undefined, gate) }
+        return { text: plannotatorToolOpenedText(opened.subject, undefined, gate, opened.sessionId) }
       case 'ready':
-        return { text: plannotatorToolOpenedText(opened.subject, opened.url, gate) }
+        return { text: plannotatorToolOpenedText(opened.subject, opened.url, gate, opened.sessionId) }
     }
+  }
+
+  // --- The agent's own sessions (list, close) ------------------------------
+
+  /** The reviews this Claude session opened that are still open (not settling, not closed by Claude). */
+  private openLaunches(): LiveLaunch[] {
+    return [...this.launches.values()].filter((launch) => !launch.settling && !launch.closedByAgent)
+  }
+
+  private hostHeaders(launch: LiveLaunch): Record<string, string> {
+    return { authorization: `Bearer ${launch.bridgeToken ?? ''}` }
+  }
+
+  /** `GET /api/host/status`, or null when the server cannot say (not up yet, an older CLI). */
+  private async hostStatus(launch: LiveLaunch): Promise<{ unsent: number; decided: boolean } | null> {
+    if (!launch.port || !launch.bridgeToken) return null
+    try {
+      const response = await this.host.fetch(`${bridgeBaseUrl(launch.port)}${HOST_STATUS_PATH}`, {
+        method: 'GET',
+        headers: this.hostHeaders(launch),
+      })
+      if (!response.ok) return null
+      const body = JSON.parse(response.text) as { unsentAnnotations?: unknown; decided?: unknown }
+      return {
+        unsent: typeof body.unsentAnnotations === 'number' ? body.unsentAnnotations : 0,
+        decided: body.decided === true,
+      }
+    } catch {
+      return null
+    }
+  }
+
+  /** The tool's `list`: every open review of THIS Claude session (the launch store is per session). */
+  async listText(): Promise<string> {
+    const now = await this.host.now()
+    const sessions: PlannotatorSessionSummary[] = []
+    for (const launch of this.openLaunches()) {
+      if (!launch.url) await this.readReady(launch).catch(() => false)
+      const status = launch.url ? await this.hostStatus(launch) : null
+      sessions.push({
+        id: sessionIdOf(launch),
+        kind: launch.kind,
+        subject: launch.subject,
+        ...(launch.url ? { url: launch.url } : {}),
+        ageMs: now - launch.startedAt,
+        state: !launch.url ? 'starting' : status?.decided ? 'decided' : 'open',
+        unsent: status ? status.unsent : null,
+      })
+    }
+    return plannotatorToolListText(sessions)
+  }
+
+  /** The tool's `close`: one id or "all", only among this Claude session's reviews. */
+  private async closeSessions(session: string): Promise<{ text: string } | { deny: string }> {
+    if (session === 'all') {
+      const outcomes: PlannotatorCloseOutcome[] = []
+      for (const launch of this.openLaunches()) outcomes.push(await this.closeLaunch(launch))
+      return { text: plannotatorToolCloseText(outcomes) }
+    }
+    const launch = this.openLaunches().find((candidate) => sessionIdOf(candidate) === session)
+    if (!launch) return { deny: plannotatorUnknownSessionText(session) }
+    const outcome = await this.closeLaunch(launch)
+    const text = plannotatorToolCloseText([outcome])
+    return outcome.closed ? { text } : { deny: text }
+  }
+
+  /**
+   * Close one review: the server's host close (the reviewer's Close, draft
+   * kept, the tab told), or for a CLI without it a TERM to the process (which
+   * never deletes a draft). Plan reviews end only with a decision.
+   */
+  private async closeLaunch(launch: LiveLaunch): Promise<PlannotatorCloseOutcome> {
+    const id = sessionIdOf(launch)
+    const subject = launch.subject
+    if (launch.kind === 'plan') return { id, subject, closed: false, reason: 'plan' }
+    if (launch.port && launch.bridgeToken) {
+      const response = await this.host
+        .fetch(`${bridgeBaseUrl(launch.port)}${HOST_CLOSE_PATH}`, {
+          method: 'POST',
+          headers: { ...this.hostHeaders(launch), 'content-type': 'application/json' },
+          body: '{}',
+        })
+        .catch(() => null)
+      if (response?.ok) {
+        let unsent: number | null = null
+        try {
+          const body = JSON.parse(response.text) as { unsentAnnotations?: unknown }
+          if (typeof body.unsentAnnotations === 'number') unsent = body.unsentAnnotations
+        } catch {
+          // A closed session with an unreadable count.
+        }
+        await this.markClosedByAgent(launch)
+        return { id, subject, closed: true, unsent }
+      }
+      if (response && response.status === 409) {
+        // The reviewer decided first: that decision is on its way.
+        return { id, subject, closed: false, reason: 'decided' }
+      }
+      // 404 (an older CLI) or no answer: stop the process instead.
+    }
+    const pid = (await this.host.readFile(fileIn(launch.dir, 'pid')).catch(() => '')).trim()
+    if (!/^\d+$/.test(pid)) return { id, subject, closed: false, reason: 'failed', detail: 'its server has not started yet; try again in a moment' }
+    const killed = await this.host.run(stopArgv(pid), { timeoutMs: 5_000 }).catch(() => null)
+    if (!killed || killed.exitCode !== 0) {
+      return { id, subject, closed: false, reason: 'failed', detail: 'its server could not be stopped' }
+    }
+    await this.markClosedByAgent(launch)
+    return { id, subject, closed: true, unsent: null }
+  }
+
+  private async markClosedByAgent(launch: LiveLaunch): Promise<void> {
+    launch.closedByAgent = true
+    await this.persist()
+    this.refreshStatus()
+    this.ensureTimer()
+  }
+
+  /** A review Claude closed has exited (or published its dismissal): forget it, log one line, deliver nothing. */
+  private async finishAgentClose(launch: LiveLaunch, record: HostResultRecord | null): Promise<void> {
+    launch.settling = true
+    await this.forget(launch)
+    const unsent = record?.unsentAnnotations
+    const saved = typeof unsent === 'number' && unsent > 0 ? ` ${unsent} unsent ${unsent === 1 ? 'comment' : 'comments'} kept in the draft.` : ''
+    this.host.log(`Claude closed ${launch.subject} (${sessionIdOf(launch)}).${saved} Nothing was sent to Claude.`)
+    await this.host.run(cleanupArgv(launch.dir), { timeoutMs: 5_000 }).catch(() => undefined)
   }
 
   /** The launch both entry points share: detached CLI, result later as a plugin turn, bridge, cleanup. */
@@ -372,8 +547,8 @@ export class PlannotatorMod {
     record: Partial<LaunchRecord> = {},
   ): Promise<
     | { state: 'error'; text: string }
-    | { state: 'starting'; subject: string }
-    | { state: 'ready'; subject: string; url: string; extra?: string }
+    | { state: 'starting'; subject: string; sessionId: string }
+    | { state: 'ready'; subject: string; url: string; sessionId: string; extra?: string }
   > {
     if (kind === 'annotate') {
       // Strict gates and --hook answer on the CLI's exit code, stdout or result
@@ -405,8 +580,9 @@ export class PlannotatorMod {
 
     const outcome = await this.awaitReady(started, kind === 'review' ? READY_WAIT_MS.review : READY_WAIT_MS.other)
     if (outcome === 'exited') return { state: 'error', text: await this.startupFailure(started) }
-    if (outcome === 'timeout') return { state: 'starting', subject }
-    return { state: 'ready', subject, url: started.url as string, ...(extra ? { extra } : {}) }
+    const sessionId = sessionIdOf(started)
+    if (outcome === 'timeout') return { state: 'starting', subject, sessionId }
+    return { state: 'ready', subject, url: started.url as string, sessionId, ...(extra ? { extra } : {}) }
   }
 
   // --- Plan review -------------------------------------------------------------
@@ -561,6 +737,15 @@ export class PlannotatorMod {
     // Started from the timer, never from inside a hook: the loop outlives any one dispatch.
     if (launch.port && !launch.bridge) this.startBridge(launch)
     const resultPath = fileIn(launch.dir, 'result')
+    if (launch.closedByAgent) {
+      const record = (await this.host.exists(resultPath)) ? parseHostResult(await this.host.readFile(resultPath)) : null
+      if (record || (await this.host.exists(fileIn(launch.dir, 'exit')))) {
+        await this.finishAgentClose(launch, record)
+        return
+      }
+      if (launch.ticks % PID_CHECK_EVERY_TICKS === 0) await this.checkAlive(launch)
+      return
+    }
     if (await this.host.exists(resultPath)) {
       const record = parseHostResult(await this.host.readFile(resultPath))
       if (record) {
@@ -610,6 +795,10 @@ export class PlannotatorMod {
     launch.pidMisses += 1
     // Gone and never wrote an exit code: the whole process group was killed.
     if (launch.pidMisses >= PID_MISSES_BEFORE_STOPPED && !(await this.host.exists(fileIn(launch.dir, 'exit')))) {
+      if (launch.closedByAgent) {
+        await this.finishAgentClose(launch, null)
+        return
+      }
       launch.settling = true
       this.host.log(`The review server for ${launch.subject} is no longer running. Your draft is saved.`)
       await this.forget(launch)
@@ -629,6 +818,7 @@ export class PlannotatorMod {
     await this.forget(launch)
     const delivery = deliveryFor(record, {
       subject: launch.subject,
+      sessionId: sessionIdOf(launch),
       overflowPath: fileIn(launch.dir, 'overflow'),
       deliverApproval: launch.deliverApproval === true,
     })
@@ -667,7 +857,7 @@ export class PlannotatorMod {
       baseUrl: bridgeBaseUrl(launch.port),
       token: launch.bridgeToken,
       turns: this.turns,
-      isLive: () => !this.disposed && this.launches.get(launch.id) === launch && !launch.settling,
+      isLive: () => !this.disposed && this.launches.get(launch.id) === launch && !launch.settling && !launch.closedByAgent,
     })
     launch.bridge = bridge
     void bridge.run()
@@ -725,7 +915,7 @@ export class PlannotatorMod {
   // --- Status line ---------------------------------------------------------------
 
   private refreshStatus(): void {
-    const open = [...this.launches.values()].filter((launch) => !launch.settling)
+    const open = this.openLaunches()
     if (open.length === 0) {
       this.host.status(undefined)
       return

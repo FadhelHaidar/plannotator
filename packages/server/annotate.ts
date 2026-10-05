@@ -19,7 +19,7 @@ import { handleImage, handleUpload, handleServerReady, handleDraftSave, handleDr
 import { handleDoc, handleDocExists, handleFileBrowserFiles, handleObsidianVaults, handleObsidianFiles, handleObsidianDoc, resolveAllowedDocPath, type FolderAnnotateHistory } from "./reference-handlers";
 import { closeAllFileBrowserWatchers, handleFileBrowserFilesStream } from "./reference-watch";
 import { getExtraMarkdownExtensions, MAX_ANNOTATABLE_FILE_BYTES, resolveUserPath, warmFileListCache } from "@plannotator/shared/resolve-file";
-import { contentHash, deleteDraft } from "./draft";
+import { contentHash, deleteDraft, loadDraft } from "./draft";
 import { getPlanVersion, getVersionCount, listVersions } from "@plannotator/shared/storage";
 import { computeAnnotateHistory, deriveAnnotateHistorySlug, persistAnnotateSubmission, type AnnotateHistoryResult } from "@plannotator/shared/annotate-history";
 import { htmlDiff } from "@plannotator/shared/html-diff";
@@ -54,6 +54,8 @@ import { isWithinDirectory } from "@plannotator/shared/html-assets-node";
 import { isWSL } from "./browser";
 import { handleOpenInApps, handleOpenIn } from "./open-in";
 import { createAIRuntime } from "./ai-runtime";
+import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control";
+import { countUnsentDraftComments, hostSessionClosedEvent } from "@plannotator/shared/host-control";
 import { isAIEndpointPath, isLongLivedAIEndpointPath, type AIEndpoints, type SessionBridge } from "@plannotator/ai";
 import { createHtmlAssetRegistry, framedDocumentNotFound } from "./html-assets";
 import { createBunAgentTerminalBridge } from "./agent-terminal";
@@ -78,6 +80,12 @@ export { handleServerReady as handleAnnotateServerReady } from "./shared-handler
 export interface AnnotateServerOptions {
   /** "Ask this session": the host bridge to the agent session that opened this annotation (see packages/ai/session-bridge.ts). */
   sessionBridge?: SessionBridge;
+  /**
+   * The token `/api/host/status` and `/api/host/close` accept (see
+   * packages/shared/host-control.ts). Default: the pull-bridge token the host
+   * launched the CLI with; off in remote mode either way.
+   */
+  hostControlToken?: string;
   /** Markdown content of the file to annotate. Empty when rendering raw HTML. */
   markdown: string;
   /** Original file path (for display purposes) */
@@ -184,9 +192,15 @@ export interface AnnotateServerResult {
     /** A Done with nothing to send (see isNothingToSendFeedbackBody): the
      *  feedback is still the legacy zero-state sentence. */
     nothingToSend?: boolean;
+    /** The host closed the session (`POST /api/host/close`): an `exit` that keeps the draft. */
+    closedBy?: "agent";
+    /** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+    unsentAnnotations?: number;
   }>;
   /** Stop the server */
   stop: () => void;
+  /** Host-only status and close, called in-process by a host that runs this server itself. */
+  hostControl: HostControl;
 }
 
 // --- Server Implementation ---
@@ -665,6 +679,10 @@ export async function startAnnotateServer(
     /** A Done with nothing to send (see isNothingToSendFeedbackBody): the
      *  feedback is still the legacy zero-state sentence. */
     nothingToSend?: boolean;
+    /** The host closed the session (`POST /api/host/close`): an `exit` that keeps the draft. */
+    closedBy?: "agent";
+    /** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+    unsentAnnotations?: number;
   }) => void;
   const decisionPromise = new Promise<{
     feedback: string;
@@ -676,6 +694,10 @@ export async function startAnnotateServer(
     /** A Done with nothing to send (see isNothingToSendFeedbackBody): the
      *  feedback is still the legacy zero-state sentence. */
     nothingToSend?: boolean;
+    /** The host closed the session (`POST /api/host/close`): an `exit` that keeps the draft. */
+    closedBy?: "agent";
+    /** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+    unsentAnnotations?: number;
   }>((resolve) => {
     resolveDecision = resolve;
   });
@@ -703,6 +725,37 @@ export async function startAnnotateServer(
     { graceMs: clientLeaseGraceMs },
   );
 
+  // Host-only session control (packages/shared/host-control.ts): the agent
+  // that opened this session can ask what it holds and close it. Closing is
+  // the reviewer's Close, marked closedBy "agent", WITHOUT deleting the draft
+  // or archiving a decision the reviewer never made.
+  const hostControlToken = resolveHostControlToken(options.hostControlToken);
+  const hostDocuments = (): string[] =>
+    mode === "annotate-last"
+      ? []
+      : mode === "annotate-folder" && folderPath
+        ? [folderPath]
+        : mode === "annotate-app" && liveApp
+          ? [liveApp.targetUrl]
+          : filePath ? [filePath] : [];
+  const hostControl: HostControl = {
+    status: () => ({
+      kind: mode === "annotate-last" ? "annotate-last" : "annotate",
+      documents: hostDocuments(),
+      unsentAnnotations: countUnsentDraftComments(loadDraft(draftKey)),
+      decided: decision.isSettled(),
+    }),
+    close: () => {
+      const unsentAnnotations = countUnsentDraftComments(loadDraft(draftKey));
+      if (!decision.settle({ feedback: "", annotations: [], exit: true, closedBy: "agent", unsentAnnotations })) {
+        return { closed: false, reason: "decided" };
+      }
+      clientLease.cancel();
+      externalAnnotations.broadcast(hostSessionClosedEvent(unsentAnnotations));
+      return { closed: true, unsentAnnotations };
+    },
+  };
+
   // Live app session state, populated after the annotate port is known (the
   // editor origins carry the port) and before onReady advertises the URL.
   let liveProxy: LiveAppProxy | null = null;
@@ -719,6 +772,13 @@ export async function startAnnotateServer(
 
         async fetch(req, server) {
           const url = new URL(req.url);
+
+          const hostControlResponse = handleHostControl(req, url, {
+            token: hostControlToken,
+            getServerPort: () => boundPort,
+            control: hostControl,
+          });
+          if (hostControlResponse) return hostControlResponse;
 
           if (agentTerminal.matches(url.pathname)) {
             if (agentTerminal.capability.enabled && agentTerminal.upgrade(req, server)) {
@@ -1397,5 +1457,6 @@ export async function startAnnotateServer(
     isRemote,
     waitForDecision: () => decisionPromise,
     stop,
+    hostControl,
   };
 }

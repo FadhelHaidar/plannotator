@@ -7,6 +7,8 @@ import { basename, resolve as resolvePath } from "node:path";
 
 import { SingleFlight } from "../generated/single-flight.ts";
 import { contentHash } from "../generated/draft.ts";
+import { countUnsentDraftComments, hostSessionClosedEvent } from "../generated/host-control.ts";
+import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control.ts";
 import { createReviewDraftSession, prDraftTargetKey, type ReviewDraftKeys } from "../generated/review-draft.ts";
 import { loadConfig, saveConfig, detectGitUser, getServerConfig, parseReviewAnalysisConfig, resolveAIEnabled, resolveSharingEnabled, resolveClaudeSandbox, resolveCursorSandbox, resolveFeedbackHistory, resolveGuideHistory, resolveGuideShareUrl, resolveGitRemoteCheck, resolveReviewProgress } from "../generated/config.ts";
 import { appendFeedbackRecord, countChangedFiles, deriveFeedbackProject, type FeedbackDecision, type FeedbackReviewTarget } from "../generated/feedback-archive.ts";
@@ -307,13 +309,21 @@ export interface ReviewServerResult {
 		annotations: unknown[];
 		agentSwitch?: string;
 		exit?: boolean;
+		/** The host closed the session: an `exit` that keeps the draft. */
+		closedBy?: "agent";
+		/** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+		unsentAnnotations?: number;
 	}>;
 	stop: () => void;
+	/** Host-only status and close (packages/shared/host-control.ts), for Pi to call in-process. */
+	hostControl: HostControl;
 }
 
 export async function startReviewServer(options: {
 	/** "Ask this session": the in-process bridge to the Pi session that opened this review. */
 	sessionBridge?: SessionBridge;
+	/** Turns on `/api/host/status` and `/api/host/close` for a caller in another process (never in remote mode). */
+	hostControlToken?: string;
 	/** Return the active local directory with the decision for cross-directory feedback. */
 	includeReviewDirectory?: boolean;
 	rawPatch: string;
@@ -1847,6 +1857,7 @@ export async function startReviewServer(options: {
 		(options.shareBaseUrl ?? process.env.PLANNOTATOR_SHARE_URL) || undefined;
 	const pasteApiUrl =
 		(options.pasteApiUrl ?? process.env.PLANNOTATOR_PASTE_URL) || undefined;
+	let reviewDecided = false;
 	let resolveDecision!: (result: {
 		approved: boolean;
 		feedback: string;
@@ -1854,6 +1865,10 @@ export async function startReviewServer(options: {
 		annotations: unknown[];
 		agentSwitch?: string;
 		exit?: boolean;
+		/** The host closed the session: an `exit` that keeps the draft. */
+		closedBy?: "agent";
+		/** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+		unsentAnnotations?: number;
 	}) => void;
 	const decisionPromise = new Promise<{
 		approved: boolean;
@@ -1862,9 +1877,40 @@ export async function startReviewServer(options: {
 		annotations: unknown[];
 		agentSwitch?: string;
 		exit?: boolean;
+		/** The host closed the session: an `exit` that keeps the draft. */
+		closedBy?: "agent";
+		/** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+		unsentAnnotations?: number;
 	}>((r) => {
-		resolveDecision = r;
+		resolveDecision = (result) => {
+			reviewDecided = true;
+			r(result);
+		};
 	});
+
+	// Host-only session control: mirrors packages/server/review.ts. Closing is
+	// the reviewer's Close, marked closedBy "agent", WITHOUT settling the draft
+	// or archiving a decision the reviewer never made.
+	const hostControlToken = resolveHostControlToken(options.hostControlToken);
+	const unsentReviewComments = (): number => {
+		const loaded = reviewDrafts.load(currentDraftKeys());
+		return loaded.found ? countUnsentDraftComments(loaded.draft) : 0;
+	};
+	const hostControl: HostControl = {
+		status: () => ({
+			kind: "review",
+			documents: isPRMode && prMeta ? [prMeta.url] : [],
+			unsentAnnotations: unsentReviewComments(),
+			decided: reviewDecided,
+		}),
+		close: () => {
+			if (reviewDecided) return { closed: false, reason: "decided" };
+			const unsentAnnotations = unsentReviewComments();
+			resolveDecision({ approved: false, feedback: "", annotations: [], exit: true, closedBy: "agent", unsentAnnotations });
+			externalAnnotations.broadcast(hostSessionClosedEvent(unsentAnnotations));
+			return { closed: true, unsentAnnotations };
+		},
+	};
 
 	// Set once bound: "Ask this session" answers only a loopback Host with this port.
 	let boundPort: number | undefined;
@@ -1872,6 +1918,8 @@ export async function startReviewServer(options: {
 
 	const server = createServer(async (req, res) => {
 		const url = requestUrl(req);
+
+		if (handleHostControl(req, res, url, { token: hostControlToken, getServerPort: () => boundPort, control: hostControl })) return;
 
 		// API: Get tour result
 		if (url.pathname.match(/^\/api\/tour\/[^/]+$/) && req.method === "GET") {
@@ -3839,6 +3887,7 @@ export async function startReviewServer(options: {
 		url: serverUrl,
 		isRemote,
 		waitForDecision: () => decisionPromise,
+		hostControl,
 		stop: () => {
 			// try/finally: a throwing dispose must never leave the listener bound.
 			try {

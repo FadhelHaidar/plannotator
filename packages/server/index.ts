@@ -49,7 +49,7 @@ import { isFaviconStyle, type FaviconStyle } from "@plannotator/shared/favicon";
 import { readImprovementHook, getImprovementHookExpectedPath } from "@plannotator/shared/improvement-hooks";
 import { composeImproveContext } from "@plannotator/shared/pfm-reminder";
 import { handleImage, handleUpload, handleAgents, handleServerReady, handleDraftSave, handleDraftLoad, handleDraftDelete, handleApiNotFound, handleFavicon, handleReferenceSkills, handleReferenceSkillContent, handleSaveNotes, readDraftGenerationFromBody, type OpencodeClient } from "./shared-handlers";
-import { contentHash, deleteDraft } from "./draft";
+import { contentHash, deleteDraft, loadDraft } from "./draft";
 import { handleDoc, handleDocExists, handleObsidianVaults, handleObsidianFiles, handleObsidianDoc, handleFileBrowserFiles } from "./reference-handlers";
 import { closeAllFileBrowserWatchers, handleFileBrowserFilesStream } from "./reference-watch";
 import { warmFileListCache } from "@plannotator/shared/resolve-file";
@@ -57,6 +57,8 @@ import { createEditorAnnotationHandler } from "./editor-annotations";
 import { createExternalAnnotationHandler } from "./external-annotations";
 import { isWSL } from "./browser";
 import { createAIRuntime } from "./ai-runtime";
+import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control";
+import { countUnsentDraftComments } from "@plannotator/shared/host-control";
 import { isAIEndpointPath, isLongLivedAIEndpointPath, type AIEndpoints, type SessionBridge } from "@plannotator/ai";
 import { isArchiveDocumentMutation } from "@plannotator/shared/archive-mode";
 import { readPlanFile } from "@plannotator/shared/doc-resolve";
@@ -74,6 +76,12 @@ export { type VaultNode, buildFileTree } from "@plannotator/shared/reference-com
 export interface ServerOptions {
   /** "Ask this session": the host bridge to the agent session (see packages/ai/session-bridge.ts). A host whose plan flow blocks the session must report `blocked`. */
   sessionBridge?: SessionBridge;
+  /**
+   * The token `/api/host/status` accepts (packages/shared/host-control.ts).
+   * Default: the pull-bridge token the host launched the CLI with; off in
+   * remote mode. A plan review has no host close: it ends with a decision.
+   */
+  hostControlToken?: string;
   /** The plan markdown content */
   plan: string;
   /** Origin identifier (e.g., "claude-code", "opencode") */
@@ -147,6 +155,8 @@ export interface ServerResult {
   updatePlan: (plan: string) => PlanRevisionResult | null;
   /** Stop the server and close active browser connections. */
   stop: () => Promise<void>;
+  /** Host-only status (no close: a plan review ends with the reviewer's decision). */
+  hostControl: HostControl;
 }
 
 // --- Server Implementation ---
@@ -176,6 +186,17 @@ export async function startPlannotatorServer(
   // (note integrations): updatePlan then refuses, so the plan a decision
   // names cannot be swapped while that decision is still being recorded.
   let decisionClaimed = false;
+
+  // Host-only status (packages/shared/host-control.ts). Never in archive mode.
+  const hostControlToken = mode === "archive" ? undefined : resolveHostControlToken(options.hostControlToken);
+  const hostControl: HostControl = {
+    status: () => ({
+      kind: "plan",
+      documents: [],
+      unsentAnnotations: draftKey ? countUnsentDraftComments(loadDraft(draftKey)) : 0,
+      decided: decisionSettled || decisionClaimed,
+    }),
+  };
 
   const isRemote = isRemoteSession();
   const wslFlag = await isWSL();
@@ -325,6 +346,13 @@ export async function startPlannotatorServer(
 
         async fetch(req, server) {
           const url = new URL(req.url);
+
+          const hostControlResponse = handleHostControl(req, url, {
+            token: hostControlToken,
+            getServerPort: () => boundPort,
+            control: hostControl,
+          });
+          if (hostControlResponse) return hostControlResponse;
 
           // API: Get a specific plan version from history
           if (url.pathname === "/api/plan/version") {
@@ -797,5 +825,6 @@ export async function startPlannotatorServer(
       return { revision: planRevision, version: historyResult.version, unchanged: false };
     },
     stop,
+    hostControl,
   };
 }
