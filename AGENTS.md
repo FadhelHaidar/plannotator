@@ -878,7 +878,11 @@ error, a slash command listed). Checked live on OpenCode 2.0.22 with a fake
 model: the model's tool call opened annotate and review, `list` showed the
 server's count, the reviewer's feedback and a gated approval arrived as new
 turns headed with the id, `close all` closed a review holding 2 draft comments
-with no turn delivered, and Ask AI showed "Ask this session".
+with no turn delivered, and Ask AI showed "Ask this session". A list target
+(`["notes.md", "mock.html"]`) opened one `annotate-bundle` session in that
+order, `list` named it `2 files: notes.md, mock.html`, its feedback arrived
+headed `— Feedback · 2 comments.` under `Files: notes.md, mock.html`, and
+`close all` closed a second bundle.
 
 ### Codex Stop hook: which turn the plan belongs to
 
