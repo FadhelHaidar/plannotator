@@ -4,10 +4,15 @@ import {
   createOpenCodeSessionBridge,
   markPlanReviewPending,
   readAnswerAfter,
+  TAKEN_OVER_INTERRUPT_TEXT,
   TAKEN_OVER_TEXT,
   type OpenCodeSessionBridge,
 } from "./opencode-session-bridge";
-import { SESSION_ASK_TAKEN_OVER_TEXT, type SessionBridgeErrorCode } from "@plannotator/ai/session-bridge";
+import {
+  SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT,
+  SESSION_ASK_TAKEN_OVER_TEXT,
+  type SessionBridgeErrorCode,
+} from "@plannotator/ai/session-bridge";
 
 const SESSION = "ses_test";
 
@@ -266,6 +271,7 @@ describe("OpenCode session bridge", () => {
     host.emit("session.text.started", { assistantMessageID: "m1", ordinal: 0 });
     host.emit("session.text.delta", { assistantMessageID: "m1", ordinal: 0, delta: "Because " });
     // The person steers a prompt of their own into the running execution.
+    host.emit("session.inbox.enqueued", { inboxID: "msg_person", item: { type: "user", delivery: "steer", payload: {} } });
     host.emit("session.inbox.delivered", { inboxID: "msg_person" });
     host.emit("session.step.started", { assistantMessageID: "m2" });
     host.emit("session.text.started", { assistantMessageID: "m2", ordinal: 0 });
@@ -276,7 +282,7 @@ describe("OpenCode session bridge", () => {
     expect(sink.deltas).toEqual(["Because "]);
 
     controller.abort();
-    await expect(Promise.resolve(bridge.interrupt?.())).rejects.toThrow(/prompt you typed/);
+    await expect(Promise.resolve(bridge.interrupt?.())).rejects.toThrow(TAKEN_OVER_INTERRUPT_TEXT);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(host.interrupts).toBe(0);
 
@@ -294,6 +300,10 @@ describe("OpenCode session bridge", () => {
     bridge.ask({ askId: "a1", text: "q", mode: "turn" }, sink.sink, new AbortController().signal);
     await waitFor(() => host.prompts.length === 1);
     host.emit("session.execution.started");
+    // Even when the notices are user rows, the same batch as ours takes nothing over.
+    for (const id of ["msg_notice", "msg_notice_after"]) {
+      host.emit("session.inbox.enqueued", { inboxID: id, item: { type: "user", delivery: "steer", payload: {} } });
+    }
     host.emit("session.inbox.delivered", { inboxID: "msg_notice" });
     host.emit("session.inbox.delivered", { inboxID: host.prompts[0].id });
     host.emit("session.inbox.delivered", { inboxID: "msg_notice_after" });
@@ -306,9 +316,53 @@ describe("OpenCode session bridge", () => {
     expect(sink.error).toBeUndefined();
   });
 
-  test("the plugin sends the same take-over note the provider would", () => {
-    // Spelled out in the plugin so an older CLI server still shows it.
+  // The failure this guards: a synthetic notice or a compaction delivered
+  // mid-answer cut the answer off with a take-over note.
+  test("only a USER row takes the run over: synthetic, compaction, move and unseen rows do not", async () => {
+    for (const kind of ["synthetic", "compaction", "move", null]) {
+      const host = fakeHost();
+      const bridge = bridgeFor(host);
+      const sink = recordingSink();
+      bridge.ask({ askId: "a1", text: "q", mode: "turn" }, sink.sink, new AbortController().signal);
+      await waitFor(() => host.prompts.length === 1);
+      host.emit("session.execution.started");
+      host.emit("session.inbox.delivered", { inboxID: host.prompts[0].id });
+      host.emit("session.step.started", { assistantMessageID: "m1" });
+      host.emit("session.text.delta", { assistantMessageID: "m1", ordinal: 0, delta: "Because " });
+      if (kind) host.emit("session.inbox.enqueued", { inboxID: "msg_row", item: { type: kind, delivery: "steer", payload: {} } });
+      host.emit("session.inbox.delivered", { inboxID: "msg_row" });
+      host.emit("session.text.delta", { assistantMessageID: "m1", ordinal: 0, delta: "of X." });
+      host.emit("session.execution.succeeded");
+      await waitFor(() => sink.done !== undefined || sink.error !== undefined);
+      expect([kind, sink.done, sink.error]).toEqual([kind, "Because of X.", undefined]);
+    }
+  });
+
+  test("a user row arriving after the answer finished (last step stopped, no tool calls) settles the answer as done", async () => {
+    const host = fakeHost();
+    const bridge = bridgeFor(host);
+    const sink = recordingSink();
+    bridge.ask({ askId: "a1", text: "q", mode: "turn" }, sink.sink, new AbortController().signal);
+    await waitFor(() => host.prompts.length === 1);
+    host.emit("session.execution.started");
+    host.emit("session.inbox.delivered", { inboxID: host.prompts[0].id });
+    host.emit("session.step.started", { assistantMessageID: "m1" });
+    host.emit("session.text.delta", { assistantMessageID: "m1", ordinal: 0, delta: "Done." });
+    host.emit("session.step.ended", { assistantMessageID: "m1", finish: "stop" });
+    host.emit("session.inbox.enqueued", { inboxID: "msg_next", item: { type: "user", delivery: "queue", payload: {} } });
+    host.emit("session.inbox.delivered", { inboxID: "msg_next" });
+    host.emit("session.step.started", { assistantMessageID: "m2" });
+    host.emit("session.text.delta", { assistantMessageID: "m2", ordinal: 0, delta: "Next thing." });
+    await waitFor(() => sink.done !== undefined);
+    expect(sink.done).toBe("Done.");
+    expect(sink.error).toBeUndefined();
+    expect(sink.deltas).toEqual(["Done."]);
+  });
+
+  test("the plugin sends the same take-over texts the provider would", () => {
+    // Spelled out in the plugin so an older CLI server still shows them.
     expect(TAKEN_OVER_TEXT).toBe(SESSION_ASK_TAKEN_OVER_TEXT);
+    expect(TAKEN_OVER_INTERRUPT_TEXT).toBe(SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT);
   });
 
   test("refuses an interrupt while the session waits on a plan review", async () => {

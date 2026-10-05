@@ -41,6 +41,22 @@ export interface PullSessionBridgeClientOptions {
 interface HostAsk {
 	controller: AbortController;
 	finished: boolean;
+	/** What streamed so far: the answer a `taken_over` fallback settles with. */
+	text: string;
+}
+
+/** Used when a host sends `taken_over` without a message (in-process hosts rely on the provider's). */
+const TAKEN_OVER_FALLBACK_NOTE = "Another message entered this session while it was answering, so the rest of the reply went to that message.";
+
+/**
+ * A server that does not advertise `taken_over` reads it as `failed`, and its
+ * UI then replaces the partial answer with the error. Settle as an answer
+ * instead: what streamed, plus the note as its last paragraph.
+ */
+export function takenOverFallback(streamed: string, message: string | undefined): { delta: string; answer: string } {
+	const note = `_${(message || TAKEN_OVER_FALLBACK_NOTE).trim()}_`;
+	const delta = streamed ? `\n\n${note}` : note;
+	return { delta, answer: `${streamed}${delta}` };
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -78,6 +94,8 @@ export async function runPullSessionBridgeClient(options: PullSessionBridgeClien
 	const asks = new Map<string, HostAsk>();
 	const interrupts = new Set<string>();
 	let stopped = false;
+	/** From the latest poll answer's `features` (SESSION_BRIDGE_POLL_FEATURES). */
+	let serverTakesTakenOver = false;
 
 	// One ordered outbox: events reach the server in the order they happened.
 	let outbox: BridgeHostEvent[] = [];
@@ -134,7 +152,7 @@ export async function runPullSessionBridgeClient(options: PullSessionBridgeClien
 	const runAsk = (command: Extract<BridgeCommand, { type: "ask" }>) => {
 		if (asks.has(command.askId)) return;
 		const controller = new AbortController();
-		const ask: HostAsk = { controller, finished: false };
+		const ask: HostAsk = { controller, finished: false, text: "" };
 		asks.set(command.askId, ask);
 		emit({ type: "started", askId: command.askId });
 		const finish = (event: BridgeHostEvent) => {
@@ -147,14 +165,24 @@ export async function runPullSessionBridgeClient(options: PullSessionBridgeClien
 				{ askId: command.askId, text: command.text, mode: command.mode },
 				{
 					delta: (text) => {
-						if (!ask.finished && text) emit({ type: "delta", askId: command.askId, text }, false);
+						if (ask.finished || !text) return;
+						ask.text += text;
+						emit({ type: "delta", askId: command.askId, text }, false);
 					},
 					tool: (name) => {
 						if (!ask.finished && name) emit({ type: "tool", askId: command.askId, name });
 					},
 					done: (answer) => finish({ type: "done", askId: command.askId, answer }),
-					error: (code: SessionBridgeErrorCode, message?: string) =>
-						finish({ type: "error", askId: command.askId, code, ...(message ? { message } : {}) }),
+					error: (code: SessionBridgeErrorCode, message?: string) => {
+						if (code === "taken_over" && !serverTakesTakenOver) {
+							if (ask.finished) return;
+							const fallback = takenOverFallback(ask.text, message);
+							emit({ type: "delta", askId: command.askId, text: fallback.delta }, false);
+							finish({ type: "done", askId: command.askId, answer: fallback.answer });
+							return;
+						}
+						finish({ type: "error", askId: command.askId, code, ...(message ? { message } : {}) });
+					},
 				},
 				controller.signal,
 			);
@@ -249,12 +277,13 @@ export async function runPullSessionBridgeClient(options: PullSessionBridgeClien
 				continue;
 			}
 			failures = 0;
-			let body: { commands?: BridgeCommand[]; closing?: boolean } = {};
+			let body: { commands?: BridgeCommand[]; closing?: boolean; features?: unknown } = {};
 			try {
 				body = (await res.json()) as typeof body;
 			} catch {
 				// Treat as an empty answer.
 			}
+			serverTakesTakenOver = Array.isArray(body.features) && body.features.includes("taken_over");
 			for (const command of Array.isArray(body.commands) ? body.commands : []) {
 				if (command && typeof command === "object" && typeof command.type === "string") handleCommand(command);
 			}

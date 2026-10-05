@@ -5,9 +5,9 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { createPullSessionBridge, type PullSessionBridge } from '../../../../packages/ai/session-bridge-pull.ts'
-import { createBridge, TAKEN_OVER_INTERRUPT_TEXT } from './bridge'
+import { createBridge, TAKEN_OVER_INTERRUPT_TEXT, takenOverFallback } from './bridge'
 import { fakeHost, type FakeHost } from './testing/fake-host'
-import { TAKEN_OVER_TEXT, TurnTracker } from './turns'
+import { TAKEN_OVER_BY_PERSON_TEXT, TurnTracker } from './turns'
 
 const TOKEN = 'k'.repeat(64)
 let server: PullSessionBridge | null = null
@@ -19,7 +19,7 @@ afterEach(() => {
   server = null
 })
 
-function wire(host: FakeHost, bridge: PullSessionBridge) {
+function wire(host: FakeHost, bridge: PullSessionBridge, options: { olderServer?: boolean } = {}) {
   host.onFetch = async (url, body) => {
     const response = await bridge.handle(
       new Request(url, {
@@ -29,7 +29,13 @@ function wire(host: FakeHost, bridge: PullSessionBridge) {
       }),
     )
     if (!response) return { status: 404, ok: false, text: '' }
-    return { status: response.status, ok: response.ok, text: await response.text() }
+    let text = await response.text()
+    if (options.olderServer && url.endsWith('/poll')) {
+      // A server from before the `features` advert.
+      const { features: _features, ...rest } = JSON.parse(text)
+      text = JSON.stringify(rest)
+    }
+    return { status: response.status, ok: response.ok, text }
   }
 }
 
@@ -163,13 +169,46 @@ describe('Ask this session over the pull bridge', () => {
 
     await until(() => seen.error !== null)
     expect(seen.error).toBe('taken_over')
-    expect(seen.message).toBe(TAKEN_OVER_TEXT)
+    expect(seen.message).toBe(TAKEN_OVER_BY_PERSON_TEXT)
     expect(seen.deltas).toBe('Because ')
 
     // A late Stop and "Interrupt and ask now" both leave the person's turn alone.
     controller.abort()
     await expect(server.bridge.interrupt!()).rejects.toThrow(TAKEN_OVER_INTERRUPT_TEXT)
     expect(host.aborted).toEqual([])
+
+    live = false
+    server.dispose()
+    await running
+  })
+
+  // The failure this guards: a newer mod against an older CLI, whose server
+  // reads `taken_over` as `failed` and whose UI then replaces the partial
+  // answer with the error.
+  test('against a server that does not advertise taken_over, a take-over settles as the partial answer plus the note', async () => {
+    live = true
+    server = createPullSessionBridge({ token: TOKEN, host: 'claude-code', modes: { turn: true, transient: false } })
+    const host = fakeHost()
+    wire(host, server, { olderServer: true })
+    const turns = new TurnTracker()
+    const client = createBridge({ host, baseUrl: 'http://127.0.0.1:4321', token: TOKEN, turns, isLive: () => live })
+    const running = client.run()
+
+    await until(() => server!.bridge.status() === 'ready')
+    const { seen, sink } = collector()
+    server.bridge.ask({ askId: 'ask-4', text: '[Plannotator Ask AI] Why step 2?', mode: 'turn' }, sink, new AbortController().signal)
+    await until(() => host.submits.length === 1)
+    turns.onTurnStart('turn-4', 'The plannotator plugin sent a message:\n[Plannotator Ask AI] Why step 2?')
+    turns.onStep('turn-4')
+    turns.onText('turn-4', 'Because ')
+    turns.onPromptEntered({ text: 'also fix the tests', fromUs: false, turnId: 'turn-4', originKind: 'composer' })
+    turns.onStep('turn-4')
+
+    await until(() => seen.done !== null)
+    expect(seen.error).toBeNull()
+    expect(seen.done).toBe(takenOverFallback('Because ', TAKEN_OVER_BY_PERSON_TEXT).answer)
+    expect(seen.deltas).toBe(seen.done)
+    expect(seen.done).toContain(TAKEN_OVER_BY_PERSON_TEXT)
 
     live = false
     server.dispose()

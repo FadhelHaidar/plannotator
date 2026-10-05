@@ -36,14 +36,19 @@
  *   turn that is ours, or when the reviewer chose "Interrupt and ask now", and
  *   never while the session waits on a plan review (status `blocked`).
  * - Take-over: once our question is delivered and the model has started
- *   answering it (`session.step.started`, or any answer output), another
- *   `session.inbox.delivered` in the same session is a prompt we did not send
- *   (the person steering, a queued row promoted mid-run) entering the run, so
- *   the rest of the run answers it. Rows promoted in the same batch as ours
- *   (a command's session-URL notice) are delivered before the model starts
- *   and take nothing over. On a take-over the question settles at once with
- *   `taken_over` (deltas already sent stand), and neither a Stop nor
- *   "Interrupt and ask now" interrupts that execution afterwards.
+ *   answering it (`session.step.started`, or any answer output), a
+ *   `session.inbox.delivered` for another USER row is a prompt we did not send
+ *   (the person steering, a queued prompt promoted mid-run) entering the run,
+ *   so the rest of the run answers it. The delivered event carries only the
+ *   row id, so each row's kind is read from `session.inbox.enqueued`
+ *   (`item.type`: user | synthetic | compaction | move); a synthetic notice,
+ *   a compaction, a move, or a row whose kind this bridge never saw takes
+ *   nothing over. Rows promoted in the same batch as ours (a command's
+ *   session-URL notice) are delivered before the model starts and take
+ *   nothing over either. On a take-over the question settles at once: `done`
+ *   when the last model step had finished the answer (`finish: "stop"`, no
+ *   tool calls), else `taken_over` (deltas already sent stand). Neither a Stop
+ *   nor "Interrupt and ask now" interrupts that execution afterwards.
  */
 
 import type {
@@ -139,20 +144,25 @@ interface ActiveTurn {
 	watchdog: ReturnType<typeof setTimeout> | null;
 	/** The model began answering after our row was delivered: a later delivery is someone else's prompt. */
 	answering: boolean;
+	/** How the last model step ended (`stop`: the answer was complete, no tool calls). */
+	lastFinish: string | undefined;
 }
 
 /**
- * Sent with `taken_over`, so an older CLI server (it reads an unknown code as
- * `failed`) still says why the answer stopped. Equal to
- * `SESSION_ASK_TAKEN_OVER_TEXT` (packages/ai/session-bridge.ts; a test holds
- * them together), spelled out to keep this module's imports type-only.
+ * Sent with `taken_over` (a user row can be the person or another plugin's
+ * prompt, so the wording is neutral). Equal to `SESSION_ASK_TAKEN_OVER_TEXT`
+ * (packages/ai/session-bridge.ts; a test holds them together), spelled out to
+ * keep this module's imports type-only.
  */
 export const TAKEN_OVER_TEXT =
-	"You typed into this session while it was answering, so the rest of the reply went to your prompt.";
+	"Another message entered this session while it was answering, so the rest of the reply went to that message.";
 
-/** Why "Interrupt and ask now" refuses an execution the person took over. */
-const TAKEN_OVER_INTERRUPT_TEXT =
-	"The session is answering a prompt you typed into it, so Plannotator will not stop it. Ask when it finishes instead.";
+/** Why "Interrupt and ask now" refuses a taken-over execution. Equal to `SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT`. */
+export const TAKEN_OVER_INTERRUPT_TEXT =
+	"The session is now answering another message, so Plannotator will not stop it. Ask when it finishes instead.";
+
+/** Inbox row kinds remembered per session (`session.inbox.enqueued`), bounded. */
+const MAX_REMEMBERED_ROWS = 256;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object";
@@ -206,6 +216,8 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 	let probing = false;
 	/** The execution that answered our question was taken over: never interrupted from Plannotator. */
 	let takenOverRun = false;
+	/** `item.type` of each inbox row seen enqueued (user | synthetic | compaction | move). */
+	const rowKinds = new Map<string, string>();
 
 	const status = (): SessionBridgeStatus => {
 		if (gone || disposed) return "gone";
@@ -346,19 +358,43 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 				lastStartedAt = Date.now();
 				running = true;
 				return;
+			case "session.inbox.enqueued": {
+				const item = isRecord(data.item) ? data.item : undefined;
+				if (typeof data.inboxID === "string" && typeof item?.type === "string") {
+					rowKinds.set(data.inboxID, item.type);
+					if (rowKinds.size > MAX_REMEMBERED_ROWS) rowKinds.delete(rowKinds.keys().next().value!);
+				}
+				return;
+			}
 			case "session.inbox.delivered":
 				if (turn && data.inboxID === turn.messageID) {
 					turn.delivered = true;
 					clearWatchdog(turn);
 					// Stopped before it reached the model: stop it now that it is ours.
 					if (turn.cancelled) void session?.interrupt?.({ sessionID }).catch(() => {});
-				} else if (turn?.delivered && turn.answering && !turn.cancelled) {
+				} else if (
+					turn?.delivered &&
+					turn.answering &&
+					!turn.cancelled &&
+					typeof data.inboxID === "string" &&
+					rowKinds.get(data.inboxID) === "user"
+				) {
 					// Someone else's prompt entered the run answering our question.
 					takenOverRun = true;
-					finishTurn(turn, () => turn.sink.error("taken_over", TAKEN_OVER_TEXT));
+					const complete = turn.lastFinish === "stop" && !!turn.answer;
+					finishTurn(turn, () => (complete ? turn.sink.done(turn.answer) : turn.sink.error("taken_over", TAKEN_OVER_TEXT)));
 				}
+				if (typeof data.inboxID === "string") rowKinds.delete(data.inboxID);
 				return;
 			case "session.step.started":
+				if (turn?.delivered) {
+					turn.answering = true;
+					turn.lastFinish = undefined;
+				}
+				return;
+			case "session.step.ended":
+				if (turn?.delivered && typeof data.finish === "string") turn.lastFinish = data.finish;
+				return;
 			case "session.reasoning.started":
 				if (turn?.delivered) turn.answering = true;
 				return;
@@ -438,6 +474,7 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 			needsSeparator: false,
 			watchdog: null,
 			answering: false,
+			lastFinish: undefined,
 		};
 		active = turn;
 

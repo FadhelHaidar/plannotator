@@ -20,7 +20,7 @@ import {
   SESSION_BRIDGE_POLL_PATH,
   type PullSessionBridgeOptions,
 } from "./session-bridge-pull.ts";
-import { runPullSessionBridgeClient } from "./session-bridge-pull-client.ts";
+import { runPullSessionBridgeClient, takenOverFallback } from "./session-bridge-pull-client.ts";
 import type { AIContext, AIMessage } from "./types.ts";
 
 const TOKEN = "t".repeat(43);
@@ -87,7 +87,7 @@ afterEach(() => {
  * A Plannotator server's AI runtime with a pull bridge, plus a host process
  * simulated by the real pull client talking to it through `fetch`.
  */
-function setup(options: Partial<PullSessionBridgeOptions> = {}, host = fakeHost()) {
+function setup(options: Partial<PullSessionBridgeOptions> = {}, host = fakeHost(), wire: { olderServer?: boolean } = {}) {
   const pull = createPullSessionBridge({
     token: TOKEN,
     host: "opencode",
@@ -110,8 +110,14 @@ function setup(options: Partial<PullSessionBridgeOptions> = {}, host = fakeHost(
     (endpoints as Record<string, (req: Request) => Promise<Response>>)[path](
       new Request(`http://${HOST}${path}`, { ...init, headers: { host: HOST, ...(init.headers as Record<string, string>), ...headers } }),
     );
-  const fetchShim = (async (url: string | URL | Request, init?: RequestInit) =>
-    call(new URL(String(url)).pathname, init ?? {})) as typeof fetch;
+  const fetchShim = (async (url: string | URL | Request, init?: RequestInit) => {
+    const path = new URL(String(url)).pathname;
+    const res = await call(path, init ?? {});
+    if (!wire.olderServer || path !== SESSION_BRIDGE_POLL_PATH) return res;
+    // A server from before the `features` advert.
+    const { features: _features, ...rest } = (await res.json()) as Record<string, unknown>;
+    return Response.json(rest, { status: res.status });
+  }) as typeof fetch;
   const controller = new AbortController();
   const startHost = (overrides: { token?: string } = {}) =>
     runPullSessionBridgeClient({
@@ -171,6 +177,23 @@ describe("pull session bridge", () => {
     const text = run.messages.filter((m) => m.type === "text_delta").map((m) => (m as { delta: string }).delta).join("");
     expect(text).toBe("Because ");
     expect(run.messages.at(-1)).toEqual({ type: "error", code: SESSION_BRIDGE_ERROR.takenOver, error: "the person typed" });
+  });
+
+  // The failure this guards: a newer OpenCode plugin against an older CLI,
+  // whose UI would replace the partial answer with a "failed" error.
+  test("against a server that does not advertise taken_over, the host settles the partial answer plus the note", async () => {
+    const { provider, host, startHost } = setup({}, fakeHost(), { olderServer: true });
+    void startHost();
+    const session = await provider.createSession({ context: CONTEXT });
+    const run = collect(session.query("Why this change?"));
+    await waitFor(() => host.asks.length === 1);
+    host.asks[0].sink.delta("Because ");
+    host.asks[0].sink.error("taken_over", "NOTE");
+    await run.done;
+    const fallback = takenOverFallback("Because ", "NOTE");
+    const text = run.messages.filter((m) => m.type === "text_delta").map((m) => (m as { delta: string }).delta).join("");
+    expect(text).toBe(fallback.answer);
+    expect(run.messages.at(-1)).toMatchObject({ type: "result", success: true, result: fallback.answer });
   });
 
   test("a question asked before the host connects waits for its first poll", async () => {
@@ -321,10 +344,10 @@ describe("pull session bridge", () => {
     const first = call(SESSION_BRIDGE_POLL_PATH, { method: "POST", body: JSON.stringify({ waitMs: 5_000 }) }, auth);
     await new Promise((resolve) => setTimeout(resolve, 10));
     const second = call(SESSION_BRIDGE_POLL_PATH, { method: "POST", body: JSON.stringify({ waitMs: 5_000 }) }, auth);
-    expect(await (await first).json()).toEqual({ commands: [], superseded: true });
+    expect(await (await first).json()).toEqual({ commands: [], superseded: true, features: ["taken_over"] });
     await new Promise((resolve) => setTimeout(resolve, 10));
     pull.dispose();
-    expect(await (await second).json()).toEqual({ commands: [], closing: true });
+    expect(await (await second).json()).toEqual({ commands: [], closing: true, features: ["taken_over"] });
     expect(pull.bridge.status()).toBe("gone");
   });
 

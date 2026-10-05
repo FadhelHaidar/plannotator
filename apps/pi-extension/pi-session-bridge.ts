@@ -31,9 +31,12 @@
  *   (steered). A NON-triggering custom message sent while the run streams
  *   (display-only, e.g. `plannotator-handoff`) is appended at `turn_end`
  *   instead, outside that window, and takes nothing over. On a take-over the
- *   question settles at once with `taken_over` (the deltas already sent
- *   stand), and from then on neither a Stop nor "Interrupt and ask now"
- *   aborts that run: it is the person's.
+ *   question settles at once: `done` when the turn before it ended the answer
+ *   (stop, no tool call; e.g. Plannotator's own decision follow-up arriving
+ *   after the answer finished), `taken_over` otherwise (the deltas already
+ *   sent stand). From then on until the run settles (`agent_settled`, or idle
+ *   on older Pi, so an error retry stays covered), neither a Stop nor
+ *   "Interrupt and ask now" aborts that run: it answers someone else.
  *
  * Only type imports here: this module is loaded eagerly by index.ts.
  */
@@ -113,8 +116,20 @@ export function createPiSessionBridgeHub(
 	let active: ActiveAsk | null = null;
 	/** Between a `turn_start` and that turn's assistant message: where the loop delivers queued messages. */
 	let turnPrelude = false;
-	/** The run that answered our question was taken over: never aborted from Plannotator. */
+	/** The run that answered our question was taken over: never aborted from Plannotator until it settles. */
 	let takenOverRun = false;
+	/** Older Pi (no `agent_settled`): polls idleness after the taken-over run ends. */
+	let takenOverPoll: ReturnType<typeof setInterval> | null = null;
+	let takenOverIsIdle: (() => boolean) | null = null;
+	/** The last turn of the run ended the answer: a stop with no tool call. */
+	let lastTurnFinal = false;
+
+	const clearTakenOver = () => {
+		takenOverRun = false;
+		takenOverIsIdle = null;
+		if (takenOverPoll) clearInterval(takenOverPoll);
+		takenOverPoll = null;
+	};
 
 	const finish = (ask: ActiveAsk) => {
 		clearWatchdog(ask);
@@ -133,14 +148,23 @@ export function createPiSessionBridgeHub(
 		turnPrelude = true;
 	});
 
-	pi.on("turn_end", () => {
+	pi.on("turn_end", (event) => {
 		turnPrelude = false;
+		const message = event?.message as { stopReason?: string; content?: unknown } | undefined;
+		const calledTools =
+			(Array.isArray(event?.toolResults) && event.toolResults.length > 0) ||
+			(Array.isArray(message?.content) && message.content.some((part: { type?: string } | null) => part?.type === "toolCall"));
+		lastTurnFinal = message?.stopReason === "stop" && !calledTools;
 	});
 
 	pi.on("message_start", (event) => {
 		const message = event?.message as { role?: string; customType?: string; details?: { askId?: unknown } } | undefined;
 		const inPrelude = turnPrelude;
-		if (message?.role === "assistant") turnPrelude = false;
+		const answerFinished = lastTurnFinal;
+		if (message?.role === "assistant") {
+			turnPrelude = false;
+			lastTurnFinal = false;
+		}
 		const ask = active;
 		if (!ask || !message) return;
 		const ours = message.role === "custom" && message.customType === PLANNOTATOR_ASK_CUSTOM_TYPE && message.details?.askId === ask.askId;
@@ -152,9 +176,12 @@ export function createPiSessionBridgeHub(
 		if (ask.started && (message.role === "user" || (message.role === "custom" && inPrelude))) {
 			// Someone else's prompt entered the run answering our question: the
 			// rest of it answers them. Settle now and leave the run alone.
+			clearTakenOver();
 			takenOverRun = true;
+			takenOverIsIdle = ask.isIdle;
 			finish(ask);
-			ask.sink.error("taken_over");
+			if (answerFinished && ask.answer) ask.sink.done(ask.answer);
+			else ask.sink.error("taken_over");
 			return;
 		}
 		if (message.role === "custom" && message.customType === PLANNOTATOR_ASK_CUSTOM_TYPE) return;
@@ -188,7 +215,22 @@ export function createPiSessionBridgeHub(
 
 	pi.on("agent_end", (event) => {
 		turnPrelude = false;
-		takenOverRun = false;
+		lastTurnFinal = false;
+		if (takenOverRun && !takenOverPoll) {
+			// Pi may retry this run (agent.continue): the taken-over flag holds
+			// until it settles. Without `agent_settled` (older Pi), until idle.
+			const isIdle = takenOverIsIdle;
+			takenOverPoll = setInterval(() => {
+				let idle = true;
+				try {
+					idle = isIdle ? isIdle() : true;
+				} catch {
+					idle = true;
+				}
+				if (idle) clearTakenOver();
+			}, SETTLE_POLL_MS);
+			(takenOverPoll as { unref?: () => void }).unref?.();
+		}
 		const ask = active;
 		if (!ask?.started) return;
 		if (ask.cancelled) {
@@ -221,6 +263,7 @@ export function createPiSessionBridgeHub(
 	});
 
 	pi.on("agent_settled", () => {
+		clearTakenOver();
 		const ask = active;
 		if (ask) reportPendingError(ask);
 	});
@@ -329,9 +372,8 @@ export function createPiSessionBridgeHub(
 				},
 				interrupt() {
 					if (takenOverRun) {
-						throw new Error(
-							"The session is answering a prompt you typed into it, so Plannotator will not stop it. Ask when it finishes instead.",
-						);
+						// Same text as SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT (type-only imports here).
+						throw new Error("The session is now answering another message, so Plannotator will not stop it. Ask when it finishes instead.");
 					}
 					ctx.abort();
 				},

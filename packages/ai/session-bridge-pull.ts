@@ -17,7 +17,8 @@
  *   POST /api/ai/bridge/poll   body { status?, modes?, waitMs? }
  *     Long-poll for commands. Answers as soon as there is something to do, or
  *     with an empty list after `waitMs` (clamped to 0..25s, default 25s).
- *     -> 200 { commands: BridgeCommand[], closing?: true, superseded?: true }
+ *     -> 200 { commands: BridgeCommand[], features: string[], closing?: true, superseded?: true }
+ *     `features` lists optional protocol features (SESSION_BRIDGE_POLL_FEATURES).
  *     Each poll is also the host's heartbeat and status report.
  *
  *   POST /api/ai/bridge/event  body BridgeHostEvent | { events: BridgeHostEvent[] }
@@ -67,6 +68,18 @@ export const SESSION_BRIDGE_HOST_ENV = "PLANNOTATOR_SESSION_BRIDGE_HOST";
 export const SESSION_BRIDGE_MODES_ENV = "PLANNOTATOR_SESSION_BRIDGE_MODES";
 
 export const SESSION_BRIDGE_MAX_POLL_MS = 25_000;
+
+/**
+ * Optional protocol features this server understands, sent as `features` on
+ * every poll answer. A host checks them before relying on one; a server that
+ * predates the list sends none.
+ * - `taken_over`: the `taken_over` error code (the session's turn was taken
+ *   over by another message). Without it a host settles such a question as
+ *   `done` with the partial answer and the note appended, because an older
+ *   server reads the unknown code as `failed` and its UI then replaces the
+ *   partial answer with the error.
+ */
+export const SESSION_BRIDGE_POLL_FEATURES: readonly string[] = ["taken_over"];
 const MAX_EVENT_BODY_BYTES = 1_000_000;
 
 export type BridgeCommand =
@@ -117,6 +130,11 @@ const BRIDGE_HOSTS: ReadonlySet<string> = new Set(["pi", "opencode", "claude-cod
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/** A poll answer: always advertises the protocol features this server knows. */
+function pollReply(body: Record<string, unknown>): Response {
+	return json({ ...body, features: SESSION_BRIDGE_POLL_FEATURES });
 }
 
 function json(body: unknown, status = 200): Response {
@@ -283,7 +301,7 @@ export function createPullSessionBridge(options: PullSessionBridgeOptions): Pull
 		openPoll = null;
 		clearTimeout(poll.timer);
 		lastSeen = now();
-		poll.resolve(json({ commands }));
+		poll.resolve(pollReply({ commands }));
 	};
 
 	const bridge: SessionBridge = {
@@ -407,7 +425,7 @@ export function createPullSessionBridge(options: PullSessionBridgeOptions): Pull
 				if (typeof body.modes.transient === "boolean") modes.transient = body.modes.transient;
 			}
 		}
-		if (disposed) return json({ commands: [], closing: true });
+		if (disposed) return pollReply({ commands: [], closing: true });
 		if (hostStatus === "gone") failForGone();
 
 		const requested = isRecord(body) && typeof body.waitMs === "number" && Number.isFinite(body.waitMs) ? body.waitMs : SESSION_BRIDGE_MAX_POLL_MS;
@@ -418,11 +436,11 @@ export function createPullSessionBridge(options: PullSessionBridgeOptions): Pull
 		if (previous) {
 			openPoll = null;
 			clearTimeout(previous.timer);
-			previous.resolve(json({ commands: [], superseded: true }));
+			previous.resolve(pollReply({ commands: [], superseded: true }));
 		}
 
 		const commands = takeDueCommands();
-		if (commands.length > 0 || waitMs === 0) return json({ commands });
+		if (commands.length > 0 || waitMs === 0) return pollReply({ commands });
 
 		return await new Promise<Response>((resolve) => {
 			const poll: OpenPoll = {
@@ -431,7 +449,7 @@ export function createPullSessionBridge(options: PullSessionBridgeOptions): Pull
 					if (openPoll !== poll) return;
 					openPoll = null;
 					lastSeen = now();
-					resolve(json({ commands: takeDueCommands() }));
+					resolve(pollReply({ commands: takeDueCommands() }));
 				}, waitMs),
 			};
 			openPoll = poll;
@@ -443,7 +461,7 @@ export function createPullSessionBridge(options: PullSessionBridgeOptions): Pull
 					openPoll = null;
 					clearTimeout(poll.timer);
 					lastSeen = now();
-					resolve(json({ commands: [] }));
+					resolve(pollReply({ commands: [] }));
 				},
 				{ once: true },
 			);
@@ -532,7 +550,7 @@ export function createPullSessionBridge(options: PullSessionBridgeOptions): Pull
 			openPoll = null;
 			if (poll) {
 				clearTimeout(poll.timer);
-				poll.resolve(json({ commands: [], closing: true }));
+				poll.resolve(pollReply({ commands: [], closing: true }));
 			}
 			failForGone();
 		},

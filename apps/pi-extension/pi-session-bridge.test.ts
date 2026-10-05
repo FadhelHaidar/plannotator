@@ -9,7 +9,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpRequest } from "node:http";
 import { createPiSessionBridgeHub, PLANNOTATOR_ASK_CUSTOM_TYPE } from "./pi-session-bridge.ts";
-import { SESSION_ASK_HEADER, SESSION_ASK_TAKEN_OVER_TEXT, SessionBridgeProvider } from "./generated/ai/session-bridge.ts";
+import {
+	SESSION_ASK_HEADER,
+	SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT,
+	SESSION_ASK_TAKEN_OVER_TEXT,
+	SessionBridgeProvider,
+} from "./generated/ai/session-bridge.ts";
 import type { AIMessage } from "./generated/ai/types.ts";
 import { startAnnotateServer } from "./server/serverAnnotate.ts";
 
@@ -281,7 +286,7 @@ describe("Pi session bridge", () => {
 		]);
 		controller.abort();
 		expect(host.aborts).toHaveLength(0);
-		expect(() => bridge.interrupt?.()).toThrow(/prompt you typed/);
+		expect(() => bridge.interrupt?.()).toThrow(SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT);
 		expect(host.aborts).toHaveLength(0);
 
 		// Once that run ends, interrupting the session works again.
@@ -301,6 +306,60 @@ describe("Pi session bridge", () => {
 		host.nextTurn();
 		host.emit("message_start", { type: "message_start", message: { role: "custom", customType: "other-ext", details: {} } });
 		expect(out.calls.at(-1)).toEqual(["error", "taken_over", undefined]);
+	});
+
+	// The failure this guards: Plannotator's own decision follow-up (or any
+	// follow-up) arriving after the answer had finished turned a complete
+	// answer into a "taken over" one.
+	test("a follow-up arriving after the answer finished settles the answer as done", () => {
+		const host = fakePi();
+		const bridge = createPiSessionBridgeHub(host.pi).createBridge(host.ctx as never, {});
+		const out = sink();
+		bridge.ask({ askId: "ask-1", text: "Question text", mode: "turn" }, out.sink, new AbortController().signal);
+		host.startTurn("ask-1");
+		host.assistantText("Done.");
+		// The answer's last turn: a stop with no tool call. The loop then pulls a follow-up.
+		host.emit("turn_end", { type: "turn_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text" }] }, toolResults: [] });
+		host.emit("turn_start", { type: "turn_start" });
+		host.emit("message_start", { type: "message_start", message: { role: "user", content: "plan approved" } });
+		host.assistantText("Implementing.");
+		expect(out.calls).toEqual([
+			["delta", "Done."],
+			["done", "Done."],
+		]);
+	});
+
+	test("a turn that called tools before the steer is not a finished answer", () => {
+		const host = fakePi();
+		const bridge = createPiSessionBridgeHub(host.pi).createBridge(host.ctx as never, {});
+		const out = sink();
+		bridge.ask({ askId: "ask-1", text: "Question text", mode: "turn" }, out.sink, new AbortController().signal);
+		host.startTurn("ask-1");
+		host.assistantText("Let me look.");
+		host.emit("turn_end", { type: "turn_end", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall" }] }, toolResults: [{}] });
+		host.emit("turn_start", { type: "turn_start" });
+		host.emit("message_start", { type: "message_start", message: { role: "user", content: "stop" } });
+		expect(out.calls.at(-1)).toEqual(["error", "taken_over", undefined]);
+	});
+
+	test("the taken-over run stays protected across an error retry until it settles", () => {
+		const host = fakePi();
+		const bridge = createPiSessionBridgeHub(host.pi).createBridge(host.ctx as never, {});
+		bridge.ask({ askId: "ask-1", text: "Question text", mode: "turn" }, sink().sink, new AbortController().signal);
+		host.startTurn("ask-1");
+		host.assistantText("Because ");
+		host.nextTurn();
+		host.emit("message_start", { type: "message_start", message: { role: "user", content: "also fix the tests" } });
+		// The person's run errors; Pi retries it (agent.continue) before settling.
+		host.endRun("error", "overloaded");
+		expect(() => bridge.interrupt?.()).toThrow(SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT);
+		host.emit("agent_start", { type: "agent_start" });
+		expect(() => bridge.interrupt?.()).toThrow(SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT);
+		host.endRun();
+		host.settle();
+		host.setIdle(false);
+		void bridge.interrupt?.();
+		expect(host.aborts).toHaveLength(1);
 	});
 
 	test("a display-only custom message appended at turn_end is not a take-over", () => {

@@ -9,18 +9,22 @@
  * `done`. A question cancelled while still queued is confirmed at once and its
  * turn is aborted the moment it starts.
  *
- * Take-over: a prompt someone else put into the question's turn while it ran
- * (`prompt.submit` carrying that turn's id: the person typing, a peer, a
- * channel; never a background task's notification, which is the agent's own
- * work) makes the rest of the turn theirs. From that moment nothing more is
- * streamed. The step in flight was requested before their prompt existed, so
- * what it says is still the question's answer: it is held and released when
- * the ask settles. The ask settles at the turn's next step (the engine folds a
- * prompt typed mid-turn into the next model request, so from there on the
- * output answers THEM) with `taken_over` and the note below, or, when the turn
- * ends first (their prompt then runs as a turn of its own), with the turn's
- * answer as `done`. Either way Plannotator never aborts that turn again: a
- * Stop only closes the question, and "Interrupt and ask now" refuses.
+ * Take-over: a prompt a PERSON put into the question's turn while it ran
+ * (`prompt.submit` carrying that turn's id, from an origin in
+ * TAKEOVER_ORIGINS) makes the rest of the turn theirs. Streaming stops when
+ * the prompt reaches the mod's hook (`onPromptSubmitting`, before the hooks
+ * beneath run), and the take-over is confirmed once it entered
+ * (`onPromptEntered`); a prompt a hook beneath dropped releases the hold
+ * (`onPromptDropped`). The step in flight was requested before their prompt
+ * existed, so what it says is still the question's answer: it is held and
+ * released when the ask settles. The ask settles at the turn's next step (the
+ * engine folds a prompt typed mid-turn into the next model request, so from
+ * there on the output answers THEM): as `done` when the response before it
+ * ended the answer (`end_turn`, no tool call), else as `taken_over` with the
+ * note. When the turn ends first (their prompt then runs as a turn of its
+ * own), it settles with the turn's answer as `done`. Either way Plannotator
+ * never aborts that turn again: a Stop only closes the question, and
+ * "Interrupt and ask now" refuses.
  */
 
 export interface AskSink {
@@ -33,13 +37,15 @@ export interface AskSink {
 export type AskErrorCode = 'busy' | 'blocked' | 'gone' | 'aborted' | 'failed' | 'taken_over'
 
 /**
- * Sent with `taken_over`, so a server older than that code (it reads an
- * unknown code as `failed`) still shows why the answer stopped. Same text as
+ * Sent with `taken_over`, so a server older than that code still shows why the
+ * answer stopped. Same texts as `SESSION_ASK_TAKEN_OVER_BY_PERSON_TEXT` and
  * `SESSION_ASK_TAKEN_OVER_TEXT` in packages/ai/session-bridge.ts (a hooks
- * module imports only its own files).
+ * module imports only its own files; turns.test.ts holds them equal).
  */
-export const TAKEN_OVER_TEXT =
+export const TAKEN_OVER_BY_PERSON_TEXT =
   'You typed into this session while it was answering, so the rest of the reply went to your prompt.'
+export const TAKEN_OVER_TEXT =
+  'Another message entered this session while it was answering, so the rest of the reply went to that message.'
 
 /** What `prompt.submit` reported for a prompt that entered the session. */
 export interface EnteredPrompt {
@@ -52,8 +58,36 @@ export interface EnteredPrompt {
   originKind?: string
 }
 
-/** Origins whose prompt delivered into a running turn is that turn's own work, not a take-over. */
-const OWN_WORK_ORIGINS: ReadonlySet<string> = new Set(['task-notification'])
+/**
+ * Origins whose prompt, delivered into a running turn, takes that turn over:
+ * something a person (or another person-driven session) says that the model
+ * must now answer. An allowlist, so an origin the engine adds later, or one
+ * that is the agent's own work, takes nothing over:
+ * - `composer`: the person's Enter in the terminal. `bridge`: the person
+ *   through Remote Control. `slack-ping`: the session's owner from Slack.
+ *   `channel`: a message an MCP channel relays (Slack, Telegram), a person on
+ *   the other end.
+ * - `peer`: "Another Claude session sent a message", a conversational message
+ *   addressed to this session that the model answers in this turn, exactly
+ *   like a person typing; the rest of the reply is to that session, not to
+ *   the reviewer.
+ * Not listed, so never a take-over: `task-notification` and
+ * `peer-send-message` (notifications framed for the agent: a background task
+ * or another session's SendMessage finishing), `scheduled-trigger`,
+ * `observer`, `observer-activity`, `coordinator`, `projects-relay`,
+ * `auto-continuation`, `unclassified` (the engine's idle notices and delivery
+ * receipts), `sdk`, `plugin` (a plugin's prompt runs once idle and carries no
+ * turn id).
+ */
+const TAKEOVER_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge', 'slack-ping', 'channel', 'peer'])
+/** Of those, the person typing into this session: the note says "You typed". */
+const PERSON_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge'])
+
+/** The turn a prompt would take over, or null. */
+function takeoverTurn(prompt: Omit<EnteredPrompt, 'text'>): string | null {
+  if (prompt.fromUs || !prompt.turnId || !prompt.originKind) return null
+  return TAKEOVER_ORIGINS.has(prompt.originKind) ? prompt.turnId : null
+}
 
 interface ActiveAsk {
   askId: string
@@ -64,8 +98,16 @@ interface ActiveAsk {
   finished: boolean
   /** Someone else's prompt entered this turn: nothing more is streamed. */
   takenOver: boolean
-  /** Output of the step in flight at the take-over, released when the ask settles. */
+  /** The take-over came from the person typing (note wording). */
+  byPerson: boolean
+  /** Prompts on their way into this turn (between our prompt.submit hook and next(e) resolving). */
+  pending: number
+  /** Output held while a prompt is pending or after a take-over, released when it settles. */
   held: { kind: 'text' | 'tool'; value: string }[]
+  /** Text sent to Plannotator so far. */
+  streamed: string
+  /** How the turn's last finished model response stopped (`end_turn`: the answer was complete). */
+  lastStop: string | null
 }
 
 export class TurnTracker {
@@ -88,7 +130,17 @@ export class TurnTracker {
   /** Turns that started as a question's and were taken over: Plannotator never aborts them. */
   private takenOverTurns = new Set<string>()
 
-  /** A prompt entered (prompt.submit). */
+  /**
+   * A prompt reached the mod's prompt.submit hook, before the hooks beneath it
+   * run: when it would take the question's turn over, stop streaming now, so a
+   * slow hook beneath cannot let more of the turn through.
+   */
+  onPromptSubmitting(prompt: Omit<EnteredPrompt, 'text'>): void {
+    const ask = this.askOn(takeoverTurn(prompt))
+    if (ask) ask.pending += 1
+  }
+
+  /** A prompt entered (prompt.submit resolved with it). */
   onPromptEntered(prompt: EnteredPrompt): void {
     if (prompt.fromUs) return
     const value = prompt.text.trim()
@@ -96,15 +148,31 @@ export class TurnTracker {
       this.foreign.push(value)
       if (this.foreign.length > 16) this.foreign.shift()
     }
-    if (prompt.turnId && !(prompt.originKind && OWN_WORK_ORIGINS.has(prompt.originKind))) this.takeOver(prompt.turnId)
+    const ask = this.askOn(takeoverTurn(prompt))
+    if (!ask) return
+    if (ask.pending > 0) ask.pending -= 1
+    if (ask.takenOver) return
+    ask.takenOver = true
+    ask.byPerson = !!prompt.originKind && PERSON_ORIGINS.has(prompt.originKind)
+    this.takenOverTurns.add(ask.turnId!)
   }
 
-  /** Someone else's prompt entered `turnId`: if it is the question's, stop streaming it. */
-  private takeOver(turnId: string): void {
+  /** A prompt announced by onPromptSubmitting did not enter (a hook beneath dropped it). */
+  onPromptDropped(prompt: Omit<EnteredPrompt, 'text'>): void {
+    const ask = this.askOn(takeoverTurn(prompt))
+    if (!ask || ask.pending === 0) return
+    ask.pending -= 1
+    if (!ask.takenOver && ask.pending === 0) this.releaseHeld(ask)
+  }
+
+  /** The unfinished question running as `turnId`, if any. */
+  private askOn(turnId: string | null): ActiveAsk | null {
     const ask = this.ask
-    if (!ask || ask.finished || ask.turnId !== turnId || ask.takenOver) return
-    ask.takenOver = true
-    this.takenOverTurns.add(turnId)
+    return turnId && ask && !ask.finished && ask.turnId === turnId ? ask : null
+  }
+
+  private holding(ask: ActiveAsk): boolean {
+    return ask.takenOver || ask.pending > 0
   }
 
   /** Whether the turn is a prompt someone else submitted (consumed). */
@@ -120,9 +188,12 @@ export class TurnTracker {
     return true
   }
 
-  /** Whether a turn started as a question's and is now someone else's. */
+  /**
+   * Whether a turn started as a question's and is now someone else's (or a
+   * person's prompt is on its way into it): Plannotator never aborts it.
+   */
   isTakenOver(turnId: string): boolean {
-    return this.takenOverTurns.has(turnId)
+    return this.takenOverTurns.has(turnId) || (this.askOn(turnId)?.pending ?? 0) > 0
   }
 
   get busy(): boolean {
@@ -136,7 +207,20 @@ export class TurnTracker {
   /** Register a question about to be submitted. False when one is already in flight. */
   beginAsk(askId: string, text: string, sink: AskSink): boolean {
     if (this.askInFlight) return false
-    this.ask = { askId, text, sink, turnId: null, cancelled: false, finished: false, takenOver: false, held: [] }
+    this.ask = {
+      askId,
+      text,
+      sink,
+      turnId: null,
+      cancelled: false,
+      finished: false,
+      takenOver: false,
+      byPerson: false,
+      pending: 0,
+      held: [],
+      streamed: '',
+      lastStop: null,
+    }
     return true
   }
 
@@ -166,14 +250,14 @@ export class TurnTracker {
   onText(turnId: string, text: string): void {
     const ask = this.ask
     if (!ask || !this.ownsTurn(turnId) || !text) return
-    if (ask.takenOver) ask.held.push({ kind: 'text', value: text })
-    else ask.sink.delta(text)
+    if (this.holding(ask)) ask.held.push({ kind: 'text', value: text })
+    else this.forward(ask, text)
   }
 
   onTool(turnId: string, name: string): void {
     const ask = this.ask
     if (!ask || !this.ownsTurn(turnId) || !name) return
-    if (ask.takenOver) ask.held.push({ kind: 'tool', value: name })
+    if (this.holding(ask)) ask.held.push({ kind: 'tool', value: name })
     else ask.sink.tool(name)
   }
 
@@ -182,11 +266,23 @@ export class TurnTracker {
    * take-over it carries the other prompt, so the question settles here.
    */
   onStep(turnId: string): void {
-    const ask = this.ask
-    if (!ask || ask.finished || ask.turnId !== turnId || !ask.takenOver) return
+    const ask = this.askOn(turnId)
+    if (!ask) return
+    const lastStop = ask.lastStop
+    ask.lastStop = null
+    if (!ask.takenOver) return
     ask.finished = true
     this.releaseHeld(ask)
-    ask.sink.error('taken_over', TAKEN_OVER_TEXT)
+    // The response before this request ended the answer (no tool call): the
+    // engine runs on only for their prompt, and the question was answered whole.
+    if (lastStop === 'end_turn') ask.sink.done(ask.streamed)
+    else ask.sink.error('taken_over', ask.byPerson ? TAKEN_OVER_BY_PERSON_TEXT : TAKEN_OVER_TEXT)
+  }
+
+  /** A model response of `turnId` finished (the turn.step `stop` chunk). */
+  onStepStop(turnId: string, stopReason: string | null): void {
+    const ask = this.askOn(turnId)
+    if (ask) ask.lastStop = stopReason
   }
 
   onTurnComplete(turnId: string, answer: string, aborted: boolean): void {
@@ -199,21 +295,29 @@ export class TurnTracker {
       // No step ran after the other prompt entered: everything the turn said
       // answered the question (their prompt runs as a turn of its own).
       this.releaseHeld(ask)
-      if (aborted || !answer.trim()) ask.sink.error('taken_over', TAKEN_OVER_TEXT)
+      if (aborted || !answer.trim()) ask.sink.error('taken_over', ask.byPerson ? TAKEN_OVER_BY_PERSON_TEXT : TAKEN_OVER_TEXT)
       else ask.sink.done(answer)
       return
     }
+    // A prompt still on its way never entered this turn: what was held is the answer.
+    this.releaseHeld(ask)
     if (aborted || ask.cancelled) ask.sink.error('aborted')
     else if (answer.trim()) ask.sink.done(answer)
     else ask.sink.error('failed', 'Claude finished the turn without a text answer.')
   }
 
   private releaseHeld(ask: ActiveAsk): void {
-    for (const item of ask.held) {
-      if (item.kind === 'text') ask.sink.delta(item.value)
+    const held = ask.held
+    ask.held = []
+    for (const item of held) {
+      if (item.kind === 'text') this.forward(ask, item.value)
       else ask.sink.tool(item.value)
     }
-    ask.held = []
+  }
+
+  private forward(ask: ActiveAsk, text: string): void {
+    ask.streamed += text
+    ask.sink.delta(text)
   }
 
   /**
@@ -224,8 +328,8 @@ export class TurnTracker {
     const ask = this.ask
     if (!ask || ask.askId !== askId || ask.finished) return null
     ask.cancelled = true
-    if (ask.takenOver) {
-      // The turn carries someone else's prompt now: close the question, never the turn.
+    if (ask.takenOver || ask.pending > 0) {
+      // The turn carries someone else's prompt now (or is about to): close the question, never the turn.
       ask.finished = true
       ask.held = []
       ask.sink.error('aborted')

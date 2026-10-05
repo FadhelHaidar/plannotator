@@ -101,6 +101,8 @@ export {
   SESSION_ASK_HEADER,
   SESSION_ASK_TRANSIENT_NOTE,
   SESSION_ASK_TAKEN_OVER_TEXT,
+  SESSION_ASK_TAKEN_OVER_BY_PERSON_TEXT,
+  SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT,
   formatSessionAskText,
   sessionBridgeLabel,
 } from "./session-bridge.ts";
@@ -126,6 +128,7 @@ export {
   SESSION_BRIDGE_HOST_ENV,
   SESSION_BRIDGE_MODES_ENV,
   SESSION_BRIDGE_MAX_POLL_MS,
+  SESSION_BRIDGE_POLL_FEATURES,
 } from "./session-bridge-pull.ts";
 export type {
   BridgeCommand,

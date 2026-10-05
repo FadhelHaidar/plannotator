@@ -298,23 +298,34 @@ export function register(on: On) {
   })
 
   on('prompt.submit', async ($: Engine, e: any, next: Next) => {
-    const result = await next(e)
     const instance = allowed ? mod : null
-    if (instance && !instance.isDisposed && result && typeof result.text === 'string') {
+    const live = !!instance && !instance.isDisposed
+    // A prompt typed (or delivered) while a turn ran carries that turn's id:
+    // when the turn is a question's and a person sent it, the rest of the turn
+    // answers this prompt instead (turns.ts, take-over). Streaming stops HERE,
+    // before the hooks beneath run, so a slow one cannot let the next step
+    // through; it resumes if one of them drops the prompt.
+    const origin = e.origin
+    const ref = {
+      fromUs: !!origin && origin.kind === 'plugin' && origin.name === PLUGIN_NAME,
+      ...(typeof e.turnId === 'string' ? { turnId: e.turnId } : {}),
+      ...(origin && typeof origin.kind === 'string' ? { originKind: origin.kind } : {}),
+    }
+    if (live) instance.onPromptSubmitting(ref)
+    let result
+    try {
+      result = await next(e)
+    } catch (error) {
+      if (live) instance.onPromptDropped(ref)
+      throw error
+    }
+    if (!live || instance.isDisposed) return result
+    if (result && typeof result.text === 'string') {
       // Every prompt seen here is someone else's (the engine skips our hooks
       // for prompts our own code submitted): its turn is never a question's.
-      // A prompt typed (or delivered) while a turn ran carries that turn's id:
-      // when the turn is a question's, the rest of it answers this prompt
-      // instead (turns.ts, take-over). A background task's notification
-      // (`task-notification`) is the agent's own work and takes nothing over.
-      const origin = result.origin ?? e.origin
-      const fromUs = !!origin && origin.kind === 'plugin' && origin.name === PLUGIN_NAME
-      instance.onPromptEntered({
-        text: result.text,
-        fromUs,
-        ...(typeof e.turnId === 'string' ? { turnId: e.turnId } : {}),
-        ...(origin && typeof origin.kind === 'string' ? { originKind: origin.kind } : {}),
-      })
+      instance.onPromptEntered({ ...ref, text: result.text })
+    } else {
+      instance.onPromptDropped(ref)
     }
     return result
   })
@@ -340,6 +351,7 @@ export function register(on: On) {
       const chunk = step.value
       if (chunk && chunk.kind === 'text' && typeof chunk.text === 'string') instance.turns.onText(e.turnId, chunk.text)
       else if (chunk && chunk.kind === 'tool' && typeof chunk.name === 'string') instance.turns.onTool(e.turnId, chunk.name)
+      else if (chunk && chunk.kind === 'stop') instance.onTurnStepStop(e.turnId, typeof chunk.stopReason === 'string' ? chunk.stopReason : null)
       yield chunk
       step = await stream.next()
     }

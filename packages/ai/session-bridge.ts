@@ -81,6 +81,8 @@ export interface SessionBridge {
 	 * turn that is answering the question, that turn is no longer ours. The
 	 * host stops streaming, settles with `error("taken_over")`, and from then
 	 * on neither an abort of this question nor `interrupt()` stops that turn.
+	 * When the answer had already finished (the turn's last model response
+	 * called no tools) before the other message entered, it settles `done`.
 	 */
 	ask(req: SessionBridgeAskRequest, sink: SessionBridgeSink, signal: AbortSignal): void;
 	/**
@@ -113,9 +115,21 @@ export const SESSION_BRIDGE_ERROR = {
 	takenOver: "session_taken_over",
 } as const;
 
-/** The note shown under a partial answer whose turn someone else's prompt took over. */
+/**
+ * The note shown under a partial answer whose turn another message took over.
+ * Neutral: most hosts cannot tell the person typing from another extension's
+ * steer or a peer session's message.
+ */
 export const SESSION_ASK_TAKEN_OVER_TEXT =
+	"Another message entered this session while it was answering, so the rest of the reply went to that message.";
+
+/** The same note when the host knows the person typed it (Claude Code: the prompt box, Remote Control). */
+export const SESSION_ASK_TAKEN_OVER_BY_PERSON_TEXT =
 	"You typed into this session while it was answering, so the rest of the reply went to your prompt.";
+
+/** Why "Interrupt and ask now" refuses a turn another message took over. */
+export const SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT =
+	"The session is now answering another message, so Plannotator will not stop it. Ask when it finishes instead.";
 
 const HOST_LABELS: Record<SessionBridgeHost, string> = {
 	pi: "Pi",

@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test'
-import { SESSION_ASK_TAKEN_OVER_TEXT } from '../../../../packages/ai/session-bridge.ts'
-import { TAKEN_OVER_TEXT, TurnTracker, type AskSink } from './turns'
+import {
+  SESSION_ASK_TAKEN_OVER_BY_PERSON_TEXT,
+  SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT,
+  SESSION_ASK_TAKEN_OVER_TEXT,
+} from '../../../../packages/ai/session-bridge.ts'
+import { TAKEN_OVER_INTERRUPT_TEXT } from './bridge'
+import { TAKEN_OVER_BY_PERSON_TEXT, TAKEN_OVER_TEXT, TurnTracker, type AskSink } from './turns'
 
 function sink(): AskSink & { deltas: string[]; errors: string[]; messages: (string | undefined)[]; answers: string[] } {
   const deltas: string[] = []
@@ -72,23 +77,26 @@ function running() {
   return { turns, s }
 }
 
+const typed = (originKind: string, text = 'also fix the tests') => ({ text, fromUs: false, turnId: 't1', originKind })
+
 // The failure these guard: the person typed into the turn Plannotator's
 // question started, and the reply to THEIR prompt was streamed into
 // Plannotator as the answer, and a Plannotator Stop aborted their work.
 describe("TurnTracker: a prompt typed into the question's turn takes it over", () => {
   test('streaming stops at once and the question settles at the next step with the note', () => {
     const { turns, s } = running()
-    turns.onPromptEntered({ text: 'also fix the tests', fromUs: false, turnId: 't1', originKind: 'composer' })
+    turns.onPromptEntered(typed('composer'))
     // The step in flight was requested before their prompt: held, not streamed.
     turns.onText('t1', 'it is needed.')
     expect(s.deltas).toEqual(['Because '])
     expect(turns.isTakenOver('t1')).toBe(true)
 
     // The next request carries their prompt: the question settles here.
+    turns.onStepStop('t1', 'tool_use')
     turns.onStep('t1')
     expect(s.deltas).toEqual(['Because ', 'it is needed.'])
     expect(s.errors).toEqual(['taken_over'])
-    expect(s.messages).toEqual([TAKEN_OVER_TEXT])
+    expect(s.messages).toEqual([TAKEN_OVER_BY_PERSON_TEXT])
     expect(turns.ownsTurn('t1')).toBe(false)
 
     // Their reply is never streamed, and a late cancel aborts nothing.
@@ -101,9 +109,42 @@ describe("TurnTracker: a prompt typed into the question's turn takes it over", (
     expect(s.answers).toEqual([])
   })
 
+  test('streaming stops when the prompt reaches our hook, before the hooks beneath it settle', () => {
+    const { turns, s } = running()
+    turns.onPromptSubmitting(typed('composer'))
+    turns.onText('t1', 'it is needed.')
+    expect(s.deltas).toEqual(['Because '])
+    // A Stop while it is on its way closes only the question.
+    expect(turns.isTakenOver('t1')).toBe(true)
+    expect(turns.cancelAsk('a1')).toBeNull()
+    expect(s.errors).toEqual(['aborted'])
+  })
+
+  test('a prompt a hook beneath dropped releases the hold and the answer streams on', () => {
+    const { turns, s } = running()
+    turns.onPromptSubmitting(typed('composer'))
+    turns.onText('t1', 'it is ')
+    turns.onPromptDropped(typed('composer'))
+    turns.onText('t1', 'needed.')
+    expect(s.deltas).toEqual(['Because ', 'it is ', 'needed.'])
+    expect(turns.isTakenOver('t1')).toBe(false)
+    turns.onTurnComplete('t1', 'Because it is needed.', false)
+    expect(s.answers).toEqual(['Because it is needed.'])
+  })
+
+  test('when the response before their prompt ended the answer, the question settles as done', () => {
+    const { turns, s } = running()
+    turns.onText('t1', 'it is needed.')
+    turns.onPromptEntered(typed('composer', 'thanks'))
+    turns.onStepStop('t1', 'end_turn')
+    turns.onStep('t1')
+    expect(s.answers).toEqual(['Because it is needed.'])
+    expect(s.errors).toEqual([])
+  })
+
   test('a Stop between the take-over and the next step closes the question, never the turn', () => {
     const { turns, s } = running()
-    turns.onPromptEntered({ text: 'also fix the tests', fromUs: false, turnId: 't1', originKind: 'composer' })
+    turns.onPromptEntered(typed('composer'))
     expect(turns.cancelAsk('a1')).toBeNull()
     expect(s.errors).toEqual(['aborted'])
     turns.onStep('t1')
@@ -112,7 +153,7 @@ describe("TurnTracker: a prompt typed into the question's turn takes it over", (
 
   test('when the turn ends before another step, everything it said answered the question', () => {
     const { turns, s } = running()
-    turns.onPromptEntered({ text: 'thanks', fromUs: false, turnId: 't1', originKind: 'composer' })
+    turns.onPromptEntered(typed('composer', 'thanks'))
     turns.onText('t1', 'it is needed.')
     turns.onTurnComplete('t1', 'Because it is needed.', false)
     expect(s.deltas).toEqual(['Because ', 'it is needed.'])
@@ -123,28 +164,45 @@ describe("TurnTracker: a prompt typed into the question's turn takes it over", (
     expect(turns.ownsTurn('t2')).toBe(false)
   })
 
-  test('a peer message delivered into the turn takes it over too', () => {
-    const { turns, s } = running()
-    turns.onPromptEntered({ text: 'status?', fromUs: false, turnId: 't1', originKind: 'peer' })
-    turns.onStep('t1')
-    expect(s.errors).toEqual(['taken_over'])
+  test('the person (prompt box, Remote Control) gets "You typed"; a peer, channel or Slack ping the neutral note', () => {
+    for (const [originKind, note] of [
+      ['composer', TAKEN_OVER_BY_PERSON_TEXT],
+      ['bridge', TAKEN_OVER_BY_PERSON_TEXT],
+      ['peer', TAKEN_OVER_TEXT],
+      ['channel', TAKEN_OVER_TEXT],
+      ['slack-ping', TAKEN_OVER_TEXT],
+    ] as const) {
+      const { turns, s } = running()
+      turns.onPromptEntered(typed(originKind))
+      turns.onStep('t1')
+      expect([originKind, s.errors, s.messages]).toEqual([originKind, ['taken_over'], [note]])
+    }
   })
 
-  test("a background task's notification is the agent's own work, not a take-over", () => {
-    const { turns, s } = running()
-    turns.onPromptEntered({
-      text: '<task-notification>build finished</task-notification>',
-      fromUs: false,
-      turnId: 't1',
-      originKind: 'task-notification',
-    })
-    turns.onStep('t1')
-    turns.onText('t1', 'it is needed.')
-    expect(turns.isTakenOver('t1')).toBe(false)
-    expect(s.deltas).toEqual(['Because ', 'it is needed.'])
-    turns.onTurnComplete('t1', 'Because it is needed.', false)
-    expect(s.answers).toEqual(['Because it is needed.'])
-    expect(s.errors).toEqual([])
+  test("the agent's own work and engine notices never take the turn over", () => {
+    for (const originKind of [
+      'task-notification',
+      'peer-send-message',
+      'scheduled-trigger',
+      'observer',
+      'observer-activity',
+      'coordinator',
+      'projects-relay',
+      'auto-continuation',
+      'unclassified',
+      'some-future-kind',
+    ]) {
+      const { turns, s } = running()
+      turns.onPromptSubmitting(typed(originKind))
+      turns.onPromptEntered(typed(originKind))
+      turns.onStep('t1')
+      turns.onText('t1', 'it is needed.')
+      expect([originKind, turns.isTakenOver('t1')]).toEqual([originKind, false])
+      expect(s.deltas).toEqual(['Because ', 'it is needed.'])
+      turns.onTurnComplete('t1', 'Because it is needed.', false)
+      expect(s.answers).toEqual(['Because it is needed.'])
+      expect(s.errors).toEqual([])
+    }
   })
 
   test("a prompt typed over someone else's turn changes nothing for a queued question", () => {
@@ -180,7 +238,9 @@ describe("TurnTracker never claims another plugin's turn", () => {
   })
 })
 
-test('the mod sends the same take-over note the provider would', () => {
-  // A hooks module imports only its own files, so the text is a copy.
+test('the mod sends the same take-over notes the provider would', () => {
+  // A hooks module imports only its own files, so the texts are copies.
   expect(TAKEN_OVER_TEXT).toBe(SESSION_ASK_TAKEN_OVER_TEXT)
+  expect(TAKEN_OVER_BY_PERSON_TEXT).toBe(SESSION_ASK_TAKEN_OVER_BY_PERSON_TEXT)
+  expect(TAKEN_OVER_INTERRUPT_TEXT).toBe(SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT)
 })

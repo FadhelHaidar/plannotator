@@ -684,9 +684,24 @@ export class PlannotatorMod {
     if (wasOurs && turnId && this.turns.isTakenOver(turnId)) this.host.debug(`ask turn ${turnId} taken over`)
   }
 
+  /** A prompt reached prompt.submit, before the hooks beneath it ran, from register.ts. */
+  onPromptSubmitting(prompt: Omit<EnteredPrompt, 'text'>): void {
+    this.turns.onPromptSubmitting(prompt)
+  }
+
+  /** A prompt announced by onPromptSubmitting did not enter, from register.ts. */
+  onPromptDropped(prompt: Omit<EnteredPrompt, 'text'>): void {
+    this.turns.onPromptDropped(prompt)
+  }
+
   /** A model request of a turn is about to go out (turn.step), from register.ts. */
   onTurnStep(turnId: string): void {
     this.turns.onStep(turnId)
+  }
+
+  /** A model response of a turn finished (turn.step's `stop` chunk), from register.ts. */
+  onTurnStepStop(turnId: string, stopReason: string | null): void {
+    this.turns.onStepStop(turnId, stopReason)
   }
 
   /** Turn events, from register.ts. */
