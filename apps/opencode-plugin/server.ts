@@ -26,6 +26,7 @@ import { switchV2SessionAgent } from "./agent-switch";
 import { registerNativeCommands } from "./native-commands";
 import {
   createV2BridgeClient,
+  dropSessionUrlNotices,
   formatSessionUrlNotice,
   normalizeAgentList,
   type V2ContextLike,
@@ -109,6 +110,22 @@ const serverPlugin = {
       });
     } catch (error) {
       console.error(`[Plannotator] Could not register the OpenCode 2 slash commands: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    // The session-URL notice is for the person, never the model: once promoted
+    // it could land after a plan decision's tool result and be answered
+    // instead of the decision. Registered for every workflow, since the
+    // notice is posted by the slash commands too. See `dropSessionUrlNotices`.
+    // Probed: OpenCode 1.18 also runs this setup, with a context that has no
+    // session hooks (and posts no notices).
+    if (typeof (ctx.session as { hook?: unknown } | undefined)?.hook === "function") {
+      try {
+        await ctx.session.hook("context", (event) => {
+          dropSessionUrlNotices(event.messages as unknown[]);
+        });
+      } catch (error) {
+        console.error(`[Plannotator] Could not register the session-URL notice filter: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
 
     if (shouldModifyPrompts(workflowOptions)) {

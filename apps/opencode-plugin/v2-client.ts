@@ -506,6 +506,8 @@ export function createNoticePendingTracker(
   };
 }
 
+const SESSION_URL_NOTICE_PREFIX = "Plannotator session ready: ";
+
 /**
  * The one line a user is shown when a Plannotator session opens on OpenCode 2.
  *
@@ -513,7 +515,71 @@ export function createNoticePendingTracker(
  * name the product and carry the URL on its own.
  */
 export function formatSessionUrlNotice(url: string): string {
-  return `Plannotator session ready: ${url}`;
+  return `${SESSION_URL_NOTICE_PREFIX}${url}`;
+}
+
+
+/** Is this model-context message one of our session-URL notices, verbatim? */
+function isSessionUrlNoticeMessage(message: unknown): boolean {
+  if (!isRecord(message) || message.role !== "user") return false;
+  const content = message.content;
+  const text = typeof content === "string"
+    ? content
+    : Array.isArray(content) && content.length === 1 && isRecord(content[0]) && content[0].type === "text"
+      ? content[0].text
+      : undefined;
+  return typeof text === "string"
+    && text.startsWith(SESSION_URL_NOTICE_PREFIX)
+    && /^https?:\/\/\S+$/.test(text.slice(SESSION_URL_NOTICE_PREFIX.length));
+}
+
+/**
+ * Keep our session-URL notices out of what the MODEL reads. Mutates
+ * `messages` in place (the `context` hook's array) and returns how many it
+ * removed.
+ *
+ * The notice is for the person, who sees it as the transcript row's
+ * description; the model has no use for it. But it is a pending steer
+ * (`CO_PROMOTED_DELIVERY`), and steers are promoted at the next step
+ * boundary. During plan review that boundary is the one right after the
+ * `submit_plan` tool result, so the next model request read
+ * `[…, tool result (the decision), user: "Plannotator session ready: <url>"]`
+ * and a model could answer the notice instead of the decision. Seen live on
+ * 2.0.22: after a denial the model replied to the URL line. The plugin's
+ * session domain cannot withdraw a pending row (no inbox member, see
+ * `createV2BridgeClient`), but every model request passes through the
+ * `context` hook, so the notice is dropped there, from every request, which
+ * also keeps the cached prompt prefix stable.
+ *
+ * One exception: when the notice is the only thing after the model's own last
+ * reply (a notice promoted on its own at an idle boundary), dropping it would
+ * send a request that ends on an assistant message. That request exists only
+ * because of the notice, so the last notice is kept rather than sending a
+ * malformed turn; no decision is involved in that case.
+ */
+export function dropSessionUrlNotices(messages: unknown[]): number {
+  const notices: number[] = [];
+  messages.forEach((message, index) => {
+    if (isSessionUrlNoticeMessage(message)) notices.push(index);
+  });
+  if (notices.length === 0) return 0;
+
+  let keep: number | undefined;
+  const lastNotice = notices[notices.length - 1];
+  if (lastNotice === messages.length - 1) {
+    let previous = lastNotice - 1;
+    while (previous >= 0 && notices.includes(previous)) previous--;
+    const before = messages[previous];
+    if (previous < 0 || (isRecord(before) && before.role === "assistant")) keep = lastNotice;
+  }
+
+  let removed = 0;
+  for (let i = notices.length - 1; i >= 0; i--) {
+    if (notices[i] === keep) continue;
+    messages.splice(notices[i], 1);
+    removed++;
+  }
+  return removed;
 }
 
 /**
@@ -542,8 +608,11 @@ export function formatSessionUrlNotice(url: string): string {
  *    "hides synthetic messages without descriptions"), and the live append
  *    subscriptions gate on `description?.trim()` too. What the TUI prints is
  *    the DESCRIPTION, not the text (`SessionNoticeMessageV2` in
- *    `packages/tui/src/routes/session/index.tsx`), so the URL must be in both:
- *    `description` to be seen, `text` so the next turn's history carries it.
+ *    `packages/tui/src/routes/session/index.tsx`), so `description` carries
+ *    the URL. `text` is the same line, but the model never reads it: the
+ *    plugin's `context` hook drops these notices from every model request
+ *    (`dropSessionUrlNotices`), because a promoted notice landing after a
+ *    plan decision read as the thing to answer.
  *  - Setting no `metadata.source` keeps it on the plain "Notice" row rather
  *    than the subagent/shell completion row.
  *

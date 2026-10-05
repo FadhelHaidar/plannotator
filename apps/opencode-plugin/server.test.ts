@@ -4,7 +4,7 @@ import serverPlugin, {
   pushComposedSystemReminder,
   replacePlanningSystemParts,
 } from "./server";
-import { createV2BridgeClient, formatSessionUrlNotice } from "./v2-client";
+import { createV2BridgeClient, dropSessionUrlNotices, formatSessionUrlNotice } from "./v2-client";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -35,6 +35,7 @@ function createContext(
 ) {
   let toolDefinition: Record<string, any> | undefined;
   let sessionContextHook: SessionContextHook | undefined;
+  const contextHooks: SessionContextHook[] = [];
   const sessionGet = mock(async () => ({ location: { directory: "/project" } }));
 
   return {
@@ -50,7 +51,10 @@ function createContext(
       session: {
         get: sessionGet,
         hook: async (name: string, callback: SessionContextHook) => {
-          if (name === "context") sessionContextHook = callback;
+          if (name === "context") {
+            sessionContextHook = callback;
+            contextHooks.push(callback);
+          }
           return { dispose: async () => {} };
         },
       },
@@ -67,6 +71,10 @@ function createContext(
     },
     getToolDefinition: () => toolDefinition,
     getSessionContextHook: () => sessionContextHook,
+    /** Run every registered context hook, in registration order, like the host. */
+    runContextHooks: async (event: Parameters<SessionContextHook>[0]) => {
+      for (const hook of contextHooks) await hook(event);
+    },
     sessionGet,
   };
 }
@@ -469,4 +477,71 @@ describe("V2 plan review URL delivery", () => {
     await Promise.resolve();
     await Promise.resolve();
   });
+});
+
+// After a plan decision the still-pending session-URL notice (a steer) is
+// promoted at the boundary right after the tool result, so the model read the
+// notice LAST and could answer it instead of the decision (seen live on
+// 2.0.22). The notice is for the person; the model never needs it.
+describe("session-URL notices stay out of the model context", () => {
+  const notice = (url = "http://localhost:19432") => ({ role: "user", content: [{ type: "text", text: formatSessionUrlNotice(url) }] });
+  const user = (text: string) => ({ role: "user", content: [{ type: "text", text }] });
+  const assistant = (text: string) => ({ role: "assistant", content: [{ type: "text", text }] });
+  const toolResult = (text: string) => ({ role: "tool", content: [{ type: "tool-result", id: "call_1", name: "submit_plan", result: { type: "text", value: text } }] });
+
+  test("a notice promoted after the decision is dropped, so the decision is read last", () => {
+    const messages: unknown[] = [
+      user("make a plan"),
+      assistant("calling submit_plan"),
+      toolResult("YOUR PLAN WAS NOT APPROVED."),
+      user("<system-reminder>plan mode</system-reminder>"),
+      notice(),
+    ];
+
+    expect(dropSessionUrlNotices(messages)).toBe(1);
+    expect(messages).toEqual([
+      user("make a plan"),
+      assistant("calling submit_plan"),
+      toolResult("YOUR PLAN WAS NOT APPROVED."),
+      user("<system-reminder>plan mode</system-reminder>"),
+    ]);
+  });
+
+  test("older notices in history and notices beside feedback are dropped too", () => {
+    const messages: unknown[] = [notice("http://localhost:1"), user("q"), assistant("a"), notice("http://localhost:2"), user("# Code Review Feedback")];
+    expect(dropSessionUrlNotices(messages)).toBe(2);
+    expect(messages).toEqual([user("q"), assistant("a"), user("# Code Review Feedback")]);
+  });
+
+  test("a lone notice after the model's reply is kept rather than ending the request on the assistant", () => {
+    const messages: unknown[] = [user("q"), assistant("a"), notice()];
+    expect(dropSessionUrlNotices(messages)).toBe(0);
+    expect(messages).toHaveLength(3);
+  });
+
+  test("text that only resembles a notice is left alone", () => {
+    const messages: unknown[] = [
+      user("Plannotator session ready: http://localhost:1 — what is this?"),
+      { role: "assistant", content: [{ type: "text", text: formatSessionUrlNotice("http://localhost:1") }] },
+      { role: "user", content: [{ type: "text", text: formatSessionUrlNotice("http://localhost:1") }, { type: "text", text: "more" }] },
+    ];
+    expect(dropSessionUrlNotices(messages)).toBe(0);
+  });
+
+  for (const workflow of ["plan-agent", "manual"] as const) {
+    test(`${workflow}: the plugin filters every model request`, async () => {
+      const testContext = createContext({ workflow });
+      await serverPlugin.setup(testContext.context as never);
+      const event = {
+        agent: "build",
+        system: [{ type: "text" as const, text: "system" }],
+        messages: [user("q"), assistant("calling"), toolResult("Plan approved!"), notice()] as unknown[],
+        tools: {},
+      };
+
+      await testContext.runContextHooks(event);
+
+      expect(event.messages).toEqual([user("q"), assistant("calling"), toolResult("Plan approved!")]);
+    });
+  }
 });
