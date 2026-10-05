@@ -30,6 +30,8 @@
  * Runtime-agnostic: node:fs via draft.ts only. Vendored to Pi.
  */
 
+import { realpathSync, statSync } from "fs";
+import { isAbsolute, resolve as resolvePath } from "path";
 import { contentHash, deleteDraft, getDraftGeneration, loadDraft, saveDraft } from "./draft";
 import {
   deleteReviewDraft,
@@ -61,8 +63,6 @@ export interface AnnotateDraftSessionOptions {
    */
   documents?: {
     isAllowed: (absolutePath: string) => boolean;
-    /** Normalize a client-supplied path to the absolute form the session keys by. */
-    resolve: (path: string) => string | null;
   } | null;
 }
 
@@ -126,8 +126,8 @@ export function createAnnotateDraftSession(options: AnnotateDraftSessionOptions)
 
   const resolveDocumentPath = (raw: unknown): { path: string } | { status: 400 | 403; error: string } => {
     if (typeof raw !== "string" || raw.length === 0) return { status: 400, error: "Missing path" };
-    const path = documents?.resolve(raw) ?? null;
-    if (!path) return { status: 400, error: "Invalid path" };
+    const path = canonicalDocumentPath(raw);
+    if (!path) return { status: 400, error: "Not an existing file" };
     // The root file's own path key is the session draft itself (one writer).
     if (rootPath && path === rootPath) return { status: 403, error: "The session's own file is saved with the session draft" };
     if (!documents?.isAllowed(path)) return { status: 403, error: "Path not allowed" };
@@ -262,17 +262,32 @@ export function createAnnotateDraftSession(options: AnnotateDraftSessionOptions)
 export type AnnotateDraftSession = ReturnType<typeof createAnnotateDraftSession>;
 
 /**
+ * The one spelling a document's path key is derived from: absolute, resolved,
+ * symlinks followed (so an alias of a file shares its key), and only for an
+ * existing regular file. Null for anything else (relative, missing, a
+ * directory).
+ */
+export function canonicalDocumentPath(path: string): string | null {
+  if (!path || !isAbsolute(path)) return null;
+  try {
+    const real = realpathSync(resolvePath(path));
+    return statSync(real).isFile() ? real : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Whether an annotate session gets path-keyed drafts: a single local file
  * (mode "annotate", not a URL). Folder sessions keep their folder key and get
  * per-document copies instead; URL, live-app and agent-message sessions have
- * no file path.
+ * no file path. Returns the canonical path (canonicalDocumentPath), or the
+ * resolved spelling when the file cannot be canonicalized (gone since the
+ * CLI read it).
  */
-export function annotateDraftFilePath(input: {
-  mode: string;
-  filePath: string;
-  resolve: (path: string) => string;
-}): string | null {
+export function annotateDraftFilePath(input: { mode: string; filePath: string }): string | null {
   if (input.mode !== "annotate") return null;
   if (!input.filePath || /^https?:\/\//i.test(input.filePath)) return null;
-  return input.resolve(input.filePath);
+  const resolved = resolvePath(input.filePath);
+  return canonicalDocumentPath(resolved) ?? resolved;
 }

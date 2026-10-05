@@ -121,6 +121,7 @@ import { useLinkedDoc, type LinkedDocSessionState } from '@plannotator/ui/hooks/
 import { useCodeFilePopout } from '@plannotator/ui/hooks/useCodeFilePopout';
 import { useAnnotationDraft, type DraftEditedDocument, type DraftSavedFileChange } from '@plannotator/ui/hooks/useAnnotationDraft';
 import { useDocumentDrafts } from './hooks/useDocumentDrafts';
+import { composeSessionDraft } from './documentDrafts';
 import { useArchive } from '@plannotator/ui/hooks/useArchive';
 import { useEditorAnnotations } from '@plannotator/ui/hooks/useEditorAnnotations';
 import { useExternalAnnotations } from '@plannotator/ui/hooks/useExternalAnnotations';
@@ -2554,41 +2555,8 @@ const App: React.FC = () => {
     return getEditedMarkdown();
   }, [editableDocuments, getEditedMarkdown]);
 
-  // What the session draft carries. With per-document copies the session
-  // draft is the ROOT document's (the file under review, or the folder's own
-  // comments) even while another document is open: that document's comments
-  // are saved under its own path by useDocumentDrafts. Without them it is the
-  // open document's, as it always was.
-  const { draftAnnotations, draftGlobalAttachments } = useMemo(() => {
-    const root = documentDraftsEnabled && linkedDocHook.isActive
-      ? linkedDocHook.getFeedbackDocuments().root
-      : null;
-    return root
-      ? {
-          draftAnnotations: mergeExternalAnnotations(root.annotations, externalAnnotations),
-          draftGlobalAttachments: root.globalAttachments,
-        }
-      : { draftAnnotations: allAnnotations, draftGlobalAttachments: globalAttachments };
-  }, [documentDraftsEnabled, linkedDocHook.isActive, linkedDocHook.getFeedbackDocuments, externalAnnotations, allAnnotations, globalAttachments]);
-
-  // Auto-save annotation drafts
-  const { draftBanner, restoreDraft, scheduleDraftSave, scheduleDraftSaveAfterSubmitFailure, getDraftGeneration, dismissDraft } = useAnnotationDraft({
-    annotations: draftAnnotations,
-    codeAnnotations,
-    globalAttachments: draftGlobalAttachments,
-    getEditedMarkdown: getDraftEditedMarkdown,
-    getEditedDocuments: editableDocuments.getDraftDocuments,
-    getSavedFileChanges: editableDocuments.getDraftSavedFileChanges,
-    isApiMode: isApiMode && !goalSetupMode && !documentReadOnly,
-    isSharedSession,
-    // isSubmitting counts: a save firing while approve/deny is in flight can
-    // land after the server's draft delete and ghost a "Draft Recovered"
-    // banner into the next session for this plan. Saving resumes if it fails.
-    submitted: !!submitted || isSubmitting,
-  });
-
   // Every other document's comments, saved under that document's own path.
-  useDocumentDrafts({
+  const { unbackedPaths: unbackedDraftDocuments } = useDocumentDrafts({
     enabled: documentDraftsEnabled && isApiMode && !isSharedSession && !goalSetupMode && !documentReadOnly,
     submitted: !!submitted || isSubmitting,
     activePath: linkedDocHook.filepath,
@@ -2605,6 +2573,43 @@ const App: React.FC = () => {
       const name = path.split(/[\\/]/).pop() || path;
       toast(`Restored ${count} saved ${count === 1 ? 'comment' : 'comments'} on ${name}`, { duration: 4000 });
     },
+  });
+
+
+  // What the session draft carries. With per-document copies the session
+  // draft is the ROOT document's (the file under review, or the folder's own
+  // comments) even while another document is open: that document's comments
+  // are saved under its own path by useDocumentDrafts. A document the server
+  // keeps no path copy for (outside the session's roots, such as an Obsidian
+  // vault document, or a copy of the root opened through a self-link) rides
+  // the session draft too, so it stays crash-recoverable as before. Without
+  // per-document copies it is the open document's, as it always was.
+  const { annotations: draftAnnotations, globalAttachments: draftGlobalAttachments } = useMemo(
+    () => composeSessionDraft({
+      enabled: documentDraftsEnabled,
+      live: { annotations: allAnnotations, globalAttachments },
+      feedbackDocuments: linkedDocHook.getFeedbackDocuments(),
+      externalAnnotations,
+      rootPath: sourceFilePath ?? null,
+      unbackedPaths: unbackedDraftDocuments,
+    }),
+    [documentDraftsEnabled, linkedDocHook.getFeedbackDocuments, externalAnnotations, allAnnotations, globalAttachments, sourceFilePath, unbackedDraftDocuments],
+  );
+
+  // Auto-save annotation drafts
+  const { draftBanner, restoreDraft, scheduleDraftSave, scheduleDraftSaveAfterSubmitFailure, getDraftGeneration, dismissDraft } = useAnnotationDraft({
+    annotations: draftAnnotations,
+    codeAnnotations,
+    globalAttachments: draftGlobalAttachments,
+    getEditedMarkdown: getDraftEditedMarkdown,
+    getEditedDocuments: editableDocuments.getDraftDocuments,
+    getSavedFileChanges: editableDocuments.getDraftSavedFileChanges,
+    isApiMode: isApiMode && !goalSetupMode && !documentReadOnly,
+    isSharedSession,
+    // isSubmitting counts: a save firing while approve/deny is in flight can
+    // land after the server's draft delete and ghost a "Draft Recovered"
+    // banner into the next session for this plan. Saving resumes if it fails.
+    submitted: !!submitted || isSubmitting,
   });
 
   // Fetch available agents for OpenCode (for validation on approve)

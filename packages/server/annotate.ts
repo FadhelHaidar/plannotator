@@ -51,7 +51,7 @@ import { getAutoUpdateAdvert } from "./auto-update";
 import { appendFeedbackRecord, type FeedbackDecision, type FeedbackSurface } from "@plannotator/shared/feedback-archive";
 import { isFaviconStyle, type FaviconStyle } from "@plannotator/shared/favicon";
 import { existsSync } from "fs";
-import { dirname, isAbsolute, resolve as resolvePath } from "path";
+import { dirname, resolve as resolvePath } from "path";
 import { isWithinDirectory } from "@plannotator/shared/html-assets-node";
 import { isWSL } from "./browser";
 import { handleOpenInApps, handleOpenIn } from "./open-in";
@@ -380,14 +380,13 @@ export async function startAnnotateServer(
   // is reopened. URL, live-app and agent-message sessions have no file path.
   // Drafts are crash recovery, not history, so PLANNOTATOR_ANNOTATE_HISTORY
   // does not govern them (it never governed the content-keyed draft either).
-  const draftFilePath = annotateDraftFilePath({ mode, filePath, resolve: resolvePath });
+  const draftFilePath = annotateDraftFilePath({ mode, filePath });
   const annotateDrafts = createAnnotateDraftSession({
     contentKey: draftKey,
     filePath: draftFilePath,
     documents:
       draftFilePath !== null || (mode === "annotate-folder" && folderPath)
         ? {
-            resolve: (path) => (isAbsolute(path) ? resolvePath(path) : null),
             isAllowed: (path) => isPathAllowed(path, getReferenceRootPaths()),
           }
         : null,

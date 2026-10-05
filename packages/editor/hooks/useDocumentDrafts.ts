@@ -14,7 +14,7 @@
  * Inert unless the server advertised `documentDrafts` on /api/plan.
  */
 
-import { useCallback, useEffect, useRef, type RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import type { Annotation, ImageAttachment } from '@plannotator/ui/types';
 import type { FeedbackDocuments } from '@plannotator/ui/hooks/useLinkedDoc';
 import type { ViewerHandle } from '@plannotator/ui/components/Viewer';
@@ -44,7 +44,17 @@ export interface UseDocumentDraftsOptions {
   onRestored?: (path: string, count: number) => void;
 }
 
-export function useDocumentDrafts(options: UseDocumentDraftsOptions): void {
+export interface UseDocumentDraftsResult {
+  /**
+   * Documents the server will not keep a path copy for: outside the session's
+   * roots (an Obsidian vault document), a symlink alias of the session's own
+   * file, or not a regular file. The host keeps their comments in the session
+   * draft instead, so they stay crash-recoverable.
+   */
+  unbackedPaths: ReadonlySet<string>;
+}
+
+export function useDocumentDrafts(options: UseDocumentDraftsOptions): UseDocumentDraftsResult {
   const { enabled, submitted, activePath, rootPath, getFeedbackDocuments } = options;
   const latest = useRef(options);
   latest.current = options;
@@ -59,6 +69,8 @@ export function useDocumentDrafts(options: UseDocumentDraftsOptions): void {
   const rerunRef = useRef(false);
   /** The server refused a write because the review is decided. */
   const closedRef = useRef(false);
+
+  const [unbackedPaths, setUnbackedPaths] = useState<ReadonlySet<string>>(() => new Set());
 
   const canWrite = enabled && !submitted;
   const canWriteRef = useRef(canWrite);
@@ -109,6 +121,11 @@ export function useDocumentDrafts(options: UseDocumentDraftsOptions): void {
       .then(async (res) => {
         if (res.status === 404) {
           loadedRef.current.add(path);
+          return;
+        }
+        if (res.status === 400 || res.status === 403) {
+          // Never loaded, so never written here: the session draft carries it.
+          setUnbackedPaths((prev) => (prev.has(path) ? prev : new Set([...prev, path])));
           return;
         }
         if (!res.ok) return; // retried the next time the document opens
@@ -207,4 +224,6 @@ export function useDocumentDrafts(options: UseDocumentDraftsOptions): void {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, [writeNow]);
+
+  return { unbackedPaths };
 }

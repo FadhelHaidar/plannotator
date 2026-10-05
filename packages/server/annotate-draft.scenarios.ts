@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -163,6 +163,10 @@ export function defineAnnotateDraftScenarios(runtime: string, start: StartDraftS
       // and reported; a newer one lands.
       const stale = await post(edited, "/api/draft", draftBody(2, ["ghost"]));
       expect(stale.status).toBe(409);
+      // The refusal names the generation to save above (the client adopts it).
+      const refusal = await stale.json();
+      expect(refusal.ok).toBe(false);
+      expect(refusal.draftGeneration).toBeGreaterThanOrEqual(2);
       expect((await fetch(`${edited.url}/api/draft`)).status).toBe(404);
       expect((await post(edited, "/api/draft", draftBody(3, ["fresh"]))).ok).toBe(true);
       close(edited);
@@ -255,6 +259,7 @@ export function defineAnnotateDraftScenarios(runtime: string, start: StartDraftS
       const folder = await openFolder();
       expect((await fetch(`${folder.url}/api/draft/document?path=${encodeURIComponent(outside)}`)).status).toBe(403);
       const inside = join(docDir, "inside.md");
+      writeFileSync(inside, "# Inside\n");
       const res = await saveDocuments(folder, [
         { path: outside, annotations: [comment("x")] },
         { path: inside, annotations: [comment("y")] },
@@ -266,6 +271,29 @@ export function defineAnnotateDraftScenarios(runtime: string, start: StartDraftS
       const alone = await openFile("own.md", "# Own\n");
       const own = await saveDocuments(alone, [{ path: join(docDir, "own.md"), annotations: [comment("z")] }]);
       expect((await own.json()).rejected).toEqual([join(docDir, "own.md")]);
+      // A symlink alias of the session's own file is the same file.
+      const alias = join(docDir, "own-alias.md");
+      symlinkSync(join(docDir, "own.md"), alias);
+      expect((await fetch(`${alone.url}/api/draft/document?path=${encodeURIComponent(alias)}`)).status).toBe(403);
+    });
+
+    test("only existing regular files get a copy, keyed by their real path", async () => {
+      const folder = await openFolder();
+      const missing = join(docDir, "missing.md");
+      const subdir = join(docDir, "sub");
+      mkdirSync(subdir);
+      expect((await fetch(`${folder.url}/api/draft/document?path=${encodeURIComponent(missing)}`)).status).toBe(400);
+      expect((await fetch(`${folder.url}/api/draft/document?path=${encodeURIComponent(subdir)}`)).status).toBe(400);
+      const refused = await (await saveDocuments(folder, [{ path: missing, annotations: [comment("m")] }])).json();
+      expect(refused.rejected).toEqual([missing]);
+
+      const real = join(docDir, "real.md");
+      const alias = join(docDir, "alias.md");
+      writeFileSync(real, "# Real\n");
+      symlinkSync(real, alias);
+      await saveDocuments(folder, [{ path: alias, annotations: [comment("via-alias")] }]);
+      const res = await fetch(`${folder.url}/api/draft/document?path=${encodeURIComponent(real)}`);
+      expect(idsOf(await res.json())).toEqual(["via-alias"]);
     });
   });
 }

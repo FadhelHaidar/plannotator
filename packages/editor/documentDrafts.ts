@@ -9,6 +9,8 @@
  */
 
 import type { Annotation, ImageAttachment } from '@plannotator/ui/types';
+import type { FeedbackDocuments } from '@plannotator/ui/hooks/useLinkedDoc';
+import { mergeExternalAnnotations } from './feedbackDocuments';
 
 export interface DocumentDraftState {
   annotations: Annotation[];
@@ -87,4 +89,45 @@ export function documentDraftAdditions(
       !!g && typeof g === 'object' && typeof (g as ImageAttachment).path === 'string' && !heldPaths.has((g as ImageAttachment).path),
   );
   return { annotations, globalAttachments };
+}
+
+/**
+ * What the session draft (/api/draft) carries.
+ *
+ *  - Without per-document copies: the open document's live state, as it
+ *    always was.
+ *  - With them: the ROOT document's comments (the file under review, or a
+ *    folder's own comments) even while another document is open, because
+ *    that document has its own path copy. Plus every document the server
+ *    keeps no path copy for (`unbackedPaths`: outside the session's roots,
+ *    such as an Obsidian vault document; a symlink alias of the root) and a
+ *    copy of the root opened through a self-link (`rootPath`), so those stay
+ *    crash-recoverable as before. A restore puts them on the root, where the
+ *    ones whose text is not there show as Unanchored and still export.
+ */
+export function composeSessionDraft(input: {
+  enabled: boolean;
+  live: DocumentDraftState;
+  feedbackDocuments: FeedbackDocuments;
+  externalAnnotations: Annotation[];
+  rootPath: string | null;
+  unbackedPaths: ReadonlySet<string>;
+}): DocumentDraftState {
+  if (!input.enabled) return input.live;
+  const { root, documents } = input.feedbackDocuments;
+  const base: DocumentDraftState = root
+    ? { annotations: mergeExternalAnnotations(root.annotations, input.externalAnnotations), globalAttachments: root.globalAttachments }
+    : input.live;
+  const extraAnnotations: Annotation[] = [];
+  const extraAttachments: ImageAttachment[] = [];
+  for (const [path, state] of documents) {
+    if (path !== input.rootPath && !input.unbackedPaths.has(path)) continue;
+    extraAnnotations.push(...state.annotations);
+    extraAttachments.push(...state.globalAttachments);
+  }
+  if (extraAnnotations.length === 0 && extraAttachments.length === 0) return base;
+  return {
+    annotations: [...base.annotations, ...extraAnnotations],
+    globalAttachments: [...base.globalAttachments, ...extraAttachments],
+  };
 }

@@ -2,7 +2,7 @@ import { annotateDiagramRenderKind } from "../generated/annotatable.ts";
 import { likelyAppHtmlEncoding, prewarmAppHtml } from "../generated/app-html.ts";
 import { createServer } from "node:http";
 import type { IncomingMessage } from "node:http";
-import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
+import { dirname, resolve as resolvePath } from "node:path";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 
@@ -371,7 +371,6 @@ export async function startAnnotateServer(options: {
 	const draftFilePath = annotateDraftFilePath({
 		mode: options.mode || "annotate",
 		filePath: options.filePath,
-		resolve: resolvePath,
 	});
 	const annotateDrafts = createAnnotateDraftSession({
 		contentKey: draftKey,
@@ -379,7 +378,6 @@ export async function startAnnotateServer(options: {
 		documents:
 			draftFilePath !== null || (options.mode === "annotate-folder" && options.folderPath)
 				? {
-						resolve: (path) => (isAbsolute(path) ? resolvePath(path) : null),
 						isAllowed: (path) => isPathAllowed(path, getReferenceRootPaths()),
 					}
 				: null,

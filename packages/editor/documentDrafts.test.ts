@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { Annotation } from '@plannotator/ui/types';
-import { documentDraftAdditions, planDocumentDraftWrites, type DocumentDraftState } from './documentDrafts';
+import { composeSessionDraft, documentDraftAdditions, planDocumentDraftWrites, type DocumentDraftState } from './documentDrafts';
 
 const ann = (id: string) => ({ id, text: id }) as unknown as Annotation;
 const state = (...ids: string[]): DocumentDraftState => ({ annotations: ids.map(ann), globalAttachments: [] });
@@ -48,5 +48,53 @@ describe('documentDraftAdditions', () => {
       globalAttachments: [],
     });
     expect(additions.annotations.map((a) => a.id)).toEqual(['new']);
+  });
+});
+
+describe('composeSessionDraft', () => {
+  const live = state('open-doc');
+  const rootState = { ...state('root-comment'), markdown: '', renderAs: 'markdown' as const };
+
+  test('without per-document copies the session draft is the open document, as before', () => {
+    const draft = composeSessionDraft({
+      enabled: false,
+      live,
+      feedbackDocuments: { root: rootState, documents: new Map([['/d/a.md', live]]) },
+      externalAnnotations: [],
+      rootPath: null,
+      unbackedPaths: new Set(),
+    });
+    expect(draft.annotations.map((a) => a.id)).toEqual(['open-doc']);
+  });
+
+  test('with them it is the root while a backed document is open', () => {
+    const draft = composeSessionDraft({
+      enabled: true,
+      live,
+      feedbackDocuments: { root: rootState, documents: new Map([['/d/a.md', live]]) },
+      externalAnnotations: [],
+      rootPath: '/d/root.md',
+      unbackedPaths: new Set(),
+    });
+    expect(draft.annotations.map((a) => a.id)).toEqual(['root-comment']);
+  });
+
+  test('documents with no path copy (a vault document, a self-link copy of the root) ride the session draft', () => {
+    const draft = composeSessionDraft({
+      enabled: true,
+      live,
+      feedbackDocuments: {
+        root: rootState,
+        documents: new Map([
+          ['/vault/note.md', state('vault-comment')],
+          ['/d/root.md', state('self-copy-comment')],
+          ['/d/backed.md', state('backed-comment')],
+        ]),
+      },
+      externalAnnotations: [],
+      rootPath: '/d/root.md',
+      unbackedPaths: new Set(['/vault/note.md']),
+    });
+    expect(draft.annotations.map((a) => a.id)).toEqual(['root-comment', 'vault-comment', 'self-copy-comment']);
   });
 });

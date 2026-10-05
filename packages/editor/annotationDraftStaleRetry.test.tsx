@@ -1,0 +1,113 @@
+/**
+ * A session draft save the server refuses as stale is saved again above the
+ * server's generation (useAnnotationDraft + the default /api/draft transport).
+ *
+ * The case: two sessions on the same file. Session A (text v1) and session B
+ * (text v2, restored from A's path copy at generation 20). A's feedback at
+ * generation 25 deletes the path copy and B's content copy and tombstones
+ * them. Without the retry B's next saves (21..25) were silently refused, and a
+ * crash then lost B's comments.
+ *
+ * The fetch shim routes /api/draft to REAL annotate draft sessions
+ * (packages/shared/annotate-draft.ts) over a temp PLANNOTATOR_DATA_DIR, so the
+ * refusal is the server's own.
+ *
+ * Requires DOM (happy-dom) — runs under DOM_TESTS=1.
+ */
+import { afterEach, describe, expect, test } from 'bun:test';
+import React, { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createAnnotateDraftSession } from '@plannotator/shared/annotate-draft';
+import { contentHash } from '@plannotator/shared/draft';
+import { useAnnotationDraft } from '@plannotator/ui/hooks/useAnnotationDraft';
+import { AnnotationType, type Annotation } from '@plannotator/ui/types';
+
+const hasDom = typeof document !== 'undefined';
+const originalFetch = globalThis.fetch;
+const savedDataDir = process.env.PLANNOTATOR_DATA_DIR;
+let tempDir: string | null = null;
+let root: Root | null = null;
+
+afterEach(async () => {
+  if (root) await act(async () => root?.unmount());
+  root = null;
+  globalThis.fetch = originalFetch;
+  if (savedDataDir === undefined) delete process.env.PLANNOTATOR_DATA_DIR;
+  else process.env.PLANNOTATOR_DATA_DIR = savedDataDir;
+  if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+  tempDir = null;
+  if (hasDom) document.body.replaceChildren();
+});
+
+const comment = (id: string): Annotation => ({
+  id,
+  blockId: '',
+  startOffset: 0,
+  endOffset: 4,
+  type: AnnotationType.COMMENT,
+  text: id,
+  originalText: 'Body',
+  createdA: 1,
+});
+
+function Harness({ annotations }: { annotations: Annotation[] }) {
+  useAnnotationDraft({ annotations, globalAttachments: [], isApiMode: true, isSharedSession: false, submitted: false });
+  return null;
+}
+
+const tick = (ms: number) => act(async () => new Promise<void>((r) => setTimeout(r, ms)));
+
+describe.if(hasDom)('session draft save refused as stale', () => {
+  test('adopts the server generation and saves again', async () => {
+    tempDir = realpathSync(mkdtempSync(join(tmpdir(), 'plannotator-stale-retry-')));
+    process.env.PLANNOTATOR_DATA_DIR = join(tempDir, 'data');
+    const filePath = join(tempDir, 'notes.md');
+    writeFileSync(filePath, 'v2');
+
+    const sessionA = createAnnotateDraftSession({ contentKey: contentHash('v1'), filePath });
+    const sessionB = createAnnotateDraftSession({ contentKey: contentHash('v2'), filePath });
+    // A saved at generation 20; B restores from that path copy.
+    sessionA.save({ annotations: [comment('from-a')], globalAttachments: [], draftGeneration: 20, ts: 1 });
+
+    const posted: number[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost');
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.pathname !== '/api/draft') return Response.json({});
+      if (method === 'POST') {
+        const body = JSON.parse(String(init?.body));
+        posted.push(body.draftGeneration);
+        if (sessionB.save(body)) return Response.json({ ok: true });
+        return Response.json({ ok: false, error: 'stale draft generation', ...sessionB.state() }, { status: 409 });
+      }
+      const loaded = sessionB.load();
+      return loaded.found
+        ? Response.json(loaded.draft)
+        : Response.json({ found: false, draftGeneration: loaded.draftGeneration }, { status: 404 });
+    }) as typeof fetch;
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => { root?.render(<Harness annotations={[]} />); });
+    await tick(50);
+
+    // A decides at generation 25 while B is still open.
+    sessionA.settle(25);
+
+    // B's reviewer adds a comment: the save at 21 is refused, then retried above 25.
+    await act(async () => { root?.render(<Harness annotations={[comment('from-b')]} />); });
+    await tick(700);
+
+    expect(posted[0]).toBe(21);
+    expect(posted.at(-1)).toBeGreaterThan(25);
+    const recovered = sessionB.load();
+    expect(recovered.found).toBe(true);
+    if (recovered.found) {
+      expect((recovered.draft.annotations as Annotation[]).map((a) => a.id)).toEqual(['from-b']);
+    }
+  });
+});
