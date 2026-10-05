@@ -296,6 +296,30 @@ describe("plain-bullet choices keep their wrapped lines", () => {
     expect(one.choices[0].recommended).toBe(true);
   });
 
+  // Re-review of #1699: main matched a recommendation against a plain
+  // bullet's first line, so it must still match once wrapped lines join it.
+  test("a recommendation naming a wrapped bullet by its first line still marks it", () => {
+    const indented = parseQuestionBlock("question", `Pick\n\n- Option A\n  more about A\n- Option B\n\nRecommended: Option A`)!;
+    expect(indented.choices.map((c) => c.label)).toEqual(["Option A more about A", "Option B"]);
+    expect(indented.choices.map((c) => c.recommended)).toEqual([true, false]);
+    expect(indented.suggestedText).toBeUndefined();
+
+    const lazy = parseQuestionBlock("question", `Pick\n\n- Option A — cheap\n- Option B — slow\nBoth are reversible.\n\nRecommended: Option B`)!;
+    expect(lazy.choices.map((c) => c.description)).toEqual(["cheap", "slow Both are reversible."]);
+    expect(lazy.choices.map((c) => c.recommended)).toEqual([false, true]);
+    expect(lazy.suggestedText).toBeUndefined();
+  });
+
+  test("a recommendation replaced by a later one gives its wrapped lines back to the context", () => {
+    const q = parseQuestionBlock(
+      "question",
+      `Pick\n\n- [ ] Local\n- [ ] Remote\n\nRecommended: Local, since it\nneeds no server\n\nRecommended: Remote`,
+    )!;
+    expect(q.recommendation).toBe("Remote");
+    expect(q.choices.map((c) => c.recommended)).toEqual([false, true]);
+    expect(q.context).toBe("needs no server");
+  });
+
   test("only ** marks a bold name: __init__: stays one label", () => {
     const q = parseQuestionBlock("question", `Which method?\n\n- __init__: constructor\n- __call__: invoke`)!;
     expect(q.choices.map((c) => c.label)).toEqual(["__init__: constructor", "__call__: invoke"]);

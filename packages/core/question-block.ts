@@ -255,8 +255,12 @@ type ChoiceSplit = { label: string; description?: string };
  *  plain dash split (what a task-list item uses); a bullet whose label
  *  collides with another's steps down that list, so two choices never share
  *  a label (both would show as picked, and the answer could not tell them
- *  apart). Also returns every name a recommendation may use per choice. */
-const plainBulletSplits = (texts: string[]): { splits: ChoiceSplit[]; names: string[][] } => {
+ *  apart). Also returns every name a recommendation may use per choice,
+ *  including the bullet's first line and its dash-split label (what the
+ *  label was before wrapped lines joined it), so a recommendation that
+ *  matched before still matches. */
+const plainBulletSplits = (bullets: { text: string; first: string }[]): { splits: ChoiceSplit[]; names: string[][] } => {
+  const texts = bullets.map((b) => b.text);
   const options = texts.map((text) => {
     const plain = splitLabel(text);
     const preferred = splitBoldLead(text) ?? plain;
@@ -283,7 +287,7 @@ const plainBulletSplits = (texts: string[]): { splits: ChoiceSplit[]; names: str
   }
   return {
     splits: pick.map((p, i) => options[i][p]),
-    names: options.map((list) => list.map((o) => o.label)),
+    names: options.map((list, i) => [...list.map((o) => o.label), bullets[i].first, splitLabel(bullets[i].first).label]),
   };
 };
 
@@ -378,7 +382,14 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
   const choiceNames: string[][] = [];
   // A plain bullet's context lines: its own line plus every continuation
   // line, so all of them leave the context when the bullets become choices.
-  const plainBullets: { text: string; contextIndices: number[] }[] = [];
+  const plainBullets: { text: string; first: string; contextIndices: number[] }[] = [];
+  // Context lines to drop at the end: plain bullets that became choices, and
+  // the lines that wrap the final recommendation.
+  const dropContext = new Set<number>();
+  // The current recommendation's wrapped lines (their context indices). They
+  // sit in the context until the end, so a later `Recommended:` that
+  // replaces this one leaves them there instead of losing them.
+  let recommendationWrapIndices: number[] = [];
   // The recommendation as its line reads, and with the lines that wrap it
   // (see isRecommendationWrap). A choice is matched on the line first.
   let recommendation: string | undefined;
@@ -427,7 +438,10 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
     const rec = line.match(RECOMMENDED_RE) ?? line.match(ARROW_RE);
     if (rec) {
       const text = rec[1].replace(/[*_]{1,2}$/, '').trim();
-      if (text) recommendation = recommendationWrapped = text;
+      if (text) {
+        recommendation = recommendationWrapped = text;
+        recommendationWrapIndices = [];
+      }
       recommendationOpen = !!text;
       lastChoice = -1;
       openBullet = null;
@@ -460,6 +474,8 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
     if (recommendationOpen) {
       if (recommendationWrapped && isRecommendationWrap(recommendationWrapped, line)) {
         recommendationWrapped = `${recommendationWrapped} ${line.trim().replace(/[*_]{1,2}$/, '').trim()}`;
+        recommendationWrapIndices.push(contextLines.length);
+        pushContext(line.trimEnd());
         continue;
       }
       recommendationOpen = false;
@@ -493,7 +509,7 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
     }
     openBullet = null;
     if (bullet && bullet[1].trim()) {
-      plainBullets.push({ text: bullet[1].trim(), contextIndices: [contextLines.length] });
+      plainBullets.push({ text: bullet[1].trim(), first: bullet[1].trim(), contextIndices: [contextLines.length] });
       openBullet = {
         index: plainBullets.length - 1,
         contentColumn: indentWidth(line) + (line.trimStart().length - bullet[1].length),
@@ -507,19 +523,19 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
 
   // A pick question written with plain bullets: the bullets are the choices.
   if (choices.length === 0 && directiveKind !== 'question-text' && plainBullets.length > 0) {
-    const taken = new Set<number>();
     const bullets = plainBullets.slice(0, MAX_QUESTION_CHOICES);
-    const { splits, names } = plainBulletSplits(bullets.map((b) => b.text));
+    const { splits, names } = plainBulletSplits(bullets);
     bullets.forEach((bullet, i) => {
       const { label, description } = splits[i];
       if (!label) return;
       choices.push({ label, ...(description ? { description } : {}), settled: false, recommended: false });
       raws.push(bullet.text);
       choiceNames.push(names[i]);
-      for (const index of bullet.contextIndices) taken.add(index);
+      for (const index of bullet.contextIndices) dropContext.add(index);
     });
-    for (let i = contextLines.length - 1; i >= 0; i--) if (taken.has(i)) contextLines.splice(i, 1);
   }
+  for (const index of recommendationWrapIndices) dropContext.add(index);
+  for (let i = contextLines.length - 1; i >= 0; i--) if (dropContext.has(i)) contextLines.splice(i, 1);
 
   const kind: QuestionKind = choices.length === 0 || directiveKind === 'question-text'
     ? 'text'
