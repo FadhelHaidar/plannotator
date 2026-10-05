@@ -36,6 +36,7 @@ function createContext(
   let toolDefinition: Record<string, any> | undefined;
   let sessionContextHook: SessionContextHook | undefined;
   const contextHooks: SessionContextHook[] = [];
+  const generateHooks: SessionContextHook[] = [];
   const sessionGet = mock(async () => ({ location: { directory: "/project" } }));
 
   return {
@@ -55,6 +56,7 @@ function createContext(
             sessionContextHook = callback;
             contextHooks.push(callback);
           }
+          if (name === "generate") generateHooks.push(callback);
           return { dispose: async () => {} };
         },
       },
@@ -74,6 +76,9 @@ function createContext(
     /** Run every registered context hook, in registration order, like the host. */
     runContextHooks: async (event: Parameters<SessionContextHook>[0]) => {
       for (const hook of contextHooks) await hook(event);
+    },
+    runGenerateHooks: async (event: Parameters<SessionContextHook>[0]) => {
+      for (const hook of generateHooks) await hook(event);
     },
     sessionGet,
   };
@@ -553,4 +558,21 @@ describe("session-URL notices stay out of the model context", () => {
       expect(event.messages).toEqual([user("q"), assistant("calling"), toolResult("Plan approved!")]);
     });
   }
+
+  // Plan review's "Quick answer from this session" is a `session.generate`
+  // request, built through the `generate` hook rather than `context`.
+  test("session.generate requests (plan review quick answers) are filtered too", async () => {
+    const testContext = createContext({ workflow: "plan-agent" });
+    await serverPlugin.setup(testContext.context as never);
+    const event = {
+      agent: "plan",
+      system: [{ type: "text" as const, text: "system" }],
+      messages: [user("make a plan"), assistant("calling submit_plan"), notice(), user("[Plannotator Ask AI] why step 2?")] as unknown[],
+      tools: {},
+    };
+
+    await testContext.runGenerateHooks(event);
+
+    expect(event.messages).toEqual([user("make a plan"), assistant("calling submit_plan"), user("[Plannotator Ask AI] why step 2?")]);
+  });
 });

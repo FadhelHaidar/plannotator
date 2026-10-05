@@ -52,6 +52,7 @@ import { getPlanningPrompt } from "./planning-prompt";
 import { announceSessionUrl } from "./session-url";
 import {
   appendCommandFeedback,
+  CommandMessageAgents,
   createCommandTurnClient,
   resolveFeedbackTarget,
   retargetCommandMessage,
@@ -248,6 +249,9 @@ const PlannotatorPlugin: Plugin = async (ctx, rawOptions?: PlannotatorOpenCodeOp
   // to give that message the agent/model/variant the feedback prompt would
   // have had. Keyed by session.
   const commandFeedback = new Map<string, PendingCommandFeedback>();
+  // The agent each retargeted command message was built with, so later
+  // commands still read the user's agent from it. See `CommandMessageAgents`.
+  const commandMessageAgents = new CommandMessageAgents();
 
   /**
    * What OpenCode would have used for the old separate feedback prompt (agent
@@ -538,7 +542,9 @@ Do NOT proceed with implementation until your plan is approved.`;
       // Feedback rides the command's OWN message instead of a second prompt:
       // OpenCode runs a model turn for that message no matter what, so a
       // separate prompt meant two turns for one review. See command-turn.ts.
-      const turn = createCommandTurnClient(ctx.client, input.sessionID);
+      const turn = createCommandTurnClient(ctx.client, input.sessionID, {
+        messageAgents: commandMessageAgents,
+      });
       try {
         await runPlannotatorCommand(cmd, input, turn.client);
       } finally {
@@ -561,13 +567,18 @@ Do NOT proceed with implementation until your plan is approved.`;
       const pending = commandFeedback.get(input.sessionID);
       if (!pending) return;
       commandFeedback.delete(input.sessionID);
-      retargetCommandMessage({
+      const message = output.message as { id?: unknown; agent?: unknown };
+      const builtWith = message.agent;
+      if (retargetCommandMessage({
         sessionID: input.sessionID,
         pending,
         hook: input,
-        message: output.message,
+        message,
         parts: output.parts,
-      });
+      })) {
+        // The next command reads "the user's agent" from this message.
+        commandMessageAgents.record(message.id, builtWith, message.agent);
+      }
     },
   };
 

@@ -127,6 +127,13 @@ const serverPlugin = {
         await ctx.session.hook("context", (event) => {
           dropSessionUrlNotices(event.messages as unknown[]);
         });
+        // `session.generate` (plan review's "Quick answer from this session")
+        // builds its request through its own hook with the same shape
+        // (`agentHook("generate", …)` in core's model-request.ts), so the
+        // notice is kept out of those answers too.
+        await ctx.session.hook("generate", (event) => {
+          dropSessionUrlNotices(event.messages as unknown[]);
+        });
       } catch (error) {
         console.error(`[Plannotator] Could not register the session-URL notice filter: ${error instanceof Error ? error.message : String(error)}`);
       }

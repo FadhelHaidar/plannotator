@@ -173,3 +173,92 @@ console.log(${JSON.stringify(JSON.stringify(outcome))});
     expect(output.parts.length).toBe(1);
   });
 });
+
+// 0.28.1 regression: the feedback now rides the command's own message, which
+// is retargeted to the feedback's agent. `/plannotator-annotate` reads "the
+// agent the user is talking to" from the last user message (#1612), and up to
+// 0.28.0 that was the previous command's message, still on the agent the user
+// ran it on. Both sequences the 0.28.1 smoke ran are pinned to what 0.28.0 did.
+// Failure caught: a follow-up annotate answered by whichever agent answered
+// the PREVIOUS command's feedback (sequence B lands on `build`, which can edit
+// files, for a user who is on `plan`).
+describe("OpenCode 1 follow-up commands keep the user's agent", () => {
+  async function session(root: string) {
+    const binary = path.join(root, "fake-cli.ts");
+    // One stub CLI for all three commands, answering each with feedback.
+    writeFileSync(binary, `#!/usr/bin/env bun
+await Bun.stdin.text();
+const command = process.argv[2];
+const feedback = command === "opencode-review" ? "Review feedback." : command === "opencode-annotate-last" ? "Last feedback." : "Annotate feedback.";
+console.log(JSON.stringify({ decision: "annotated", feedback }));
+`, { mode: 0o755 });
+    process.env.PLANNOTATOR_BIN = binary;
+
+    // The session as OpenCode stores it: messages carry the agent they were
+    // built with (after any chat.message retarget).
+    const messages: any[] = [];
+    let nextId = 0;
+    const say = (role: "user" | "assistant", agent: string, text: string) => {
+      const info = { id: `msg_${String(nextId++).padStart(3, "0")}`, role, agent, model: { providerID: "fake", modelID: `${agent}-model` } };
+      messages.push({ info, parts: [{ type: "text", text }] });
+      return info;
+    };
+    const client: any = makeClient();
+    client.session.messages = async () => ({ data: structuredClone(messages) });
+    client.session.prompt = async () => {
+      throw new Error("feedback must ride the command's own message");
+    };
+    client.session.get = async () => ({ data: { id: "ses_1", version: "1.18.34", model: { id: "build-model", providerID: "fake" } } });
+    client.app.agents = async () => ({
+      data: [
+        { name: "build", mode: "primary", model: { providerID: "fake", modelID: "build-model" } },
+        { name: "plan", mode: "primary", model: { providerID: "fake", modelID: "plan-model" } },
+      ],
+    });
+    client.config.providers = async () => ({ data: { providers: [{ id: "fake", models: { "build-model": {}, "plan-model": {} } }] } });
+    const plugin = await PlannotatorPlugin({ client, directory: root } as never, { runtime: "cli" } as never) as Record<string, any>;
+
+    /** Run a command the way OpenCode 1 does; returns the agent that answers. */
+    const run = async (command: string, args: string, userAgent: string): Promise<string> => {
+      const parts: any[] = [];
+      await plugin["command.execute.before"]({ command, sessionID: "ses_1", arguments: args }, { parts });
+      // OpenCode builds the command's message on the user's agent, then lets
+      // chat.message see it before storing it.
+      const info: any = { id: `msg_${String(nextId++).padStart(3, "0")}`, role: "user", agent: userAgent, model: { providerID: "fake", modelID: `${userAgent}-model` } };
+      const messageParts = parts.map((part, index) => ({ ...part, id: `prt_${index}` }));
+      await plugin["chat.message"]({ sessionID: "ses_1", agent: userAgent }, { message: info, parts: messageParts });
+      messages.push({ info, parts: messageParts });
+      say("assistant", info.agent, `reply to ${command}`);
+      return info.agent;
+    };
+    return { say, run };
+  }
+
+  test.skipIf(process.platform === "win32")("A: /plannotator-last on plan's message, then /plannotator-annotate on build", async () => {
+    environment.reset();
+    const root = environment.makeTempDir();
+    process.env.PLANNOTATOR_DATA_DIR = root;
+    const { say, run } = await session(root);
+    say("user", "plan", "typed on plan");
+    say("assistant", "plan", "Plan answer");
+
+    // #1612: the writer of the annotated message answers its feedback.
+    expect(await run("plannotator-last", "", "build")).toBe("plan");
+    // 0.28.0: the user ran this on build, so build answers.
+    expect(await run("plannotator-annotate", "notes.md", "build")).toBe("build");
+  }, 20_000);
+
+  test.skipIf(process.platform === "win32")("B: /plannotator-review on plan with no switch, then /plannotator-annotate on plan", async () => {
+    environment.reset();
+    const root = environment.makeTempDir();
+    process.env.PLANNOTATOR_DATA_DIR = root;
+    const { say, run } = await session(root);
+    say("user", "plan", "typed on plan");
+    say("assistant", "plan", "Plan answer");
+
+    // No agent named: OpenCode's default agent answered the review feedback.
+    expect(await run("plannotator-review", "", "plan")).toBe("build");
+    // 0.28.0: the annotate feedback goes back to plan, never to build.
+    expect(await run("plannotator-annotate", "notes.md", "plan")).toBe("plan");
+  }, 20_000);
+});

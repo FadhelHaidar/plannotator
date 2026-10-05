@@ -73,7 +73,18 @@ function bindingProxy<T extends object>(target: T, overrides: Record<PropertyKey
  * than sent. Everything else (logging, toasts, listing agents and messages,
  * prompts to other sessions, `noReply` prompts) passes straight through.
  */
-export function createCommandTurnClient<T>(client: T, sessionID: string | undefined): {
+export function createCommandTurnClient<T>(
+  client: T,
+  sessionID: string | undefined,
+  options: {
+    /**
+     * Command messages this plugin retargeted. Their `session.messages` view
+     * is restored to the agent the user ran the command on; see
+     * `CommandMessageAgents`.
+     */
+    messageAgents?: CommandMessageAgents;
+  } = {},
+): {
   client: T;
   /** The recorded feedback, once; undefined when nothing was recorded. */
   take: () => CommandFeedback | undefined;
@@ -109,12 +120,79 @@ export function createCommandTurnClient<T>(client: T, sessionID: string | undefi
     return { data: undefined };
   };
 
+  const overrides: Record<PropertyKey, unknown> = { prompt };
+  const messageAgents = options.messageAgents;
+  if (messageAgents && typeof session.messages === "function") {
+    const list = (session.messages as (request: unknown) => unknown).bind(session);
+    overrides.messages = async (request: unknown) => messageAgents.restore(await list(request));
+  }
+
   return {
     client: bindingProxy(client as object, {
-      session: bindingProxy(session, { prompt }),
+      session: bindingProxy(session, overrides),
     }) as T,
     take,
   };
+}
+
+/**
+ * The agent each retargeted command message was BUILT with: the agent the user
+ * ran the command on.
+ *
+ * Why it matters. The command handlers read "the agent the user is talking
+ * to" as the agent of the session's last user message (`readLastUserAgent`,
+ * #1612). Up to 0.28.0 that message, right after a Plannotator command, was
+ * the command's own emptied message, which kept the user's agent. Since the
+ * feedback rides that message and `retargetCommandMessage` points it at the
+ * feedback's agent, a follow-up `/plannotator-annotate` would read the
+ * PREVIOUS feedback's agent instead: after a review sent from `plan` with no
+ * switch, the default `build` agent, which may edit files. So the handlers'
+ * view of `session.messages` reports each retargeted message under the agent
+ * it was built with, exactly what 0.28.0 read there. The model and OpenCode
+ * itself still see the real (retargeted) message.
+ *
+ * In memory and bounded: after the plugin restarts, a message retargeted
+ * before reads as its stored agent.
+ */
+export class CommandMessageAgents {
+  private readonly agents = new Map<string, string>();
+
+  constructor(private readonly limit = 500) {}
+
+  /** Remember `originalAgent` for a message that now carries another agent. */
+  record(messageID: unknown, originalAgent: unknown, currentAgent: unknown): void {
+    if (typeof messageID !== "string" || !messageID) return;
+    if (typeof originalAgent !== "string" || !originalAgent || originalAgent === currentAgent) return;
+    this.agents.delete(messageID);
+    this.agents.set(messageID, originalAgent);
+    while (this.agents.size > this.limit) {
+      const oldest = this.agents.keys().next().value;
+      if (oldest === undefined) break;
+      this.agents.delete(oldest);
+    }
+  }
+
+  /** The agent the message was built with, when this plugin retargeted it. */
+  originalOf(messageID: unknown): string | undefined {
+    return typeof messageID === "string" ? this.agents.get(messageID) : undefined;
+  }
+
+  /**
+   * A `session.messages` response with retargeted user messages reported under
+   * their original agent. Copies what it changes; never mutates the response.
+   */
+  restore(response: unknown): unknown {
+    if (this.agents.size === 0 || !isRecord(response) || !Array.isArray(response.data)) return response;
+    let changed = false;
+    const data = response.data.map((entry: unknown) => {
+      if (!isRecord(entry) || !isRecord(entry.info) || entry.info.role !== "user") return entry;
+      const original = this.originalOf(entry.info.id);
+      if (!original) return entry;
+      changed = true;
+      return { ...entry, info: { ...entry.info, agent: original } };
+    });
+    return changed ? { ...response, data } : response;
+  }
 }
 
 /** Put the recorded feedback into the command's own message. */

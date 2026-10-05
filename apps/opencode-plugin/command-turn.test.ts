@@ -3,6 +3,7 @@ import {
   appendCommandFeedback,
   createCommandTurnClient,
   agentVariantRule,
+  CommandMessageAgents,
   resolveFeedbackTarget,
   retargetCommandMessage,
 } from "./command-turn";
@@ -314,5 +315,35 @@ describe("agentVariantRule boundaries", () => {
     }
     expect(agentVariantRule("1.1.48")).toBe("none");
     expect(agentVariantRule("1.1.54")).toBe("offered");
+  });
+});
+
+describe("CommandMessageAgents", () => {
+  // Failure caught: the handlers' view of a retargeted command message losing
+  // the agent the user ran the command on, or the record leaking onto other
+  // messages, or growing without bound.
+  test("reports retargeted user messages under the agent they were built with", () => {
+    const agents = new CommandMessageAgents();
+    agents.record("msg_2", "plan", "build");
+    agents.record("msg_3", "build", "build"); // not retargeted: nothing to restore
+    const response = {
+      data: [
+        { info: { id: "msg_1", role: "user", agent: "build" } },
+        { info: { id: "msg_2", role: "user", agent: "build" } },
+        { info: { id: "msg_2", role: "assistant", agent: "build" } },
+        { info: { id: "msg_3", role: "user", agent: "build" } },
+      ],
+    };
+    const restored = agents.restore(response) as typeof response;
+    expect(restored.data.map((entry) => entry.info.agent)).toEqual(["build", "plan", "build", "build"]);
+    expect(response.data[1].info.agent).toBe("build"); // the host's response is not mutated
+  });
+
+  test("forgets the oldest record past its bound", () => {
+    const agents = new CommandMessageAgents(2);
+    agents.record("a", "plan", "build");
+    agents.record("b", "plan", "build");
+    agents.record("c", "plan", "build");
+    expect([agents.originalOf("a"), agents.originalOf("b"), agents.originalOf("c")]).toEqual([undefined, "plan", "plan"]);
   });
 });
