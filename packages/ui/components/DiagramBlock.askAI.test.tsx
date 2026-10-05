@@ -225,6 +225,41 @@ describe.if(hasDom)('DiagramBlock: Ask AI from a diagram comment', () => {
     expect(host!.querySelector<HTMLTextAreaElement>('[data-diagram-composer] textarea')!.value).toBe('still here?');
   });
 
+  test('while a question is pending, Comment and Enter cannot also save it as a comment', async () => {
+    const block = fence();
+    const added: Annotation[] = [];
+    let release: (accepted: boolean) => void = () => {};
+    await mount(
+      <MermaidBlock
+        block={block}
+        annotations={[]}
+        onAddAnnotation={(ann) => added.push(ann)}
+        onAskAI={() => new Promise<boolean>((resolve) => { release = resolve; })}
+      />,
+    );
+    await waitFor(() => expect(host!.querySelector('[id$="-flowchart-D-1"]')).not.toBeNull());
+    await clickNodeD(host!);
+    await waitFor(() => expect(askButton(host!)).not.toBeNull());
+    await typeText(host!, 'pending question');
+    await act(async () => {
+      askButton(host!)!.click();
+    });
+    const composer = host!.querySelector('[data-diagram-composer]')!;
+    const comment = [...composer.querySelectorAll('button')].find((b) => b.textContent === 'Comment')!;
+    expect(comment.disabled).toBe(true);
+    await act(async () => {
+      composer.querySelector('textarea')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(added).toEqual([]);
+    // Refused: the draft is editable and savable again.
+    await act(async () => {
+      release(false);
+    });
+    await settle();
+    expect(comment.disabled).toBe(false);
+  });
+
   test('a host that passes no handler gets the composer it had: no Ask AI', async () => {
     const block = fence();
     await mount(<MermaidBlock block={block} annotations={[]} onAddAnnotation={noop} />);

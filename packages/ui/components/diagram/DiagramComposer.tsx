@@ -60,6 +60,12 @@ export function DiagramComposer({
   useEffect(() => {
     textareaRef.current?.focus();
   }, []);
+  // A refused question hands the keyboard back to the textarea, once it is
+  // enabled again (it is disabled while the question is pending).
+  const [refocus, setRefocus] = useState(0);
+  useEffect(() => {
+    if (refocus > 0) textareaRef.current?.focus();
+  }, [refocus]);
 
   const target = draft.primary.target;
   const unsavedPart = draft.sourceLine === null && sourceDirty;
@@ -83,7 +89,7 @@ export function DiagramComposer({
     } finally {
       setAsking(false);
     }
-    if (!accepted) textareaRef.current?.focus();
+    if (!accepted) setRefocus((n) => n + 1);
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -97,7 +103,7 @@ export function DiagramComposer({
     }
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
-      if (canWrite && text.trim() !== '') onSubmit(text);
+      if (canWrite && !asking && text.trim() !== '') onSubmit(text);
     }
   };
 
@@ -132,7 +138,7 @@ export function DiagramComposer({
             onKeyDown={onKeyDown}
             placeholder="Add a comment..."
             rows={3}
-            disabled={submitting}
+            disabled={submitting || asking}
             className={cn(
               'w-full resize-none rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground',
               'outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50',
@@ -160,7 +166,7 @@ export function DiagramComposer({
             <Button type="button" variant="ghost" size="xs" onClick={onCancel}>
               Cancel
             </Button>
-            <Button type="button" size="xs" disabled={!canWrite || submitting || text.trim() === ''} onClick={() => onSubmit(text)}>
+            <Button type="button" size="xs" disabled={!canWrite || submitting || asking || text.trim() === ''} onClick={() => onSubmit(text)}>
               Comment
             </Button>
           </div>

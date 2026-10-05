@@ -1801,8 +1801,9 @@ renders the composer it had (Cancel + Comment, no Ask AI).
   `utils/diagramAskAI`'s `diagramAskAIContext`: `kind: 'selection'`, label
   `"Mermaid diagram node D"`, `text` = the part's label, and `detail` = the
   export's location line (`diagramAnchorLocationLine`), the engine and family,
-  and the diagram source (bounded to 40 lines / 4000 chars, a window around
-  the part when longer) in document lines. `detail` is the #1694 field that
+  and the diagram source (bounded to 40 lines / 4000 chars, grown outward
+  from the part's line so the part is always in it; a single line over the
+  budget is cut with `…`) in document lines. `detail` is the #1694 field that
   `buildDefaultPrompt` puts on the user message before the question. Ignored
   when `readOnly`. A question asked in the popout closes the popout, since it
   covers the panel the answer streams into.

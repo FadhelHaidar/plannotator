@@ -58,45 +58,68 @@ function fenceFor(source: string): string {
   return '`'.repeat(Math.max(4, longest + 1));
 }
 
+/** A line longer than the whole budget is cut, with a visible marker. */
+const TRUNCATION_MARKER = '…';
+
 /**
- * The bounded slice of the source a question carries: the whole diagram when
- * it fits, else a window centred on the part's line (the top of the diagram
- * when the part has no line). Returns 1-based DIAGRAM lines.
+ * The bounded slice of the source a question carries, grown outward from the
+ * part's line (the top of the diagram when the part has no line), one line
+ * below then one above, until the line cap or the character cap stops a
+ * side. The part's own line is always in it; a part line longer than the
+ * whole character budget is cut with a visible marker, so the slice never
+ * exceeds MAX_ASK_AI_DIAGRAM_SOURCE_CHARS (newlines included). Returns
+ * 1-based DIAGRAM lines and the text to quote.
  */
 function sourceWindow(
   lines: readonly string[],
   anchor: DiagramAnchor,
   offset: number,
-): { first: number; last: number; excerpt: boolean } | null {
-  let first = 1;
-  let last = lines.length;
-  while (last > 0 && (lines[last - 1] ?? '').trim() === '') last -= 1;
-  while (first <= last && (lines[first - 1] ?? '').trim() === '') first += 1;
-  if (last === 0 || first > last) return null;
-  const [wholeFirst, wholeLast] = [first, last];
-  if (last - first + 1 > MAX_ASK_AI_DIAGRAM_SOURCE_LINES) {
-    const partLine = anchor.kind !== 'diagram' && anchor.sourceLine !== null ? anchor.sourceLine[0] - offset : null;
-    const center = partLine !== null && partLine >= first && partLine <= last ? partLine : first;
-    const half = Math.floor(MAX_ASK_AI_DIAGRAM_SOURCE_LINES / 2);
-    let start = Math.max(first, center - half);
-    let end = start + MAX_ASK_AI_DIAGRAM_SOURCE_LINES - 1;
-    if (end > last) {
-      end = last;
-      start = Math.max(first, end - MAX_ASK_AI_DIAGRAM_SOURCE_LINES + 1);
-    }
-    first = start;
-    last = end;
+): { first: number; last: number; body: string; excerpt: boolean } | null {
+  let wholeFirst = 1;
+  let wholeLast = lines.length;
+  while (wholeLast > 0 && (lines[wholeLast - 1] ?? '').trim() === '') wholeLast -= 1;
+  while (wholeFirst <= wholeLast && (lines[wholeFirst - 1] ?? '').trim() === '') wholeFirst += 1;
+  if (wholeLast === 0 || wholeFirst > wholeLast) return null;
+
+  const partLine = anchor.kind !== 'diagram' && anchor.sourceLine !== null ? anchor.sourceLine[0] - offset : null;
+  const center = partLine !== null && partLine >= wholeFirst && partLine <= wholeLast ? partLine : wholeFirst;
+
+  let centerText = lines[center - 1] ?? '';
+  let truncated = false;
+  if (centerText.length > MAX_ASK_AI_DIAGRAM_SOURCE_CHARS) {
+    centerText = centerText.slice(0, MAX_ASK_AI_DIAGRAM_SOURCE_CHARS - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
+    truncated = true;
   }
-  // The character cap trims from the end, but never past the part's line.
-  let chars = 0;
-  for (let i = first; i <= last; i += 1) {
-    chars += (lines[i - 1] ?? '').length + 1;
-    if (chars > MAX_ASK_AI_DIAGRAM_SOURCE_CHARS && i > first) {
-      last = i - 1;
-      break;
+  let chars = centerText.length;
+  let count = 1;
+  let first = center;
+  let last = center;
+  let growDown = true;
+  let growUp = true;
+  while ((growDown || growUp) && count < MAX_ASK_AI_DIAGRAM_SOURCE_LINES) {
+    if (growDown) {
+      const next = last + 1;
+      const cost = (lines[next - 1] ?? '').length + 1;
+      if (next > wholeLast || chars + cost > MAX_ASK_AI_DIAGRAM_SOURCE_CHARS) growDown = false;
+      else {
+        last = next;
+        chars += cost;
+        count += 1;
+      }
+    }
+    if (growUp && count < MAX_ASK_AI_DIAGRAM_SOURCE_LINES) {
+      const next = first - 1;
+      const cost = (lines[next - 1] ?? '').length + 1;
+      if (next < wholeFirst || chars + cost > MAX_ASK_AI_DIAGRAM_SOURCE_CHARS) growUp = false;
+      else {
+        first = next;
+        chars += cost;
+        count += 1;
+      }
     }
   }
-  return { first, last, excerpt: first > wholeFirst || last < wholeLast };
+  const body = [...lines.slice(first - 1, center - 1), centerText, ...lines.slice(center, last)].join('\n');
+  return { first, last, body, excerpt: truncated || first > wholeFirst || last < wholeLast };
 }
 
 /** The agent-facing identity of a diagram part (the `detail` Ask AI sends). */
@@ -112,7 +135,7 @@ export function diagramIdentityForAskAI(input: DiagramAskAIInput): string {
   const lines = source.split('\n');
   const window = sourceWindow(lines, anchor, sourceLineOffset);
   if (window !== null) {
-    const body = lines.slice(window.first - 1, window.last).join('\n');
+    const body = window.body;
     const docFirst = window.first + sourceLineOffset;
     const docLast = window.last + sourceLineOffset;
     const range = docLast > docFirst ? `lines ${docFirst}–${docLast}` : `line ${docFirst}`;

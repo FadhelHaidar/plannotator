@@ -60,6 +60,48 @@ describe('diagramAskAIContext', () => {
     expect(body.length).toBeLessThanOrEqual(MAX_ASK_AI_DIAGRAM_SOURCE_CHARS + 40);
   });
 
+  /** The quoted source: the lines between the opening and closing fence. */
+  const quotedBody = (detail: string): string => {
+    const open = detail.indexOf('````mermaid\n') + '````mermaid\n'.length;
+    return detail.slice(open, detail.lastIndexOf('\n````'));
+  };
+
+  test('long lines: the character cap shrinks the window around the part, never past it', () => {
+    // 100 lines of ~300 chars, part on line 65: the cap must not trim from
+    // the end of a window that started 20 lines above the part.
+    const lines = ['flowchart TD'];
+    for (let i = 1; i < 100; i += 1) lines.push(`  N${i}[${'x'.repeat(290)}] --> N${i + 1}`);
+    const anchor: DiagramAnchor = { v: 1, family: 'flowchart', kind: 'node', id: 'N64', label: 'x', sourceLine: [65, 65] };
+    const detail = diagramIdentityForAskAI({ kind: 'mermaid', anchor, source: lines.join('\n'), sourceLineOffset: 0 });
+    const body = quotedBody(detail);
+    expect(body).toContain('  N64[');
+    expect(body.length).toBeLessThanOrEqual(MAX_ASK_AI_DIAGRAM_SOURCE_CHARS);
+    const range = /document lines (\d+)–(\d+)/.exec(detail)!;
+    const [first, last] = [Number(range[1]), Number(range[2])];
+    // Symmetric: the part sits in the middle of what was kept.
+    expect(65 - first).toBeGreaterThan(0);
+    expect(Math.abs(65 - first - (last - 65))).toBeLessThanOrEqual(1);
+
+    // 30 lines of ~1000 chars, part on line 25.
+    const wide = ['flowchart TD'];
+    for (let i = 1; i < 30; i += 1) wide.push(`  W${i}[${'y'.repeat(990)}] --> W${i + 1}`);
+    const wideAnchor: DiagramAnchor = { v: 1, family: 'flowchart', kind: 'node', id: 'W24', label: 'y', sourceLine: [25, 25] };
+    const wideDetail = diagramIdentityForAskAI({ kind: 'mermaid', anchor: wideAnchor, source: wide.join('\n'), sourceLineOffset: 0 });
+    expect(quotedBody(wideDetail)).toContain('  W24[');
+    expect(quotedBody(wideDetail).length).toBeLessThanOrEqual(MAX_ASK_AI_DIAGRAM_SOURCE_CHARS);
+    expect(wideDetail).toContain('(excerpt)');
+  });
+
+  test('a single huge line is cut with a visible marker, so the question stays bounded', () => {
+    const dot = `digraph G { ${Array.from({ length: 40000 }, (_, i) => `n${i} -> n${i + 1};`).join(' ')} }`;
+    expect(dot.length).toBeGreaterThan(500_000);
+    const anchor: DiagramAnchor = { v: 1, family: 'graphviz', kind: 'node', id: 'n5', label: 'n5', sourceLine: [1, 1] };
+    const detail = diagramIdentityForAskAI({ kind: 'graphviz', anchor, source: dot, sourceLineOffset: 0 });
+    expect(detail.length).toBeLessThanOrEqual(MAX_ASK_AI_DIAGRAM_SOURCE_CHARS + 300);
+    expect(detail).toContain('…\n````');
+    expect(detail).toContain('(excerpt)');
+  });
+
   test('a source holding a backtick fence cannot close the quoting fence early', () => {
     const source = 'flowchart LR\n  A["````"] --> B';
     const anchor: DiagramAnchor = { v: 1, family: 'flowchart', kind: 'node', id: 'B', label: 'B', sourceLine: [2, 2] };
