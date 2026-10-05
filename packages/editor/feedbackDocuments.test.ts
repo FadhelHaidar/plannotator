@@ -4,7 +4,7 @@
  * Failures to catch:
  *  - The open document exported twice: once from the host's live state under
  *    the session heading and again from the linked-doc map, which also carries
- *    the open document (#folder-duplicate, every folder session since 0.27.x).
+ *    the open document (every folder session since at least 0.27.25).
  *  - The root document's comments vanishing while a linked document is open
  *    (plan review has no source path, so the stashed plan never reached the
  *    export), or landing under the linked heading instead of their own.
@@ -118,7 +118,37 @@ describe('folder session feedback export', () => {
     expect(out).not.toContain('# Folder Feedback');
     // A folder's files are not documents a plan referenced.
     expect(out).not.toContain('referenced in the plan');
-    expect(out).toContain('# Folder Document Feedback');
+    // The payload opens on the heading, not a stray blank line.
+    expect(out.startsWith('# Folder Document Feedback\n')).toBe(true);
+  });
+
+  test('the open document keeps full fidelity: document order, replies, diff and quick-label comments', () => {
+    const long = Array.from({ length: 12 }, (_, i) => `Paragraph number ${i + 1} text.`).join('\n\n');
+    const at = (id: string, blockId: string, text: string, extra: Partial<Annotation> = {}): Annotation => ({
+      id, blockId, startOffset: 0, endOffset: 9, type: AnnotationType.COMMENT,
+      text, originalText: 'Paragraph', createdA: 1, ...extra,
+    });
+    const anns: Annotation[] = [
+      at('c10', 'block-10', 'ON-BLOCK-TEN'),
+      at('c2', 'block-2', 'ON-BLOCK-TWO'),
+      at('r1', 'block-2', 'A-REPLY', { inReplyTo: 'c2', author: 'agent', createdA: 9 }),
+      at('d1', 'block-5', 'IN-THE-DIFF', { diffContext: 'modified' }),
+      at('q1', 'block-7', 'Needs tests', { isQuickLabel: true, quickLabelTip: 'Add a test.' } as Partial<Annotation>),
+    ];
+    const out = submit({
+      annotateSource: 'folder',
+      feedbackDocuments: { root: FOLDER_ROOT, documents: new Map([[A_PATH, doc(long, anns)]]) },
+      live: { markdown: long, annotations: anns },
+    });
+
+    for (const text of ['ON-BLOCK-TEN', 'ON-BLOCK-TWO', 'A-REPLY', 'IN-THE-DIFF', 'Add a test.']) {
+      expect(count(out, text)).toBe(1);
+    }
+    expect(out.indexOf('ON-BLOCK-TWO')).toBeLessThan(out.indexOf('ON-BLOCK-TEN'));
+    expect(out).toContain('**Replies:**\n- **Reply (agent):** A-REPLY');
+    expect(out).toContain('[In diff content]');
+    expect(out).toContain('[Needs tests] Feedback on: "Paragraph"');
+    expect(out).toContain('### Label Summary');
   });
 
   test('comments on another document only are exported once, under that path', () => {

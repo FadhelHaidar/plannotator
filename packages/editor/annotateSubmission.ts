@@ -157,6 +157,9 @@ export function buildCompleteAnnotateFeedback(
       if (hasCodeAnnotations) {
         annotationsText += exportCodeFileAnnotations(input.codeAnnotations);
       }
+      // The secondary sections open with a blank line to separate them from
+      // the section before; with no primary section that line led the payload.
+      annotationsText = annotationsText.replace(/^\n+/, "");
     }
   }
 

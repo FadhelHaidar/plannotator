@@ -140,8 +140,9 @@ export interface FeedbackDocuments {
   root: (CachedDocState & { renderAs: DocumentRenderAs }) | null;
   /**
    * Every document other than the root that carries state, keyed by path:
-   * the cached documents plus the active linked document's live state. Never
-   * contains the root.
+   * the cached documents plus the active linked document's live state. The
+   * root's own annotations are never here; a copy of the root's path opened
+   * from the root itself is a separate annotation set and is listed by path.
    */
   documents: Map<string, CachedDocState>;
 }
@@ -680,10 +681,11 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
         isConverted: linkedDoc.isConverted,
       });
     }
-    // The root goes under the session's own heading, never among the other
-    // documents (a backlink to it routes through back(), so this only guards
-    // a stale cache entry).
-    if (sourceFilePath) documents.delete(sourceFilePath);
+    // A cache entry under the root's own path is NOT the root: it is a copy
+    // the reviewer opened from the root itself (an HTML "Home" link, or
+    // index.html#intro from index.html — a backlink only routes through
+    // back() while a linked doc is open). Its comments are a separate set the
+    // counts include, so it is exported under its path, never dropped.
     const saved = linkedDoc ? savedPlanState.current : null;
     return {
       root: saved
@@ -697,8 +699,8 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
         : null,
       documents,
     };
-    // Same dependencies, same reason, as getDocAnnotations above.
-  }, [linkedDoc, annotations, globalAttachments, sourceFilePath, sourceConverted, getDocumentMarkdown, storeRevision]);
+    // storeRevision: same reason as getDocAnnotations above.
+  }, [linkedDoc, annotations, globalAttachments, sourceConverted, getDocumentMarkdown, storeRevision]);
 
   return {
     isActive: linkedDoc !== null,

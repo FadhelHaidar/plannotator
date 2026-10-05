@@ -1049,57 +1049,55 @@ const questionItemsFromAnswers = (answers: QuestionAnswer[]): QuestionExportItem
     settled: false,
   }));
 
-export const exportAnnotations = (
-  blocks: Block[],
-  allAnnotations: any[],
-  globalAttachments: ImageAttachment[] = [],
-  title: string = 'Plan Feedback',
-  subject: string = 'plan',
-  opts: ExportAnnotationsOptions = {},
-): string => {
-  // Answers to `:::question` blocks are printed first, in their own section,
-  // and never counted as numbered feedback.
-  const { answers, annotations } = splitQuestionAnswers(allAnnotations);
-  const answersSection = answers.length > 0
-    ? formatQuestionAnswersSection(questionExportItems(indexQuestionBlocks(blocks)), answers, { headingLevel: 2 })
-    : '';
-  if (annotations.length === 0 && globalAttachments.length === 0 && !answersSection) {
-    return 'No changes detected.';
-  }
-
-  // Sort annotations by block and offset
-  const sortedAnns = [...annotations].sort((a, b) => {
-    const blockA = blocks.findIndex(blk => blk.id === a.blockId);
-    const blockB = blocks.findIndex(blk => blk.id === b.blockId);
-    if (blockA !== blockB) return blockA - blockB;
+/**
+ * Sort annotations in DOCUMENT order: by the block's position in `blocks`,
+ * then by offset. Without blocks (a linked document whose text is unknown)
+ * block ids compare numerically, so block-10 never precedes block-2.
+ */
+const sortAnnotationsInDocumentOrder = (annotations: any[], blocks: Block[] | undefined): any[] => {
+  const order = new Map<string, number>();
+  blocks?.forEach((blk, index) => order.set(blk.id, index));
+  return [...annotations].sort((a, b) => {
+    if (a.blockId !== b.blockId) {
+      if (blocks) return (order.get(a.blockId) ?? -1) - (order.get(b.blockId) ?? -1);
+      return String(a.blockId ?? '').localeCompare(String(b.blockId ?? ''), undefined, { numeric: true });
+    }
     return a.startOffset - b.startOffset;
   });
+};
 
-  // One injection per export: a human-only skill referenced by several
-  // comments has its instructions injected once (see skillReferenceExportBlock).
-  const injectedSkills = new Set<string>();
-
-  let output = `# ${title}\n\n`;
-
-  if (opts.sourceConverted) {
-    output += `> Note: Line numbers below refer to the converted markdown, not the original HTML/URL source.\n\n`;
+/** `Label Summary` heading (at `level`) tallying quick labels, or '' when none. */
+const labelSummaryBlock = (sortedAnns: any[], level: number): string => {
+  const labeledAnns = sortedAnns.filter((a: any) => a.isQuickLabel && a.text);
+  if (labeledAnns.length === 0) return '';
+  const grouped = new Map<string, number>();
+  labeledAnns.forEach((a: any) => {
+    grouped.set(a.text, (grouped.get(a.text) || 0) + 1);
+  });
+  let output = `${'#'.repeat(level)} Label Summary\n\n`;
+  for (const [text, count] of grouped) {
+    output += `- **${text}**: ${count}\n`;
   }
+  output += '\n';
+  return output;
+};
 
-  output += answersSection;
-
-  // Add global reference images section if any
-  if (globalAttachments.length > 0) {
-    output += `## Reference Images\n`;
-    output += `Please review these reference images (use the Read tool to view):\n`;
-    globalAttachments.forEach((img, idx) => {
-      output += `${idx + 1}. [${img.name}] \`${img.path}\`\n`;
-    });
-    output += `\n`;
-  }
-
-  if (annotations.length > 0) {
-    output += `I've reviewed this ${subject} and have ${annotations.length} piece${annotations.length > 1 ? 's' : ''} of feedback:\n\n`;
-  }
+/**
+ * The numbered feedback entries of ONE document, shared by the root export
+ * (`exportAnnotations`, entries at `##`) and every linked/folder document
+ * (`exportLinkedDocAnnotations`, entries at `###` under the file heading), so
+ * a document's comments read the same whichever section carries them: line
+ * labels, `[In diff content]`, quick labels with their tip, element context,
+ * skill references, images, and threaded replies.
+ */
+const renderAnnotationEntries = (
+  sortedAnns: any[],
+  blocks: Block[] | undefined,
+  opts: { subject: string; level: number; injectedSkills: Set<string> },
+): string => {
+  const { subject, injectedSkills } = opts;
+  const hashes = (n: number) => '#'.repeat(n);
+  let output = '';
 
   // Live app sessions stamp annotations with the page they were made on.
   // When any exported annotation carries a pageUrl, entries are grouped under
@@ -1111,7 +1109,7 @@ export const exportAnnotations = (
   // number of its position in the ungrouped order, matching the on-page
   // marker numbering, so grouped sections may show non-contiguous numbers.
   // With no pageUrl anywhere the output is byte-identical to the ungrouped
-  // export (`## N.` entries, no page headers).
+  // export (entries at `level`, no page headers).
   const hasPageGroups = sortedAnns.some(
     (a: any) => typeof a.pageUrl === 'string' && a.pageUrl.length > 0,
   );
@@ -1192,16 +1190,16 @@ export const exportAnnotations = (
   let lastEmittedPage: string | null = null;
   emitOrder.forEach((ann) => {
     if (hasPageGroups && ann.pageUrl && ann.pageUrl !== lastEmittedPage) {
-      output += `## Page: ${ann.pageUrl}\n\n`;
+      output += `${hashes(opts.level)} Page: ${ann.pageUrl}\n\n`;
       lastEmittedPage = ann.pageUrl;
     }
-    output += `${hasPageGroups ? '###' : '##'} ${annotationNumbers.get(ann)}. `;
+    output += `${hashes(hasPageGroups ? opts.level + 1 : opts.level)} ${annotationNumbers.get(ann)}. `;
 
     // Add diff context label if annotation was created in diff view
     if (ann.diffContext) {
       output += `[In diff content] `;
     } else {
-      const lineLabel = lineLabelForAnnotation(blocks, ann);
+      const lineLabel = blocks ? lineLabelForAnnotation(blocks, ann) : null;
       if (lineLabel) output += `(${lineLabel}) `;
     }
 
@@ -1263,22 +1261,61 @@ export const exportAnnotations = (
     output += '\n';
   });
 
+  return output;
+};
+
+export const exportAnnotations = (
+  blocks: Block[],
+  allAnnotations: any[],
+  globalAttachments: ImageAttachment[] = [],
+  title: string = 'Plan Feedback',
+  subject: string = 'plan',
+  opts: ExportAnnotationsOptions = {},
+): string => {
+  // Answers to `:::question` blocks are printed first, in their own section,
+  // and never counted as numbered feedback.
+  const { answers, annotations } = splitQuestionAnswers(allAnnotations);
+  const answersSection = answers.length > 0
+    ? formatQuestionAnswersSection(questionExportItems(indexQuestionBlocks(blocks)), answers, { headingLevel: 2 })
+    : '';
+  if (annotations.length === 0 && globalAttachments.length === 0 && !answersSection) {
+    return 'No changes detected.';
+  }
+
+  const sortedAnns = sortAnnotationsInDocumentOrder(annotations, blocks);
+
+  // One injection per export: a human-only skill referenced by several
+  // comments has its instructions injected once (see skillReferenceExportBlock).
+  const injectedSkills = new Set<string>();
+
+  let output = `# ${title}\n\n`;
+
+  if (opts.sourceConverted) {
+    output += `> Note: Line numbers below refer to the converted markdown, not the original HTML/URL source.\n\n`;
+  }
+
+  output += answersSection;
+
+  // Add global reference images section if any
+  if (globalAttachments.length > 0) {
+    output += `## Reference Images\n`;
+    output += `Please review these reference images (use the Read tool to view):\n`;
+    globalAttachments.forEach((img, idx) => {
+      output += `${idx + 1}. [${img.name}] \`${img.path}\`\n`;
+    });
+    output += `\n`;
+  }
+
+  if (annotations.length > 0) {
+    output += `I've reviewed this ${subject} and have ${annotations.length} piece${annotations.length > 1 ? 's' : ''} of feedback:\n\n`;
+  }
+
+  output += renderAnnotationEntries(sortedAnns, blocks, { subject, level: 2, injectedSkills });
+
   output += `---\n`;
 
-  // Quick Label Summary
-  const labeledAnns = sortedAnns.filter((a: any) => a.isQuickLabel && a.text);
-  if (labeledAnns.length > 0) {
-    const grouped = new Map<string, number>();
-    labeledAnns.forEach((a: any) => {
-      grouped.set(a.text, (grouped.get(a.text) || 0) + 1);
-    });
-
-    output += `\n## Label Summary\n\n`;
-    for (const [text, count] of grouped) {
-      output += `- **${text}**: ${count}\n`;
-    }
-    output += '\n';
-  }
+  const summary = labelSummaryBlock(sortedAnns, 2);
+  if (summary) output += `\n${summary}`;
 
   return output;
 };
@@ -1340,57 +1377,14 @@ export const exportLinkedDocAnnotations = (
       output += `\n`;
     }
 
-    // Sort annotations by block and offset
-    const sortedAnns = [...annotations].sort((a, b) => {
-      if (a.blockId !== b.blockId) return a.blockId.localeCompare(b.blockId);
-      return a.startOffset - b.startOffset;
-    });
+    const sortedAnns = sortAnnotationsInDocumentOrder(annotations, docBlocks);
 
     if (annotations.length > 0 || answers.length === 0) {
       output += `I've reviewed this document and have ${annotations.length} piece${annotations.length !== 1 ? 's' : ''} of feedback:\n\n`;
     }
 
-    sortedAnns.forEach((ann, index) => {
-      output += `### ${index + 1}. `;
-
-      const lineLabel = docBlocks ? lineLabelForAnnotation(docBlocks, ann) : null;
-      if (lineLabel) output += `(${lineLabel}) `;
-
-      switch (ann.type) {
-        case 'DELETION':
-          output += `Remove this\n`;
-          output += `\`\`\`\n${ann.originalText}\n\`\`\`\n`;
-          output += `> I don't want this in the document.\n`;
-          break;
-
-        case 'COMMENT':
-          output += `${commentHeadingLine(ann)}\n`;
-          output += diagramLocationExportLine(ann);
-          output += `> ${ann.text}\n`;
-          break;
-
-        case 'GLOBAL_COMMENT':
-          output += `General feedback about the document\n`;
-          output += `> ${ann.text}\n`;
-          break;
-      }
-
-      output += elementContextExportBlock(ann, { includeRoute: false });
-      // Multi-target raw-HTML comments list every additional covered element.
-      output += additionalTargetsExportBlock(ann);
-
-      // External (tool-sourced) comments list skills but never inject.
-      output += skillReferenceExportBlock(ann.text, injectedSkills, { external: !!ann.source });
-
-      if (ann.images && ann.images.length > 0) {
-        output += `**Attached images:**\n`;
-        ann.images.forEach((img: ImageAttachment) => {
-          output += `- [${img.name}] \`${img.path}\`\n`;
-        });
-      }
-
-      output += '\n';
-    });
+    output += renderAnnotationEntries(sortedAnns, docBlocks, { subject: 'document', level: 3, injectedSkills });
+    output += labelSummaryBlock(sortedAnns, 3);
   }
 
   output += `---\n`;

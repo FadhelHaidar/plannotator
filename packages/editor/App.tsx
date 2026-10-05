@@ -2313,7 +2313,9 @@ const App: React.FC = () => {
       output += exportCodeFileAnnotations(codeAnnotations);
     }
 
-    return output;
+    // Secondary sections open with a separating blank line; drop it when no
+    // primary section precedes them (same rule as buildCompleteAnnotateFeedback).
+    return output.replace(/^\n+/, '');
     // skillContentGeneration re-runs this once lazily fetched human-only skill
     // contents land in the export registry (module state the exporters read).
   }, [getFeedbackSections, editorAnnotations, codeAnnotations, annotateSource, skillContentGeneration]);
