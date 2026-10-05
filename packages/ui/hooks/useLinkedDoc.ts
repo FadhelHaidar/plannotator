@@ -124,6 +124,28 @@ export interface CachedDocState {
   versionInfo?: VersionInfo | null;
 }
 
+/**
+ * The session's documents split the way FEEDBACK must be: the root document
+ * (the plan, the annotated file, or the folder itself) once, and every other
+ * document once under its own path. `getDocAnnotations()` is NOT this split —
+ * it also carries the active document's live state, which the host exports
+ * from its own state too, so exporting both printed the open document twice.
+ */
+export interface FeedbackDocuments {
+  /**
+   * The root document's stashed state while a linked document is open. Null
+   * while the root itself is the active document: its annotations are then
+   * the host's live state, which the host exports itself.
+   */
+  root: (CachedDocState & { renderAs: DocumentRenderAs }) | null;
+  /**
+   * Every document other than the root that carries state, keyed by path:
+   * the cached documents plus the active linked document's live state. Never
+   * contains the root.
+   */
+  documents: Map<string, CachedDocState>;
+}
+
 export interface LinkedDocSessionState {
   root: SavedPlanState;
   docs: Map<string, CachedDocState>;
@@ -156,8 +178,12 @@ export interface UseLinkedDocReturn {
   back: () => void;
   /** Dismiss the current error */
   dismissError: () => void;
-  /** All linked doc annotations including the active doc's live state (keyed by filepath) */
+  /** All linked doc annotations including the active doc's live state (keyed by filepath).
+   *  For counts and the cross-file panel; a feedback export reads getFeedbackDocuments(). */
   getDocAnnotations: () => Map<string, CachedDocState>;
+  /** The root document and every other document, each exactly once — what a
+   *  feedback export reads (see FeedbackDocuments). */
+  getFeedbackDocuments: () => FeedbackDocuments;
   /**
    * Replace the stored annotations of a document that is NOT the active one —
    * a cached linked doc, or the stashed source document. This is what lets the
@@ -644,6 +670,36 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
     // identity of this callback is what tells memoized readers to recompute.
   }, [linkedDoc, annotations, globalAttachments, sourceFilePath, sourceConverted, getDocumentMarkdown, storeRevision]);
 
+  const getFeedbackDocuments = useCallback((): FeedbackDocuments => {
+    const documents = new Map(docCache.current);
+    if (linkedDoc) {
+      documents.set(linkedDoc.filepath, {
+        annotations: [...annotations],
+        globalAttachments: [...globalAttachments],
+        markdown: getDocumentMarkdown?.(linkedDoc.filepath, linkedDoc.markdown) ?? linkedDoc.markdown,
+        isConverted: linkedDoc.isConverted,
+      });
+    }
+    // The root goes under the session's own heading, never among the other
+    // documents (a backlink to it routes through back(), so this only guards
+    // a stale cache entry).
+    if (sourceFilePath) documents.delete(sourceFilePath);
+    const saved = linkedDoc ? savedPlanState.current : null;
+    return {
+      root: saved
+        ? {
+            annotations: [...saved.annotations],
+            globalAttachments: [...saved.globalAttachments],
+            markdown: saved.markdown,
+            isConverted: !!sourceConverted,
+            renderAs: saved.renderAs,
+          }
+        : null,
+      documents,
+    };
+    // Same dependencies, same reason, as getDocAnnotations above.
+  }, [linkedDoc, annotations, globalAttachments, sourceFilePath, sourceConverted, getDocumentMarkdown, storeRevision]);
+
   return {
     isActive: linkedDoc !== null,
     filepath: linkedDoc?.filepath ?? null,
@@ -654,6 +710,7 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
     back,
     dismissError,
     getDocAnnotations,
+    getFeedbackDocuments,
     updateStoredAnnotations,
     snapshotSession,
     restoreSession,

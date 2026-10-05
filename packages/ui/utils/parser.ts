@@ -1291,10 +1291,28 @@ export interface LinkedDocAnnotationEntry {
   isConverted?: boolean;
 }
 
+/** Section heading for exportLinkedDocAnnotations. The default describes
+ *  documents a plan links to; a folder session's documents are not that. */
+export interface LinkedDocExportHeading {
+  title: string;
+  intro: string;
+}
+
+export const LINKED_DOC_EXPORT_HEADING: LinkedDocExportHeading = {
+  title: 'Linked Document Feedback',
+  intro: 'The following feedback is on documents referenced in the plan.',
+};
+
+export const FOLDER_DOC_EXPORT_HEADING: LinkedDocExportHeading = {
+  title: 'Folder Document Feedback',
+  intro: 'The following feedback is on files in the reviewed folder, grouped by file.',
+};
+
 export const exportLinkedDocAnnotations = (
-  docAnnotations: Map<string, LinkedDocAnnotationEntry>
+  docAnnotations: Map<string, LinkedDocAnnotationEntry>,
+  heading: LinkedDocExportHeading = LINKED_DOC_EXPORT_HEADING,
 ): string => {
-  let output = `\n# Linked Document Feedback\n\nThe following feedback is on documents referenced in the plan.\n\n`;
+  let output = `\n# ${heading.title}\n\n${heading.intro}\n\n`;
 
   // One injection per export, across all linked documents.
   const injectedSkills = new Set<string>();

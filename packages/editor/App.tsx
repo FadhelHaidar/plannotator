@@ -14,7 +14,7 @@ import '@plannotator/ui/utils/identity-tater';
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { toast, Toaster } from 'sonner';
 import { type Origin, getAgentName } from '@plannotator/shared/agents';
-import { diagramRenderKindForPath, isDiagramRenderKind, shouldStripFrontmatter } from '@plannotator/shared/annotatable';
+import { isDiagramRenderKind, shouldStripFrontmatter } from '@plannotator/shared/annotatable';
 import { setExtraMarkdownExtensions } from '@plannotator/ui/utils/markdownExtensions';
 import { documentRendersHtml, htmlAssetRouteFromDocument, resolveHtmlLinkIntent } from '@plannotator/ui/utils/htmlLinkNavigation';
 import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
@@ -269,6 +269,7 @@ import {
   buildAnnotateApprovalBody,
   buildCompleteAnnotateFeedback,
 } from './annotateSubmission';
+import { blocksForDocument, mergeExternalAnnotations, resolveFeedbackSections } from './feedbackDocuments';
 import { buildDecisionSpec, type DecisionActionId, type DecisionMenuItem } from '@plannotator/ui/utils/decisionSpec';
 import { DecisionNoteDialog, type DecisionHandler } from '@plannotator/ui/components/DecisionControl';
 import {
@@ -429,19 +430,6 @@ function annotationOwnsHighlight(annotation: Annotation): boolean {
     && !annotation.id.startsWith('ann-checkbox-')
     && !isQuestionAnswerRow(annotation);
 }
-
-/**
- * Blocks for a document identified by path: a diagram source (.mmd/.dot) is
- * ONE diagram block over its raw text, everything else is the markdown parse
- * with that path's frontmatter rule. Used for the cached linked/folder docs
- * the cross-file export renders.
- */
-const blocksForDocument = (filepath: string, text: string): Block[] => {
-  const kind = diagramRenderKindForPath(filepath);
-  return kind !== null
-    ? diagramDocumentBlocks(text, kind)
-    : parseMarkdownToBlocks(text, { frontmatter: shouldStripFrontmatter(filepath) });
-};
 
 /** Hint shown following the cursor while hovering a sidebar/panel resize handle. */
 const RESIZE_HANDLE_TOOLTIP = 'Click to close · Drag to resize';
@@ -2182,20 +2170,10 @@ const App: React.FC = () => {
   // live SSE versions. Prefer the SSE version when both exist (same source,
   // type, and originalText). This avoids the timing issues of an effect-based
   // cleanup — draft-restored externals persist until SSE actually re-delivers them.
-  const allAnnotations = useMemo(() => {
-    if (externalAnnotations.length === 0) return annotations;
-
-    const local = annotations.filter(a => {
-      if (!a.source) return true;
-      return !externalAnnotations.some(ext =>
-        ext.source === a.source &&
-        ext.type === a.type &&
-        ext.originalText === a.originalText
-      );
-    });
-
-    return [...local, ...externalAnnotations];
-  }, [annotations, externalAnnotations]);
+  const allAnnotations = useMemo(
+    () => mergeExternalAnnotations(annotations, externalAnnotations),
+    [annotations, externalAnnotations],
+  );
 
   // Plan diff state — memoize filtered annotation lists to avoid new references per render
   const diffAnnotations = useMemo(() => allAnnotations.filter(a => !!a.diffContext), [allAnnotations]);
@@ -2276,12 +2254,35 @@ const App: React.FC = () => {
     activeMessageAnnotationCounts,
   ]);
 
+  // The ONE split every feedback export reads: the session's root document
+  // under its own heading and every other document once under its path. The
+  // live state is the ACTIVE document, which getDocAnnotations() also carries,
+  // so exporting both used to print the open document twice (folder sessions
+  // always; any session submitted while a linked document was open).
+  const getFeedbackSections = useCallback(() => resolveFeedbackSections({
+    feedbackDocuments: linkedDocHook.getFeedbackDocuments(),
+    live: { annotations: allAnnotations, globalAttachments, blocks },
+    externalAnnotations,
+    sourceFilePath,
+    sourceConverted,
+    annotateSource,
+  }), [
+    linkedDocHook.getFeedbackDocuments,
+    allAnnotations,
+    globalAttachments,
+    blocks,
+    externalAnnotations,
+    sourceFilePath,
+    sourceConverted,
+    annotateSource,
+  ]);
+
   const annotationsOutput = useMemo(() => {
-    const docAnnotations = linkedDocHook.getDocAnnotations();
-    const hasDocAnnotations = Array.from(docAnnotations.values()).some(
+    const sections = getFeedbackSections();
+    const hasDocAnnotations = Array.from(sections.linkedDocuments.values()).some(
       (d) => d.annotations.length > 0 || d.globalAttachments.length > 0
     );
-    const hasPlanAnnotations = allAnnotations.length > 0 || globalAttachments.length > 0;
+    const hasPlanAnnotations = sections.annotations.length > 0 || sections.globalAttachments.length > 0;
     const hasEditorAnnotations = editorAnnotations.length > 0;
     const hasCodeAnnotations = codeAnnotations.length > 0;
 
@@ -2289,32 +2290,19 @@ const App: React.FC = () => {
       return 'User reviewed the document and has no feedback.';
     }
 
-    const activeConverted = linkedDocHook.isActive
-      ? (docAnnotations.get(linkedDocHook.filepath ?? '')?.isConverted ?? false)
-      : sourceConverted;
-
     let output = hasPlanAnnotations
       ? exportAnnotations(
-          blocks,
-          allAnnotations,
-          globalAttachments,
+          sections.blocks,
+          sections.annotations,
+          sections.globalAttachments,
           annotateSource === 'message' ? 'Message Feedback' : annotateSource === 'folder' ? 'Folder Feedback' : annotateSource === 'file' ? 'File Feedback' : 'Plan Feedback',
           annotateSource ?? 'plan',
-          { sourceConverted: activeConverted },
+          { sourceConverted: sections.sourceConverted },
         )
       : '';
 
     if (hasDocAnnotations) {
-      const enriched: Map<string, LinkedDocAnnotationEntry> = new Map(docAnnotations);
-      for (const [filepath, entry] of enriched) {
-        if (entry.markdown) {
-          enriched.set(filepath, {
-            ...entry,
-            blocks: blocksForDocument(filepath, entry.markdown),
-          });
-        }
-      }
-      output += exportLinkedDocAnnotations(enriched);
+      output += exportLinkedDocAnnotations(sections.linkedDocuments, sections.linkedDocumentsHeading);
     }
 
     if (hasEditorAnnotations) {
@@ -2328,7 +2316,7 @@ const App: React.FC = () => {
     return output;
     // skillContentGeneration re-runs this once lazily fetched human-only skill
     // contents land in the export registry (module state the exporters read).
-  }, [blocks, allAnnotations, globalAttachments, linkedDocHook.getDocAnnotations, editorAnnotations, codeAnnotations, sourceConverted, annotateSource, linkedDocHook.isActive, linkedDocHook.filepath, skillContentGeneration]);
+  }, [getFeedbackSections, editorAnnotations, codeAnnotations, annotateSource, skillContentGeneration]);
 
   // Code-file comments are intentionally not serialized into share URLs in v1.
   // Hide share entry points once they exist so we do not silently drop feedback.
@@ -3242,15 +3230,13 @@ const App: React.FC = () => {
     },
   ): string => {
     const discard = options?.discardAnnotations === true;
-    const linkedDocuments = linkedDocHook.getDocAnnotations();
-    const activeConverted = linkedDocHook.isActive
-      ? (linkedDocuments.get(linkedDocHook.filepath ?? '')?.isConverted ?? false)
-      : sourceConverted;
+    const sections = getFeedbackSections();
     return buildCompleteAnnotateFeedback({
-      blocks,
-      annotations: discard ? [] : allAnnotations,
-      globalAttachments: discard ? [] : globalAttachments,
-      linkedDocuments: discard ? new Map() : linkedDocuments,
+      blocks: sections.blocks,
+      annotations: discard ? [] : sections.annotations,
+      globalAttachments: discard ? [] : sections.globalAttachments,
+      linkedDocuments: discard ? new Map() : sections.linkedDocuments,
+      linkedDocumentsHeading: sections.linkedDocumentsHeading,
       editorAnnotations: discard ? [] : editorAnnotations,
       codeAnnotations: discard ? [] : codeAnnotations,
       title: annotateSource === 'message'
@@ -3261,7 +3247,7 @@ const App: React.FC = () => {
             ? 'File Feedback'
             : 'Plan Feedback',
       subject: annotateSource ?? 'plan',
-      sourceConverted: activeConverted,
+      sourceConverted: sections.sourceConverted,
       directEditsSection: buildEditsSection(),
       savedFileChangesSection: buildSavedChangesSection(checkedSavedFileChanges),
       ...(messageMultiSelectMode && !discard
@@ -3270,21 +3256,15 @@ const App: React.FC = () => {
       ...(options?.approvalFraming ? { approvalFraming: true } : {}),
     });
   }, [
-    allAnnotations,
     annotateSource,
-    blocks,
     buildEditsSection,
     buildMessageAnnotationEntries,
     buildSavedChangesSection,
     codeAnnotations,
     editorAnnotations,
-    globalAttachments,
-    linkedDocHook.filepath,
-    linkedDocHook.getDocAnnotations,
-    linkedDocHook.isActive,
+    getFeedbackSections,
     messageMultiSelectMode,
     savedFileChanges,
-    sourceConverted,
   ]);
 
   const withDraftGeneration = useCallback((path: string): string => {

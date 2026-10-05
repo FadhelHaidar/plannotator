@@ -237,6 +237,37 @@ describe.if(hasDom)('cross-file annotation mutations', () => {
     expect(api!.linkedDoc.getDocAnnotations().get(ROOT_PATH)?.annotations).toEqual([]);
   });
 
+  // getDocAnnotations() deliberately carries the OPEN document too (panel,
+  // counts); an export that read it beside the host's live state printed the
+  // open document twice. getFeedbackDocuments() is the export's split: each
+  // document once, the root apart from the others.
+  test('the feedback split holds the root once and every other document once', async () => {
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    await act(async () => {
+      root = createRoot(host!);
+      root.render(<Harness />);
+    });
+    // Root active: its annotations are the host's live state, so no root entry.
+    let split = api!.linkedDoc.getFeedbackDocuments();
+    expect(split.root).toBeNull();
+    expect([...split.documents.keys()]).toEqual([]);
+
+    await act(async () => { api!.linkedDoc.openLoaded({ filepath: OTHER_PATH, markdown: '# b' }); });
+    await act(async () => { api!.setAnnotations([row('b1'), row('b2')]); });
+
+    split = api!.linkedDoc.getFeedbackDocuments();
+    expect(split.root?.annotations.map((a) => a.id)).toEqual(['a1']);
+    expect([...split.documents.keys()]).toEqual([OTHER_PATH]);
+    expect(split.documents.get(OTHER_PATH)?.annotations.map((a) => a.id)).toEqual(['b1', 'b2']);
+
+    // Back on the root: the visited document is stored, the root is live again.
+    await act(async () => { api!.linkedDoc.back(); });
+    split = api!.linkedDoc.getFeedbackDocuments();
+    expect(split.root).toBeNull();
+    expect([...split.documents.keys()]).toEqual([OTHER_PATH]);
+  });
+
   test('the active document is never written through the stored-document path', async () => {
     await mountWithTwoAnnotatedDocuments();
     // App routes open-document cards to its own handlers; the store refuses the
