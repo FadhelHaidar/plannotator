@@ -76,6 +76,14 @@ describe('plannotator tool v2: several targets', () => {
     expect(args({ action: 'annotate', target: ['b.md', 'a.md', 'b.md'], gate: true })).toEqual(['b.md', 'a.md', '--gate'])
   })
 
+  // The failure: a bare list entry ("README") reaches the CLI as a word, the
+  // CLI reads the list as prose, and a missing file silently narrows the
+  // review to the files that exist.
+  test('a bare list entry is passed as a path, so a missing one fails instead of being read as prose', () => {
+    expect(args({ action: 'annotate', target: ['README', 'docs/a.md'] })).toEqual(['./README', 'docs/a.md'])
+    expect(args({ action: 'annotate', target: 'README' })).toEqual(['README'])
+  })
+
   test('a one-file list is the plain single-target call', () => {
     const parsed = parsePlannotatorToolInput({ action: 'annotate', target: ['notes.md', ' notes.md '] })
     expect(parsed.ok && parsed.input.target).toBe('notes.md')

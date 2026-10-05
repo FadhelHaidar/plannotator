@@ -271,6 +271,18 @@ describe("handleAnnotateCommand", () => {
     expect(prompt).toContain(`Files: ${mock_}, ${spec}`);
   });
 
+  test("a list of file paths with a missing one opens nothing and names it", async () => {
+    const projectRoot = makeTempDir();
+    writeFileSync(path.join(projectRoot, "spec.md"), "# Spec\n");
+    const deps: any = makeDeps();
+    deps.directory = projectRoot;
+    deps.startAnnotateServer = mock(async () => { throw new Error("must not start"); });
+    await handleAnnotateCommand({ properties: { arguments: "spec.md typo.md", sessionID: "s" } }, deps);
+    expect(deps.startAnnotateServer).not.toHaveBeenCalled();
+    const logged = deps.client.app.log.mock.calls.map(([entry]: [{ message: string }]) => entry.message).join("\n");
+    expect(logged).toContain("File not found: typo.md");
+  });
+
   test("injects approved feedback as non-blocking notes with file context", async () => {
     const projectRoot = makeTempDir();
     const filePath = path.join(projectRoot, "plan.md");

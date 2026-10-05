@@ -13,6 +13,7 @@ import { runPullSessionBridgeClient } from "@plannotator/ai/session-bridge-pull-
 import { parseAnnotateArgs, type ParsedAnnotateArgs } from "@plannotator/shared/annotate-args";
 import {
   annotateInputNamesExistingTarget,
+  buildMissingAnnotateFilesMessage,
   probeAnnotateBundlePath,
   probeAnnotateToken,
   selectAnnotateTokenTarget,
@@ -574,13 +575,16 @@ async function runPlannotatorCli(options: RunCliOptions): Promise<RunCliResult> 
  * absolute paths in the typed order; null otherwise. Each becomes its own CLI
  * argument, which is what makes the CLI open them as one review.
  */
-export function annotateBundleCliPaths(rawFilePath: string, cwd: string): string[] | null {
+export function annotateBundleCliPaths(rawFilePath: string, cwd: string): string[] | { missing: string[] } | null {
   if (annotateInputNamesExistingTarget(rawFilePath, cwd)) return null;
   const selection = selectAnnotateTokenTarget(
     rawFilePath,
     (token) => probeAnnotateToken(token, cwd, { bareDirectories: false }),
     { bundlePath: (token) => probeAnnotateBundlePath(token, cwd) },
   );
+  // A list of file paths with one that does not exist is refused before the
+  // CLI runs, so it never opens fewer files than were named.
+  if (selection.kind === "missing") return { missing: selection.missing };
   return selection.kind === "bundle" ? selection.files.map((file) => file.value) : null;
 }
 
@@ -881,7 +885,12 @@ export async function handleCliCommand(input: {
       }
 
       // Several existing file paths open as one review of all of them.
-      const bundlePaths = annotateBundleCliPaths(parsed.rawFilePath, cwd);
+      const bundleSelection = annotateBundleCliPaths(parsed.rawFilePath, cwd);
+      if (bundleSelection && !Array.isArray(bundleSelection)) {
+        log(input.client, "error", buildMissingAnnotateFilesMessage(bundleSelection.missing));
+        return;
+      }
+      const bundlePaths = bundleSelection;
       const result = await runPlannotatorCli({
         client: input.client,
         args: buildAnnotateCliArgs(parsed, bundlePaths),

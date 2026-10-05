@@ -171,10 +171,31 @@ describe("annotate with several file paths", () => {
     expect(result.stderr).toContain(ANNOTATE_BUNDLE_HINT);
   });
 
-  test("a strict gate refuses extra words instead of ignoring them", () => {
+  test("a strict gate refuses extra words instead of ignoring them, without resolving the first", () => {
     const result = runSync(["spec.md", "please", "--gate", "--json", "--result-file", "out.json"]);
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain("A strict annotate gate takes one target");
+    // Refused by probe alone: the first argument is not opened or reported.
+    expect(result.stderr).not.toContain("Resolved:");
     expect(result.stdout).toBe("");
   });
+
+  // The failure: `annotate a.md typo.md` opened a.md alone (exit 0) while the
+  // agent was told both files were open.
+  test("a list of file paths with a missing one opens nothing and names it", () => {
+    const result = runSync(["spec.md", "typo.md"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("File not found: typo.md");
+    expect(runSync(["spec.md", "typo.md", "--gate", "--json", "--require-approval"]).exitCode).toBe(2);
+  });
+
+  test("the same file named twice opens that one file, as on the other hosts", async () => {
+    const { proc, base } = start(["spec.md", "./spec.md"], "bundle-3");
+    const url = await base();
+    const plan = await (await fetch(`${url}/api/plan`)).json();
+    expect(plan.mode).toBe("annotate");
+    expect(plan.filePath).toBe(join(root, "spec.md"));
+    await fetch(`${url}/api/exit`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    await proc.exited;
+  }, 30_000);
 });

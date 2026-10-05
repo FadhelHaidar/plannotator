@@ -41,7 +41,8 @@ import {
   resolveUserPath,
 } from "./resolve-file";
 import { diagramRenderKindForPath } from "@plannotator/core/annotatable";
-import type { AnnotateBundleFile } from "@plannotator/core/annotate-bundle";
+import type { AnnotateBundleFile } from "./annotate-bundle";
+import { looksLikeFilePath } from "./plannotator-tool";
 
 export interface AnnotateTokenCandidate {
   /** The whitespace-delimited token the user typed. */
@@ -64,6 +65,14 @@ export type AnnotateTokenSelection =
    * `bundlePath` probe, i.e. when its host can open bundles.
    */
   | { kind: "bundle"; files: AnnotateTokenCandidate[] }
+  /**
+   * Several arguments that all READ as file paths (`looksLikeFilePath`), and
+   * some of them name nothing at all: an explicit list of files with a typo in
+   * it. Never narrowed to the files that do exist (that would review fewer
+   * files than were named); the host fails naming `missing`. Only returned
+   * with a `bundlePath` probe.
+   */
+  | { kind: "missing"; missing: string[] }
   | { kind: "multiple"; candidates: AnnotateTokenCandidate[] }
   | { kind: "none"; words: string[] }
   /**
@@ -268,6 +277,13 @@ export function selectAnnotateTokenTarget(
         ? { kind: "single", candidate: files[0] as AnnotateTokenCandidate }
         : { kind: "bundle", files };
     }
+    // Every word reads as a file path, yet some name nothing (not even by
+    // search): a list of files with a typo. Opening the rest would review
+    // fewer files than were named, so it fails naming the missing ones.
+    if (uniqueTokens.every((token) => looksLikeFilePath(stripAtPrefix(token)))) {
+      const missing = uniqueTokens.filter((token) => probe(token) === null);
+      if (missing.length > 0) return { kind: "missing", missing };
+    }
   }
 
   const seen = new Set<string>();
@@ -319,6 +335,17 @@ export function buildAmbiguousAnnotateArgsMessage(
 export const ANNOTATE_BUNDLE_HINT =
   "To review several files together, pass only their paths: plannotator annotate a.md b.html";
 
+/**
+ * The `missing` selection's error: an explicit list of files with one or more
+ * that do not exist. Nothing is opened.
+ */
+export function buildMissingAnnotateFilesMessage(missing: readonly string[]): string {
+  return [
+    `${missing.length === 1 ? "File" : "Files"} not found: ${missing.join(", ")}`,
+    "Every file of a review of several files must exist; nothing was opened. Fix the path and run the command again.",
+  ].join("\n");
+}
+
 export type AnnotateBundleResolution =
   | { ok: true; files: AnnotateBundleFile[] }
   | { ok: false; message: string };
@@ -352,11 +379,15 @@ export function resolveAnnotateBundleFiles(
     if (!isAnnotatableDocPath(path)) {
       const name = path.replace(/^.*[\\/]/, "");
       const dot = name.lastIndexOf(".");
-      const ext = dot > 0 ? name.slice(dot).toLowerCase() : "(no extension)";
+      // ".env" is all extension; "Makefile" has none.
+      const ext = dot >= 0 ? name.slice(dot).toLowerCase() : "(no extension)";
+      const refusedEnv = /^\.env(?:\.|$)/i.test(name) || /\.env$/i.test(name);
       return {
         ok: false,
         message:
-          `File type not supported: ${ext} (${path})\n` +
+          (refusedEnv
+            ? `File refused: ${path} (.env files are never annotated: they commonly hold secrets)\n`
+            : `File type not supported: ${ext} (${path})\n`) +
           `Every file in a review of several files must be one annotate opens. Supported types: ${getAnnotatableExtensionsHint()}`,
       };
     }

@@ -112,6 +112,7 @@ async function loadAnnotateCommandModules() {
 		annotateInputNamesExistingTarget: annotateTarget.annotateInputNamesExistingTarget,
 		buildAmbiguousAnnotateArgsMessage: annotateTarget.buildAmbiguousAnnotateArgsMessage,
 		buildUnresolvedAnnotateArgsMessage: annotateTarget.buildUnresolvedAnnotateArgsMessage,
+		buildMissingAnnotateFilesMessage: annotateTarget.buildMissingAnnotateFilesMessage,
 		probeAnnotateToken: annotateTarget.probeAnnotateToken,
 		probeAnnotateBundlePath: annotateTarget.probeAnnotateBundlePath,
 		resolveAnnotateBundleFiles: annotateTarget.resolveAnnotateBundleFiles,
@@ -896,6 +897,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				buildAmbiguousAnnotateArgsMessage,
 				buildUnresolvedAnnotateArgsMessage,
 				probeAnnotateToken,
+				buildMissingAnnotateFilesMessage,
 				probeAnnotateBundlePath,
 				resolveAnnotateBundleFiles,
 				annotateBundleRoot,
@@ -940,7 +942,11 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 					(token: string) => probeAnnotateToken(token, ctx.cwd, { bareDirectories: false }),
 					{ bundlePath: (token: string) => probeAnnotateBundlePath(token, ctx.cwd) },
 				);
-				if (selection.kind === "bundle") {
+				if (selection.kind === "missing") {
+					// A list of files with a typo: never review fewer than named.
+					ctx.ui.notify(buildMissingAnnotateFilesMessage(selection.missing), "error");
+					return;
+				} else if (selection.kind === "bundle") {
 					const checked = resolveAnnotateBundleFiles(
 						selection.files.map((file) => file.value),
 						{ convertHtml: renderMarkdownFlag },

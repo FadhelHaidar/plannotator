@@ -311,6 +311,18 @@ describe("bundle rule", () => {
     expect(select(["plan.md", "nested.md"]).kind).toBe("multiple");
   });
 
+  // The failure: `annotate a.md typo.md` opened only a.md (the tolerant
+  // fast path), and the host said "Opened 2 files".
+  test("a list of file paths with a missing one fails naming it, never narrows", () => {
+    expect(select(["notes.md", "typo.md"])).toEqual({ kind: "missing", missing: ["typo.md"] });
+    expect(select(["nope/a.md", "plan.md", "~/nope-b.md"])).toEqual({ kind: "missing", missing: ["nope/a.md", "~/nope-b.md"] });
+    // Prose around a path is still the fast path, a folder still the
+    // ambiguity error, and a searched name is not "missing".
+    expect(select("look at notes.md please").kind).toBe("single");
+    expect(select(["notes.md", "docs/"]).kind).toBe("multiple");
+    expect(select(["plan.md", "nested.md"]).kind).toBe("multiple");
+  });
+
   test("an existing unsupported file still makes a bundle, so it fails naming itself", () => {
     const selection = select(["plan.md", "script.py"]);
     expect(selection.kind).toBe("bundle");
@@ -360,6 +372,17 @@ describe("resolveAnnotateBundleFiles", () => {
     writeFileSync(mmd, "graph TD; A-->B");
     const resolved = resolveAnnotateBundleFiles([mmd, join(root, "plan.md")]);
     expect(resolved.ok && resolved.files[0]?.renderAs).toBe("mermaid");
+  });
+
+  test("a .env file is named as refused, not as an unknown type", () => {
+    const env = join(root, ".env");
+    writeFileSync(env, "SECRET=1");
+    const resolved = resolveAnnotateBundleFiles([join(root, "plan.md"), env]);
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) {
+      expect(resolved.message).toContain(`File refused: ${env}`);
+      expect(resolved.message).not.toContain("no extension");
+    }
   });
 
   test("a file over the annotate cap fails naming it", () => {

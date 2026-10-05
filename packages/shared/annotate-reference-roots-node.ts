@@ -37,7 +37,16 @@ export function getAnnotateReferenceRootPaths(options: AnnotateReferenceRootOpti
 
 	addRoot(process.cwd());
 	if (options.mode === "annotate-bundle" && options.bundlePaths) {
-		for (const path of options.bundlePaths) addRoot(dirname(path));
+		for (const path of options.bundlePaths) {
+			addRoot(dirname(path));
+			// A bundle file that is a symlink is served from where it really
+			// lives, so that directory is a root for exactly that file.
+			try {
+				addRoot(dirname(realpathSync(path)));
+			} catch {
+				/* Missing now: /api/doc reports it when the file is opened. */
+			}
+		}
 		return roots;
 	}
 	if (/^https?:\/\//i.test(options.filePath)) {

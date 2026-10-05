@@ -238,6 +238,27 @@ describe('register', () => {
     expect(launch?.slice(5)).toEqual(['plannotator', 'annotate', '/work/INDEX.html', '--gate'])
   })
 
+  test('a list of files is one review: one launch, the paths in order, named as a bundle', async ($: any, on: any) => {
+    const w = world(on)
+    const ran: string[] = []
+    on('tool.call', ($: any, e: any) => {
+      ran.push(e.command)
+      return { result: { stdout: 'the command ran', stderr: '', interrupted: false } }
+    })
+    await $.session.start(SESSION)
+
+    const answer = await $.tool.call({ tool: TOOL, action: 'annotate', target: ['spec.md', 'ui/mock.html'] })
+    expect(answer.result).toContain('2 files: spec.md, mock.html')
+    const launches = w.runs.filter((argv) => argv[3] === 'plannotator-launch')
+    expect(launches).toHaveLength(1)
+    expect(launches[0]?.slice(5)).toEqual(['plannotator', 'annotate', 'spec.md', 'ui/mock.html'])
+
+    // The same through Bash: several file paths are taken over as the list.
+    const bash = await $.tool.call({ tool: 'Bash', command: 'plannotator annotate a.md b.md --json' })
+    expect(ran).toEqual([])
+    expect(bash.result.stdout).toContain('2 files: a.md, b.md')
+  })
+
   test('Bash commands the tool cannot represent run as written', async ($: any, on: any) => {
     const w = world(on)
     const ran: string[] = []

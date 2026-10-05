@@ -106,13 +106,15 @@ import {
 import {
   ANNOTATE_BUNDLE_HINT,
   buildAmbiguousAnnotateArgsMessage,
+  buildMissingAnnotateFilesMessage,
   buildUnresolvedAnnotateArgsMessage,
   probeAnnotateBundlePath,
   probeAnnotateToken,
   resolveAnnotateBundleFiles,
   selectAnnotateTokenTarget,
 } from "@plannotator/shared/annotate-target";
-import { annotateBundleRoot, type AnnotateBundleFile } from "@plannotator/shared/annotate-bundle";
+import { annotateBundleRoot } from "@plannotator/shared/annotate-bundle";
+import { stripAtPrefix } from "@plannotator/shared/at-reference";
 import { plannotatorBundleSubject } from "@plannotator/shared/plannotator-tool";
 import { createWorktreePool, type WorktreePool, type PoolEntry } from "@plannotator/shared/worktree-pool";
 import { parsePRUrl, checkPRAuth, fetchPR, getCliName, getCliInstallUrl, getMRLabel, getMRNumberLabel, getDisplayRepo, getPlatformLabel, getPRNumber, getPRHeadFetchSpec, getPRCloneCommand } from "@plannotator/server/pr";
@@ -1372,112 +1374,94 @@ if (args[0] === "sessions") {
     }
   }
 
-  // Strict invocations keep the exact legacy contract: args[1] is the target,
-  // a typo'd path stays a startup failure (exit 2), and stdout carries only
-  // the decision record. The tolerant token fallback below never runs. Same
-  // predicate as the exit-code path, so the two cannot drift.
+  // Strict invocations (--require-approval / --result-file) take one target,
+  // or only existing file paths (a review of several files); stdout carries
+  // only the decision record. Same predicate as the exit-code path, so the
+  // two cannot drift.
   const strictAnnotate = isStrictAnnotateInvocation({
     requireApproval: requireApprovalFlag,
     resultFile,
   });
 
-  // Tolerant argument handling (#1182): slash-command hosts forward raw user
-  // words verbatim, so a non-strict invocation with several tokens probes
-  // each one instead of blindly taking args[1]. Exactly one token naming an
-  // existing target proceeds with it; several is an error naming every
-  // candidate (never guess); two or more unresolvable words become a handoff
-  // for the agent reading this output. Single-token invocations run the
-  // unchanged pipeline and keep every legacy error (a lone typo'd path stays
-  // "File not found" with exit 1), and unrecognized dash-prefixed tokens
-  // disable tolerance entirely so a typo'd flag errors the way it always
-  // did instead of being silently skipped.
+  // Several arguments (#1182 tolerance, 0.29 bundles): slash-command hosts
+  // forward raw user words verbatim, so with several tokens each one is
+  // probed instead of blindly taking args[1]. The shared selection decides:
+  // several existing file paths are ONE review in the typed order (a bundle);
+  // a list of file paths with a missing one fails naming it; exactly one
+  // token naming an existing target proceeds with it; several is an error
+  // naming every candidate (never guess); two or more unresolvable words
+  // become a handoff for the agent reading this output. Single-token
+  // invocations run the unchanged pipeline and keep every legacy error (a
+  // lone typo'd path stays "File not found" with exit 1), and unrecognized
+  // dash-prefixed tokens disable tolerance entirely so a typo'd flag errors
+  // the way it always did instead of being silently skipped.
   const targetTokens = args.slice(1);
   // Bare directory names only count as targets when they are the sole
   // argument; in multi-token mode a stray word matching a directory (or `.`)
   // must not hijack the fast path.
   const annotateProbe = (token: string) =>
     probeAnnotateToken(token, projectRoot, { bareDirectories: false });
+  const resolveOne = (raw: string) =>
+    resolveAnnotateTarget({
+      rawFilePath: raw,
+      projectRoot,
+      noJina: cliNoJina,
+      renderMarkdown: renderMarkdownFlag,
+      forceApp: appFlag,
+      forceStatic: staticFlag,
+    });
 
-  // Several files reviewed as one (0.29 bundles): when there are several
-  // arguments and EVERY one is an existing file named by its path, they open
-  // as one review in the typed order. Checked first, for strict gates too
-  // (which take nothing else with several arguments). Anything less keeps the
-  // tiers below unchanged.
-  let bundleResolution: Awaited<ReturnType<typeof resolveAnnotateTarget>> | null = null;
+  let resolution: Awaited<ReturnType<typeof resolveAnnotateTarget>> | null = null;
   if (targetTokens.length > 1) {
     const bundlePath = (token: string) => probeAnnotateBundlePath(token, projectRoot);
-    const bundleSelection = selectAnnotateTokenTarget(targetTokens, annotateProbe, { bundlePath });
-    if (bundleSelection.kind === "bundle") {
+    const selection = selectAnnotateTokenTarget(targetTokens, annotateProbe, { bundlePath });
+    if (selection.kind === "bundle") {
       // --app needs a URL, exactly as for a single file.
       if (appFlag) exitAnnotateStartupFailure(LIVE_APP_REQUIRES_URL_MESSAGE);
       const checked = resolveAnnotateBundleFiles(
-        bundleSelection.files.map((file) => file.value),
+        selection.files.map((file) => file.value),
         { convertHtml: renderMarkdownFlag },
       );
       if (!checked.ok) exitAnnotateStartupFailure(checked.message);
-      const bundleRoot = annotateBundleRoot(checked.files.map((file) => file.path));
       console.error(`Files (${checked.files.length}): ${checked.files.map((file) => file.path).join(", ")}`);
-      bundleResolution = {
+      resolution = {
         ok: true,
         markdown: "",
-        absolutePath: bundleRoot,
+        absolutePath: annotateBundleRoot(checked.files.map((file) => file.path)),
         annotateMode: "annotate-bundle",
         bundleFiles: checked.files,
         sourceConverted: false,
         isUrl: false,
       };
-    } else if (strictAnnotate && !targetTokens.every((token) => bundlePath(token) !== null)) {
-      // A strict gate's arguments are one target or only file paths. The
-      // first argument's own error wins (a typo'd path keeps its message);
-      // otherwise the extra words are refused instead of ignored.
-      const first = await resolveAnnotateTarget({
-        rawFilePath,
-        projectRoot,
-        noJina: cliNoJina,
-        renderMarkdown: renderMarkdownFlag,
-        forceApp: appFlag,
-        forceStatic: staticFlag,
-      });
-      if (!first.ok) exitAnnotateStartupFailure(first.message);
-      exitAnnotateStartupFailure(
-        [
-          `A strict annotate gate takes one target, or only existing file paths to review several files together. These arguments are neither: ${targetTokens.join(" ")}`,
-          ANNOTATE_BUNDLE_HINT,
-        ].join("\n"),
-      );
-    }
-  }
-
-  const tolerantMultiToken = !strictAnnotate && targetTokens.length > 1 && bundleResolution === null;
-
-  let resolution: Awaited<ReturnType<typeof resolveAnnotateTarget>> | null =
-    bundleResolution ?? (tolerantMultiToken
-      ? null
-      : await resolveAnnotateTarget({
-          rawFilePath,
-          projectRoot,
-          noJina: cliNoJina,
-          renderMarkdown: renderMarkdownFlag,
-          forceApp: appFlag,
-          forceStatic: staticFlag,
-        }));
-
-  if (tolerantMultiToken) {
-    const selection = selectAnnotateTokenTarget(targetTokens, annotateProbe);
-    if (selection.kind === "single") {
-      resolution = await resolveAnnotateTarget({
-        rawFilePath: selection.candidate.value,
-        projectRoot,
-        noJina: cliNoJina,
-        renderMarkdown: renderMarkdownFlag,
-        forceApp: appFlag,
-        forceStatic: staticFlag,
-      });
-    } else if (selection.kind === "multiple") {
+    } else if (selection.kind === "missing") {
+      // A list of files with a typo in it: never review fewer files than
+      // were named.
+      exitAnnotateStartupFailure(buildMissingAnnotateFilesMessage(selection.missing));
+    } else if (strictAnnotate) {
+      if (selection.kind === "single" && targetTokens.every((token) => bundlePath(token) !== null)) {
+        // The same file named twice (`a.md ./a.md`): that one file.
+        resolution = await resolveOne(selection.candidate.value);
+      } else {
+        // Anything else is refused (extra words used to be ignored). Decided
+        // by probe and stat only: nothing is fetched, probed live, or
+        // reported as resolved before the refusal.
+        if (annotateProbe(rawFilePath) === null) {
+          exitAnnotateStartupFailure(`File not found: ${stripAtPrefix(rawFilePath)}`);
+        }
+        exitAnnotateStartupFailure(
+          [
+            `A strict annotate gate takes one target, or only existing file paths to review several files together. These arguments are neither: ${targetTokens.join(" ")}`,
+            ANNOTATE_BUNDLE_HINT,
+          ].join("\n"),
+        );
+      }
+    } else if (!strictAnnotate && selection.kind === "single") {
+      resolution = await resolveOne(selection.candidate.value);
+    } else if (!strictAnnotate && selection.kind === "multiple") {
       // This CLI opens several file paths as one review; the hint says so
       // (and its presence is how a host tells this CLI from an older one).
       exitAnnotateStartupFailure(buildAmbiguousAnnotateArgsMessage(selection.candidates, { bundleHint: true }));
-    } else if (selection.kind === "none" && selection.words.length > 1) {
+    } else if (!strictAnnotate && selection.kind === "none" && selection.words.length > 1) {
       // Content flags only: transport flags (--gate/--json/--hook) describe
       // this invocation's plumbing, and suggesting them would tell an agent
       // to start a blocking interactive gate from a plain re-run.

@@ -31,6 +31,7 @@ import { parseAnnotateArgs } from "@plannotator/shared/annotate-args";
 import {
   annotateInputNamesExistingTarget,
   buildAmbiguousAnnotateArgsMessage,
+  buildMissingAnnotateFilesMessage,
   buildUnresolvedAnnotateArgsMessage,
   probeAnnotateBundlePath,
   probeAnnotateToken,
@@ -382,7 +383,11 @@ export async function handleAnnotateCommand(
       (token) => probeAnnotateToken(token, tolerantRoot, { bareDirectories: false }),
       { bundlePath: (token) => probeAnnotateBundlePath(token, tolerantRoot) },
     );
-    if (selection.kind === "bundle") {
+    if (selection.kind === "missing") {
+      // A list of files with a typo: never review fewer than were named.
+      client.app.log({ level: "error", message: buildMissingAnnotateFilesMessage(selection.missing) });
+      return;
+    } else if (selection.kind === "bundle") {
       const checked = resolveAnnotateBundleFiles(
         selection.files.map((file) => file.value),
         { convertHtml: renderMarkdownFlag },

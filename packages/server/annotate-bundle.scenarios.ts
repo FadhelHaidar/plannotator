@@ -9,10 +9,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AnnotateBundleFile } from "../core/annotate-bundle.ts";
+import type { AnnotateBundleFile } from "../shared/annotate-bundle.ts";
 
 export interface BundleScenarioServer {
   url: string;
@@ -162,6 +162,25 @@ export function defineAnnotateBundleScenarios(runtime: string, start: StartBundl
       const status = await fetch(`${server.url}/api/host/status`, { headers: { Authorization: `Bearer ${HOST_TOKEN}` } });
       expect(status.status).toBe(200);
       expect((await status.json()).documents).toEqual([mock, spec, flow]);
+    });
+
+    // The failure: the CLI accepts a symlinked file, then /api/doc refuses
+    // it (403) because its real location is outside every root.
+    test("a bundle file that is a symlink to elsewhere is served", async () => {
+      mkdirSync(join(root, "outside"), { recursive: true });
+      writeFileSync(join(root, "outside/real.md"), "# Real\n\nLinked body.\n");
+      const link = join(root, "work/docs/link.md");
+      symlinkSync(join(root, "outside/real.md"), link);
+      const server = await start({
+        markdown: "",
+        filePath: join(root, "work"),
+        mode: "annotate-bundle",
+        bundleFiles: [{ path: link, renderAs: "markdown" }, { path: spec, renderAs: "markdown" }],
+      });
+      servers.push(server);
+      const served = await doc(server, link);
+      expect(served.status).toBe(200);
+      expect((await served.json()).markdown).toContain("Linked body.");
     });
 
     test("each text file's version history is saved when the review opens", async () => {

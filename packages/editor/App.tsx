@@ -2137,18 +2137,30 @@ const App: React.FC = () => {
   // way out anyone can count on. Named after the document it returns to, which
   // is always the session's root: useLinkedDoc keeps one root snapshot, not a
   // stack, so back() from any depth lands there.
+  // A review of several files has no root document: leaving a document the
+  // bundle files link to goes back to the bundle file it was opened from (the
+  // last one shown), never to the folder's empty "choose a file" state.
+  const [lastBundlePath, setLastBundlePath] = useState<string | null>(null);
+  useEffect(() => {
+    if (bundleFiles && bundleIndex >= 0) setLastBundlePath(bundleFiles[bundleIndex]!.path);
+  }, [bundleFiles, bundleIndex]);
+  const bundleBackPath = bundleFiles ? lastBundlePath ?? bundleFiles[0]?.path ?? null : null;
+
   const htmlLinkedDocBackTarget = useMemo(() => {
     if (!isHtmlSurface || !linkedDocHook.isActive) return null;
-    // A bundle file is not a detour: the switcher moves between the files,
-    // and there is no root document to go back to.
+    // A bundle file is not a detour: the switcher moves between the files.
     if (bundleIndex >= 0) return null;
-    const root = sourceFilePath;
+    const root = bundleBackPath ?? sourceFilePath;
     if (!root) return 'Back';
     return `Back to ${root.split('/').pop() || root}`;
-  }, [isHtmlSurface, linkedDocHook.isActive, sourceFilePath, bundleIndex]);
+  }, [isHtmlSurface, linkedDocHook.isActive, sourceFilePath, bundleIndex, bundleBackPath]);
 
   // Wrap linked doc back to also clear file browser active file
   const handleLinkedDocBack = React.useCallback(() => {
+    if (bundleBackPath) {
+      void openBundleFile(bundleBackPath, { revealSidebar: false });
+      return;
+    }
     linkedDocHook.back();
     if (isEditingMarkdown) {
       setIsEditingMarkdown(false);
@@ -2157,7 +2169,7 @@ const App: React.FC = () => {
     }
     fileBrowser.setActiveFile(null);
     archive.clearSelection();
-  }, [linkedDocHook, isEditingMarkdown, fileBrowser, archive]);
+  }, [linkedDocHook, isEditingMarkdown, fileBrowser, archive, bundleBackPath, openBundleFile]);
 
   // Derive annotation counts per file from linked doc cache (includes active doc's live state)
   const allAnnotationCounts = useMemo(() => {
@@ -2222,7 +2234,8 @@ const App: React.FC = () => {
   }, [allAnnotationCounts, isCompactFilesSurfaceOpen, isCompactTouchLayout, openSidebarTab, sidebar]);
 
   // Context-aware back label for linked doc navigation
-  const backLabel = annotateSource === 'folder' ? 'file list'
+  const backLabel = bundleBackPath ? annotateBundleBaseName(bundleBackPath)
+    : annotateSource === 'folder' ? 'file list'
     : annotateSource === 'file' ? 'file'
     : annotateSource === 'message' ? 'message'
     : 'plan';
@@ -6570,7 +6583,7 @@ const App: React.FC = () => {
           if (compact) closeCompactNavigator();
         }}
         linkedDocFilepath={linkedDocHook.filepath}
-        onLinkedDocBack={linkedDocHook.isActive
+        onLinkedDocBack={linkedDocHook.isActive && bundleIndex < 0
           ? () => {
               handleLinkedDocBack();
               if (compact) closeCompactNavigator();
@@ -7289,7 +7302,8 @@ const App: React.FC = () => {
                       linkedDocHook.isActive
                         ? {
                             filepath: linkedDocHook.filepath!,
-                            onBack: handleLinkedDocBack,
+                            // A bundle file has no Close: the switcher moves between the files.
+                            onBack: bundleIndex >= 0 ? undefined : handleLinkedDocBack,
                             label: annotateSource === 'folder'
                               ? undefined
                               : fileBrowser.dirs.find(d => d.path === fileBrowser.activeDirPath)?.isVault

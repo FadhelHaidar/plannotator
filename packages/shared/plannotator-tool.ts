@@ -292,14 +292,21 @@ export function plannotatorToolTargets(input: PlannotatorToolInput): string[] {
 
 /**
  * The arguments the matching slash command would carry (`/plannotator-annotate
- * <these>`), one argument per element, never re-split. `last` has none, and
- * neither do the actions that open nothing (list, close, reply).
+ * <these>`), one argument per element, never re-split. A list of annotate
+ * targets passes a bare word as `./word`, so the CLI reads every entry as a
+ * path. `last` has none, and neither do the actions that open nothing (list,
+ * close, reply).
  */
 export function plannotatorToolArgs(input: PlannotatorToolInput): string[] {
   switch (input.action) {
     case 'annotate':
       return [
-        ...plannotatorToolTargets(input),
+        // A list is files named by their paths, so every entry is passed as
+        // one: a bare word becomes `./word`. The CLI then refuses a list with a
+        // missing file instead of reading the bare word as prose.
+        ...(Array.isArray(input.target)
+          ? input.target.map((target) => (looksLikeFilePath(target) || /^https?:\/\//i.test(target) ? target : `./${target}`))
+          : plannotatorToolTargets(input)),
         ...(input.gate ? ['--gate'] : []),
         ...(input.options?.markdown ? ['--markdown'] : []),
       ]

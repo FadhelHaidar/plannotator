@@ -13,7 +13,6 @@
     "./diff-type": "./diff-type.ts",
     "./review-prompt": "./review-prompt.ts",
     "./annotatable": "./annotatable.ts",
-    "./annotate-bundle": "./annotate-bundle.ts",
     "./annotation-threads": "./annotation-threads.ts",
     "./agent-jobs": "./agent-jobs.ts",
     "./agent-terminal": "./agent-terminal.ts",

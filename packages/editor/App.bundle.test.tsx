@@ -183,6 +183,12 @@ describe.if(hasDom)("annotate bundle", () => {
     expect(items).toEqual(["docs/beta.md", "alpha.md"]);
     // The bundle's directory is never walked as a folder.
     expect(requests.some((r) => r.path === "/api/reference/files")).toBe(false);
+    // A bundle file has no in-document Close pill (it led to the folder's
+    // empty "choose a file" state); the switcher moves between the files.
+    const closePills = Array.from(document.querySelectorAll("button")).filter(
+      (button) => button.textContent?.trim() === "Close" && button.className.includes("text-[9px]"),
+    );
+    expect(closePills).toHaveLength(0);
   });
 
   test("Next opens the following file, and one Send Feedback has one section per file in bundle order", async () => {
