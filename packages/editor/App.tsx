@@ -274,6 +274,7 @@ import {
   buildCompleteAnnotateFeedback,
 } from './annotateSubmission';
 import { applyRestoredAnchors } from './restoredAnchors';
+import { annotationOwnsHighlight } from '@plannotator/ui/utils/annotationOwnsHighlight';
 import { blocksForDocument, collectSubmittedAnnotations, mergeExternalAnnotations, mergeExternalsIntoMessageEntries, resolveFeedbackSections } from './feedbackDocuments';
 import { buildDecisionSpec, type DecisionActionId, type DecisionMenuItem } from '@plannotator/ui/utils/decisionSpec';
 import { DecisionNoteDialog, type DecisionHandler } from '@plannotator/ui/components/DecisionControl';
@@ -429,12 +430,6 @@ type DocumentHistoryAction =
 
 const itemId = (item: { id: string }): string => item.id;
 
-function annotationOwnsHighlight(annotation: Annotation): boolean {
-  return !annotation.diffContext
-    && annotation.type !== AnnotationType.GLOBAL_COMMENT
-    && !annotation.id.startsWith('ann-checkbox-')
-    && !isQuestionAnswerRow(annotation);
-}
 
 /** Hint shown following the cursor while hovering a sidebar/panel resize handle. */
 const RESIZE_HANDLE_TOOLTIP = 'Click to close · Drag to resize';
@@ -3002,7 +2997,7 @@ const App: React.FC = () => {
       setAnnotations(restored);
       // Apply highlights to DOM after a tick
       setTimeout(() => {
-        viewerRef.current?.applySharedAnnotations(restored.filter(a => !a.diffContext));
+        viewerRef.current?.applySharedAnnotations(restored.filter(annotationOwnsHighlight));
       }, 100);
     }
     scheduleDraftSave();

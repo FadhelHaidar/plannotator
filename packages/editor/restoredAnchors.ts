@@ -1,5 +1,6 @@
 import type { Annotation } from '@plannotator/ui/types';
 import type { RestoredAnchor } from '@plannotator/ui/hooks/useAnnotationHighlighter';
+import { annotationOwnsHighlight } from '@plannotator/ui/utils/annotationOwnsHighlight';
 
 /**
  * Write a restore pass's `moved` anchors back onto the annotations, so the
@@ -13,7 +14,8 @@ import type { RestoredAnchor } from '@plannotator/ui/hooks/useAnnotationHighligh
  *   the document" value Edit Mode's remap uses — so it exports with no line
  *   label instead of a confident wrong one, and drops its stale positions.
  *
- * Checkbox overrides are keyed by their block and are never touched. Returns
+ * Only rows that own a text highlight are touched (`annotationOwnsHighlight`:
+ * not diff-view comments, checkbox toggles or question answers). Returns
  * the SAME array when nothing changes, so an unchanged document causes no
  * state update (and no draft save).
  */
@@ -26,7 +28,10 @@ export function applyRestoredAnchors(
   let changed = false;
   const next = annotations.map((ann) => {
     const entry = byId.get(ann.id);
-    if (!entry || ann.id.startsWith('ann-checkbox-')) return ann;
+    // Only text highlights move: a diff-view comment's `diff-block-N`, a
+    // checkbox toggle's block key and a question answer's anchor are not
+    // positions in the rendered text, whatever a restore pass reported.
+    if (!entry || !annotationOwnsHighlight(ann)) return ann;
     const dropPositions = entry.positionsStale && (ann.startMeta !== undefined || ann.endMeta !== undefined);
     const offsetsChange = entry.blockId !== '' && entry.startOffset !== undefined
       && entry.startOffset !== ann.startOffset;

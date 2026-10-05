@@ -19,6 +19,7 @@ import type { Annotation, ImageAttachment } from '@plannotator/ui/types';
 import type { FeedbackDocuments } from '@plannotator/ui/hooks/useLinkedDoc';
 import type { ViewerHandle } from '@plannotator/ui/components/Viewer';
 import { documentDraftAdditions, planDocumentDraftWrites, type DocumentDraftState } from '../documentDrafts';
+import { annotationOwnsHighlight } from '@plannotator/ui/utils/annotationOwnsHighlight';
 
 const DEBOUNCE_MS = 500;
 const HIGHLIGHT_REAPPLY_DELAY = 100;
@@ -96,7 +97,7 @@ export function useDocumentDrafts(options: UseDocumentDraftsOptions): UseDocumen
       }
       setTimeout(() => {
         current.viewerRef.current?.clearAllHighlights();
-        current.viewerRef.current?.applySharedAnnotations(merged.filter((a) => !a.diffContext));
+        current.viewerRef.current?.applySharedAnnotations(merged.filter(annotationOwnsHighlight));
       }, HIGHLIGHT_REAPPLY_DELAY);
       current.onRestored?.(path, count);
       return;

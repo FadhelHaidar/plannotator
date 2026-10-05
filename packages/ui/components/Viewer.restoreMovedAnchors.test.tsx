@@ -8,7 +8,13 @@
  * block no longer holds its text — with the block the text landed in, or ''
  * when the text is gone — and lists nothing for an unchanged document. A
  * comment that nothing could paint (no positions to try, quote not found) is
- * reported unanchored too.
+ * reported unanchored too. Rows that are not text highlights (diff-view
+ * comments, checkbox toggles) are skipped outright, so their blockId is
+ * never reported for rewriting.
+ *
+ * Block ids are built from the parsed blocks or at runtime, never written as
+ * literals: Tailwind scans this package, and a literal that parses as a
+ * utility leaks a rule into the guides.show viewer's CSS.
  *
  * Requires DOM (happy-dom) — runs under DOM_TESTS=1.
  */
@@ -72,10 +78,16 @@ afterEach(async () => {
 
 const ORIGINAL = ['# Notes', '', 'The retry loop is slow.', '', 'Cache keys collide.'].join('\n');
 
-/** Made on ORIGINAL: "The retry loop" in block-1, the first `<p>`. */
+const blockIdOf = (markdown: string, needle: string): string => {
+  const block = parseMarkdownToBlocks(markdown).find((b) => b.content.includes(needle));
+  if (!block) throw new Error(`no block holds "${needle}"`);
+  return block.id;
+};
+
+/** Made on ORIGINAL: "The retry loop" in its block, the first `<p>`. */
 const retry = (overrides: Partial<Annotation> = {}): Annotation => ({
   id: 'annRetry',
-  blockId: 'block-1',
+  blockId: blockIdOf(ORIGINAL, 'The retry loop'),
   startOffset: 0,
   endOffset: 14,
   type: AnnotationType.COMMENT,
@@ -87,12 +99,6 @@ const retry = (overrides: Partial<Annotation> = {}): Annotation => ({
   ...overrides,
 });
 
-const blockIdOf = (markdown: string, needle: string): string => {
-  const block = parseMarkdownToBlocks(markdown).find((b) => b.content.includes(needle));
-  if (!block) throw new Error(`no block holds "${needle}"`);
-  return block.id;
-};
-
 describe.skipIf(!hasDom)('restore report: moved anchors', () => {
   test('an unchanged document reports nothing moved', async () => {
     const reports = await restore(ORIGINAL, [retry()]);
@@ -103,7 +109,7 @@ describe.skipIf(!hasDom)('restore report: moved anchors', () => {
 
   test('a heading inserted above shifts the block id; the verified positions are kept', async () => {
     // The `<p>` census is unchanged, so the stored positions still paint the
-    // right text, but block-1 is now the inserted heading.
+    // right text, but the stored id now names the inserted heading.
     const edited = ['# Notes', '', '## Inserted', '', 'The retry loop is slow.', '', 'Cache keys collide.'].join('\n');
     const reports = await restore(edited, [retry()]);
     expect(reports[0]!.moved).toEqual([
@@ -132,8 +138,29 @@ describe.skipIf(!hasDom)('restore report: moved anchors', () => {
     // block still says "The retry loop", so its label is still true.
     const doc = ['# Notes', '', 'The retry loop, first.', '', 'The retry loop, second.'].join('\n');
     const reports = await restore(doc, [
-      retry({ blockId: 'block-2', startMeta: undefined, endMeta: undefined }),
+      retry({ blockId: blockIdOf(doc, 'second'), startMeta: undefined, endMeta: undefined }),
     ]);
     expect(reports[0]!.moved).toBeUndefined();
+  });
+
+  test('diff-view comments and checkbox toggles are skipped, never reported', async () => {
+    const diffComment = retry({
+      id: 'diffComment',
+      blockId: ['diff', 'block', 0].join('-'),
+      diffContext: 'removed',
+      originalText: 'Text only in the old version',
+      startMeta: undefined,
+      endMeta: undefined,
+    });
+    const checkbox = retry({
+      id: ['ann', 'checkbox', blockIdOf(ORIGINAL, 'Cache'), '1'].join('-'),
+      blockId: blockIdOf(ORIGINAL, 'Cache'),
+      originalText: '- [ ] raw markdown',
+      startMeta: undefined,
+      endMeta: undefined,
+    });
+    const reports = await restore(ORIGINAL, [diffComment, checkbox]);
+    // Nothing a highlighter restore owns: no pass is reported at all.
+    expect(reports).toEqual([]);
   });
 });

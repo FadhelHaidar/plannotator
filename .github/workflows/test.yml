@@ -252,6 +252,7 @@ jobs:
           packages/ui/components/AnnotationPanel.allFiles.test.tsx
           packages/ui/hooks/useLinkedDoc.crossFile.test.tsx
           packages/ui/hooks/useLinkedDoc.revealSidebar.test.tsx
+          packages/ui/hooks/useLinkedDoc.reapplyFilter.test.tsx
           packages/ui/components/html-viewer/htmlLinkProtocol.test.tsx
           packages/editor/hooks/useAnnotationJump.test.tsx
           packages/ui/components/TableOfContents.linkedDoc.test.tsx

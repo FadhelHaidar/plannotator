@@ -154,6 +154,7 @@ interface FeedbackBody {
 }
 
 let submissions: FeedbackBody[] = [];
+let draftAnnotations: Annotation[] = DRAFT_ANNOTATIONS;
 
 function fetchFor(document: string): typeof fetch {
   const impl = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -174,7 +175,7 @@ function fetchFor(document: string): typeof fetch {
     if (url.pathname === "/api/ai/capabilities") return Response.json({ available: false, providers: [] });
     if (url.pathname === "/api/draft") {
       if (method === "GET") {
-        return Response.json({ annotations: DRAFT_ANNOTATIONS, globalAttachments: [], ts: 1 });
+        return Response.json({ annotations: draftAnnotations, globalAttachments: [], ts: 1 });
       }
       return Response.json({ ok: true });
     }
@@ -246,6 +247,7 @@ afterEach(async () => {
   globalThis.EventSource = originalEventSource;
   if (hasDom) document.body.replaceChildren();
   submissions = [];
+  draftAnnotations = DRAFT_ANNOTATIONS;
   memory.clear();
   resetStorageBackend();
 });
@@ -316,5 +318,48 @@ describe.if(hasDom)("restoring a draft across a file edit", () => {
     expect(sent.get("annRetry")).toBe("block-1");
     expect(sent.get("annCache")).toBe("block-2");
     expect(sent.get("annPaths")).toBe("block-2");
+  });
+
+  test("diff-view comments and checkbox toggles are not restored as text, chipped or moved", async () => {
+    // A checkbox toggle quotes its list item's raw markdown and is keyed by
+    // that block; a diff-view comment's blockId indexes the version diff.
+    // Neither is a text highlight, so a restore must leave both alone.
+    const doc = [ORIGINAL, "", "- [ ] Ship **the** fix"].join("\n");
+    const task = parseMarkdownToBlocks(doc).find((b) => b.content.includes("Ship"));
+    if (!task) throw new Error("task block did not parse");
+    const checkboxId = `ann-checkbox-${task.id}-1`;
+    draftAnnotations = [
+      DRAFT_ANNOTATIONS[0]!,
+      {
+        id: checkboxId,
+        blockId: task.id,
+        startOffset: 0,
+        endOffset: task.content.length,
+        type: "COMMENT" as Annotation["type"],
+        text: `Mark as completed: ${task.content}`,
+        originalText: task.content,
+        createdA: 4,
+      },
+      {
+        id: "annDiff",
+        blockId: "diff-block-0",
+        startOffset: 0,
+        endOffset: 12,
+        type: "COMMENT" as Annotation["type"],
+        text: "why was this dropped?",
+        originalText: "Removed line",
+        createdA: 5,
+        diffContext: "removed",
+      },
+    ];
+    await mountAndRestore(doc);
+
+    expect(document.querySelectorAll("[data-annotation-unanchored]").length).toBe(0);
+
+    const body = await sendFeedback();
+    const sent = new Map((body.annotations ?? []).map((a) => [a.id, a.blockId]));
+    expect(sent.get(checkboxId)).toBe(task.id);
+    expect(sent.get("annDiff")).toBe("diff-block-0");
+    expect(sent.get("annRetry")).toBe("block-1");
   });
 });

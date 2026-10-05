@@ -11,6 +11,7 @@ import type { Annotation, EditorMode, ImageAttachment } from '../types';
 import { AnnotationType } from '../types';
 import type { QuickLabel } from '../utils/quickLabels';
 import { getIdentity } from '../utils/identity';
+import { annotationOwnsHighlight } from '../utils/annotationOwnsHighlight';
 import { transformPlainText } from '../utils/inlineTransforms';
 
 // --- Exported state types ---
@@ -291,6 +292,27 @@ const blockElementOf = (dom: Node | null | undefined): HTMLElement | null => {
   let parent = dom?.parentElement ?? null;
   while (parent && !parent.dataset.blockId) parent = parent.parentElement;
   return parent;
+};
+
+/** Where `quote` starts in `text`, matching whitespace-insensitively (the
+ *  same comparison the restore verification uses: a quote that crossed a
+ *  block boundary or a soft wrap carries different whitespace than the
+ *  block's text). 0 when it is not there, as at creation. */
+const quoteOffsetIn = (text: string, quote: string): number => {
+  const exact = text.indexOf(quote);
+  if (exact !== -1) return exact;
+  const needle = compactText(quote);
+  if (!needle) return 0;
+  // Compact the text while remembering each kept character's original index.
+  const positions: number[] = [];
+  let compact = '';
+  for (let i = 0; i < text.length; i++) {
+    if (/\s/.test(text[i])) continue;
+    compact += text[i];
+    positions.push(i);
+  }
+  const at = compact.indexOf(needle);
+  return at === -1 ? 0 : positions[at];
 };
 
 /**
@@ -1151,12 +1173,17 @@ export function useAnnotationHighlighter({
       );
       const quote = compactText(ann.originalText);
       if (stored && quote && compactText(stored.textContent ?? '').includes(quote)) return;
-      const beforeText = (blockEl.textContent || '').split(ann.originalText)[0];
-      moved.push({ id: ann.id, blockId, startOffset: beforeText?.length || 0, positionsStale });
+      moved.push({ id: ann.id, blockId, startOffset: quoteOffsetIn(blockEl.textContent ?? '', ann.originalText), positionsStale });
     };
 
     anns.forEach(ann => {
       if (ann.type === AnnotationType.GLOBAL_COMMENT) return;
+      // Diff-view comments (`diff-block-N`, drawn by the diff view) and
+      // checkbox toggles (raw-markdown quotes keyed by their block) are never
+      // text highlights. Callers filter them out; skipping them here as well
+      // keeps a stray one from being reported unanchored or moved, which would
+      // rewrite its blockId.
+      if (!annotationOwnsHighlight(ann)) return;
       // A comment on a rendered diagram part has no text anchor: the
       // diagram overlay restores it against its render and reports its own
       // verdict, so it is neither attempted nor unanchored here (the same

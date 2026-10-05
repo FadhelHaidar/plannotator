@@ -59,6 +59,15 @@ describe("applyRestoredAnchors", () => {
     ])).toBe(list);
   });
 
+  test("a diff-view comment keeps its diff-block id whatever a restore reported", () => {
+    const diffComment = ann({ blockId: "diff-block-3", diffContext: "removed", startMeta: undefined, endMeta: undefined });
+    const list = [diffComment];
+    expect(applyRestoredAnchors(list, [{ id: "a1", blockId: "", positionsStale: true }])).toBe(list);
+    expect(applyRestoredAnchors(list, [
+      { id: "a1", blockId: "block-0", startOffset: 0, positionsStale: true },
+    ])).toBe(list);
+  });
+
   test("an already-unanchored comment without positions is left as it is", () => {
     const list = [ann({ blockId: "", startMeta: undefined, endMeta: undefined })];
     expect(applyRestoredAnchors(list, [{ id: "a1", blockId: "", positionsStale: true }])).toBe(list);
