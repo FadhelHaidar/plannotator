@@ -185,6 +185,16 @@ curl -fsSL https://plannotator.ai/install.sh | bash
 
 This also clears cached plugin versions for both OpenCode 1 and OpenCode 2. To update the plugin later, run the install script again and restart OpenCode.
 
+## The `plannotator` tool
+
+On OpenCode 2 the plugin also gives the agent a `plannotator` tool, in every workflow mode. Ask the agent to "open notes.md in Plannotator" or "let me review these changes in Plannotator", and it opens the review itself:
+
+- The tool returns as soon as the page is open, so the session does not wait while you review.
+- Your feedback arrives later as a new message. Its first line names what you reviewed and the review's session id, for example `Plannotator: notes.md (pn-3f2a9c) — Feedback.`
+- The agent can list the reviews it opened in this session, including the ones you opened with the slash commands, and close one it no longer needs. Closing sends the agent nothing, and your unsent comments stay saved as a draft.
+
+Plan review still goes through `submit_plan`. The tool needs the CLI, like the slash commands. OpenCode 1 does not get the tool.
+
 ## Ask this session
 
 On OpenCode 2, Ask AI in code review, annotate and `/plannotator-last` is answered by your OpenCode session ("Ask this session"), and it is the only Ask AI option there. In plan review the session is waiting for your decision, so it gives a quick answer from its context only. OpenCode 1 and remote sessions use a separate provider you pick. See [Ask this session](/docs/guides/ai-features/#ask-this-session).

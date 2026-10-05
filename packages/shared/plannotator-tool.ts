@@ -6,7 +6,9 @@
  *
  * Hosts: the Claude Code mod (`apps/hook/hooks/mod/tool.ts` keeps a copy,
  * because a hooks module may import only its own folder; `tool.test.ts` there
- * fails when the two differ). Pi and OpenCode adopt it in their own PRs.
+ * fails when the two differ) and the OpenCode 2 plugin
+ * (`apps/opencode-plugin/plannotator-tool.ts`, which imports this file). Pi
+ * adopts it in its own PR.
  *
  * Agent-run CLI commands: `plannotatorCommandToToolInput` turns a shell
  * command (`plannotator annotate x.md --gate --json`) into the tool input that

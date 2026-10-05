@@ -20,6 +20,7 @@ plannotator/
 │   │   ├── commands/             # Slash command stubs (review, annotate, last — plugin intercepts execution)
 │   │   ├── index.ts              # OpenCode 1 entry with submit_plan tool + review/annotate event handlers
 │   │   ├── server.ts             # OpenCode 2 adapter (stable @opencode/plugin types; older-host capability fallbacks)
+│   │   ├── plannotator-tool.ts   # OpenCode 2 `plannotator` tool + per-session launch record (list/close); see "OpenCode 2: the plannotator tool"
 │   │   ├── plannotator.html      # Built plan review app
 │   │   └── review-editor.html    # Built code review app
 │   ├── amp-plugin/               # Amp plugin
@@ -724,6 +725,72 @@ otherwise try to load; bun skips `apps/hook/tests/` through `pathIgnorePatterns`
 Typecheck: `apps/hook/hooks/mod/tsconfig.json` (no DOM, no Node; `globals.d.ts`
 declares the few web APIs a hooks module has). `PLANNOTATOR_MOD_DEBUG=1` writes
 `claude-code-mod/debug.log` in the data dir.
+
+### OpenCode 2: the `plannotator` tool
+
+The OpenCode 2 plugin (`apps/opencode-plugin/server.ts`, `registerPlannotatorTool`)
+registers the same `plannotator` tool the Claude Code mod does, through
+`ctx.tool.transform` → `tools.add`, with the shared contract itself
+(`PLANNOTATOR_TOOL_NAME` / `_DESCRIPTION` / `_INPUT_SCHEMA` and
+`parsePlannotatorToolInput` from `packages/shared/plannotator-tool.ts`, never a
+copy; `plannotator-tool.test.ts` checks the registered schema IS the shared
+object). It is registered for every workflow (`manual` included), and not at
+all where the decision could never come back: a tool draft without `add` (an
+older V2 host, probed inside the callback like the native commands' draft) or
+a session domain without `prompt`. OpenCode 1 gets no tool in 0.29 (design
+decision; its `plugin.tool` route is feasible).
+
+**Open (annotate, review, last).** Each call runs the SAME launch the native
+slash commands use (`runNativeCommand` → `handleCliCommand`: a `plannotator`
+CLI child, the pull-bridge token so "Ask this session" works, the ready file,
+the decision delivered later to the calling session with `session.prompt`),
+and the tool returns as soon as the ready file names the url (up to 45 s for
+review, 15 s otherwise, then the "starting" text): `Session: pn-…` plus
+`plannotatorToolOpenedText`. A refused argument or the CLI's startup error is
+the result text (`Plannotator could not start: …`; results are always text,
+since the promise adapter turns a rejected `execute` into a defect). The
+annotate target is passed as ONE argument (`toolLaunchRequest` builds
+`ParsedAnnotateArgs` instead of re-parsing a string, so `my notes.md` stays one
+path); review words are quoted for `parseReviewArgs`' string form
+(`quoteReviewWord`). A gated tool session delivers its bare approval
+(`Plannotator: notes.md (pn-…) — Approved.`), like the mod; a slash command's
+bare gated approval still sends nothing. A list of several files answers
+`PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT` and `reply` answers
+`PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT`, launching nothing. A subagent's
+(child) session is refused with `PLANNOTATOR_TOOL_SUBAGENT_TEXT`: its decision
+would land in the subagent's session after it finished. No shell take-over:
+nothing in the OpenCode 2 plugin API can answer a shell call.
+
+**Session ids, list and close.** `OpenCodeLaunchRegistry` (one per plugin
+instance) records every review a session opens: tool calls, its slash commands
+(`runNativeCommand` with `launches`), and its `submit_plan` review (listed,
+never closable). Every recorded launch's decision message starts with
+`plannotatorDecisionHeading` (`withDecisionHeading` in `cli-bridge.ts`), slash
+commands included, so `list` and the decision name the same id. `list` and
+`close` see only the calling OpenCode session's launches (never the global
+`sessions/` registry; another session's id is "not found"). `list` reads
+`GET /api/host/status` with the launch's token for `unsent` and `decided`
+(`readHostStatusAnswer`; `unknown` for an older CLI). `close` posts
+`POST /api/host/close` and reads the answer with `classifyHostCloseAnswer`
+(`packages/shared/host-control.ts`, the mod's rule): closed (draft kept, the
+tab told, nothing delivered, since the CLI's record is then `dismissed`),
+decided (the reviewer's decision is on its way), refused, turned off (remote
+mode: left running), or not answering (left running). Only a server that
+answered as an older Plannotator without the endpoint (an uncoded JSON `404`
+or its app page) is stopped instead: SIGTERM to the plugin's own child process
+(`terminate` from `runPlannotatorCli`'s observer), which never deletes a
+draft; a decision such a CLI is still publishing is lost, as on the mod.
+
+Tests: `apps/opencode-plugin/plannotator-tool.test.ts` (registration against
+older drafts and without `prompt`, refusals, and the real launch path against a
+stub CLI that serves the real host-control guards: open → url and id → list →
+decision heading in the right session, gated bare approval, close with the
+token, turned-off close leaves the server up, older CLI stopped, startup
+error, a slash command listed). Checked live on OpenCode 2.0.22 with a fake
+model: the model's tool call opened annotate and review, `list` showed the
+server's count, the reviewer's feedback and a gated approval arrived as new
+turns headed with the id, `close all` closed a review holding 2 draft comments
+with no turn delivered, and Ask AI showed "Ask this session".
 
 ### Codex Stop hook: which turn the plan belongs to
 
@@ -1509,7 +1576,10 @@ runtimes' handlers; `useExternalAnnotations`'s `onSessionClosed`), and the CLI's
 host result record carries the same `closedBy` / `unsentAnnotations` on its
 `dismissed` record. Every server result also exposes `hostControl` (`status()`,
 `close?()`) for hosts that run the server in-process (Pi, the OpenCode 2 embedded
-plan server). Plan servers implement status only.
+plan server). Plan servers implement status only. A host that calls the endpoints
+over HTTP reads the answers with `classifyHostCloseAnswer` / `readHostStatusAnswer`
+from the same shared module (the OpenCode 2 tool); the Claude Code mod keeps its own
+copy of that rule because a hooks module imports only its own folder.
 
 ### Paste Service (`apps/paste-service/`)
 

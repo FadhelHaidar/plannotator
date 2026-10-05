@@ -167,3 +167,65 @@ export interface HostSessionClosedEvent {
 export function hostSessionClosedEvent(unsentAnnotations: number): HostSessionClosedEvent {
 	return { type: "session-closed", by: "agent", unsentAnnotations };
 }
+
+// --- Host side: reading the answers (a host that calls over HTTP) ------------
+
+/** An HTTP answer as a host saw it: status and body text. */
+export interface HostHttpAnswer {
+	status: number;
+	text: string;
+}
+
+/** What `POST /api/host/close` told a host. */
+export type HostCloseAnswer =
+	| { kind: "closed"; unsent: number }
+	/** The reviewer (or an earlier close) decided first; that decision is on its way. */
+	| { kind: "decided" }
+	/** A Plannotator without the endpoint answered: a JSON 404 (0.24+) or its app page (0.19.24 to 0.23.x). */
+	| { kind: "older" }
+	/** A Plannotator WITH the endpoint, turned off (remote mode, launched without a token). */
+	| { kind: "disabled" }
+	| { kind: "refused"; status: number }
+	/** Nothing answered on the port. */
+	| { kind: "unreachable" };
+
+function jsonObjectOf(text: string): Record<string, unknown> | null {
+	try {
+		const value = JSON.parse(text) as unknown;
+		return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Read a close answer (null: nothing answered). Only a JSON body with a
+ * numeric `unsentAnnotations` is a close: a CLI before the `/api/*` 404 guard
+ * (#748) serves its app page with 200 for any path, which must never read as
+ * closed. Only `older` is proof enough for a host to fall back to stopping the
+ * process itself; every other kind leaves it running. The Claude Code mod keeps
+ * the same rule in `apps/hook/hooks/mod/controller.ts` (a hooks module imports
+ * only its own folder).
+ */
+export function classifyHostCloseAnswer(answer: HostHttpAnswer | null): HostCloseAnswer {
+	if (!answer) return { kind: "unreachable" };
+	const ok = answer.status >= 200 && answer.status < 300;
+	const body = jsonObjectOf(answer.text);
+	if (body) {
+		if (ok && typeof body.unsentAnnotations === "number") return { kind: "closed", unsent: body.unsentAnnotations };
+		if (answer.status === 409 && body.code === "already_decided") return { kind: "decided" };
+		if (answer.status === 404 && body.code === HOST_CONTROL_DISABLED_CODE) return { kind: "disabled" };
+		if (answer.status === 404 && typeof body.error === "string") return { kind: "older" };
+		return { kind: "refused", status: answer.status };
+	}
+	if (answer.status === 200 && /<html|<!doctype html/i.test(answer.text)) return { kind: "older" };
+	return { kind: "refused", status: answer.status };
+}
+
+/** A status answer's counts, or null when the server cannot say (an older Plannotator, turned off, not answering). */
+export function readHostStatusAnswer(answer: HostHttpAnswer | null): { unsent: number; decided: boolean } | null {
+	if (!answer || answer.status < 200 || answer.status >= 300) return null;
+	const body = jsonObjectOf(answer.text);
+	if (!body || typeof body.unsentAnnotations !== "number") return null;
+	return { unsent: body.unsentAnnotations, decided: body.decided === true };
+}

@@ -17,12 +17,15 @@
  * translation client, so the two hosts cannot drift.
  */
 
+import type { ParsedAnnotateArgs } from "@plannotator/shared/annotate-args";
 import {
   handleCliCommand,
+  type CliLaunch,
   type DisposableSessionBridge,
   type OpenCodeBridgeAgent,
   type OpenCodeBridgeContext,
 } from "./cli-bridge";
+import { commandSubject, type OpenCodeLaunchRegistry } from "./plannotator-tool";
 import { createOpenCodeSessionBridge } from "./opencode-session-bridge";
 import {
   createV2BridgeClient,
@@ -73,6 +76,10 @@ export interface CliCommandRequest {
   cwd?: string;
   bridge?: OpenCodeBridgeContext;
   createSessionBridge?: () => DisposableSessionBridge | undefined;
+  /** The `plannotator` tool's pre-split annotate arguments. */
+  annotateArgs?: ParsedAnnotateArgs;
+  /** The tracked launch (the tool's list/close, the decision heading). */
+  launch?: CliLaunch;
 }
 
 /**
@@ -99,6 +106,12 @@ export interface NativeCommandDeps {
   runCommand?: (request: CliCommandRequest) => Promise<void>;
   /** Test seam for the reclaim schedule; production uses real timers. */
   wait?: (ms: number) => Promise<void>;
+  /**
+   * The plugin's record of open reviews per session. A slash command's review
+   * is recorded there too, so the `plannotator` tool's list/close see it and
+   * its decision message names its session id.
+   */
+  launches?: OpenCodeLaunchRegistry;
 }
 
 /** Resolve the invocation's working directory, session location first. */
@@ -117,6 +130,8 @@ export async function runNativeCommand(
   command: string,
   invocation: V2CommandInvocation,
   deps: NativeCommandDeps,
+  /** The `plannotator` tool's launch: its own record and pre-split arguments. */
+  tool?: { launch: CliLaunch; annotateArgs?: ParsedAnnotateArgs },
 ): Promise<void> {
   const sessionID = invocation.sessionID;
   // The raw argument tail, exactly as OpenCode 1 forwards it. The CLI's own
@@ -128,6 +143,12 @@ export async function runNativeCommand(
   // remote review would only print its URL into a stream OpenCode discards.
   const client = createV2BridgeClient({ ctx: deps.ctx, getAgents: deps.getAgents, sessionID });
 
+  // A slash command's own review is recorded like a tool launch, so the
+  // tool's list/close cover it ("opened in this conversation").
+  const described = !tool && deps.launches && sessionID ? commandSubject(command, rawArgs) : null;
+  const tracked = described && deps.launches ? deps.launches.begin(sessionID, described.kind, described.subject) : undefined;
+  const launch = tool?.launch ?? tracked?.observer;
+
   const run = deps.runCommand ?? ((request: CliCommandRequest) => handleCliCommand(request as never));
   try {
     await run({
@@ -138,8 +159,11 @@ export async function runNativeCommand(
       cwd: await resolveDirectory(deps.ctx, sessionID),
       bridge: await deps.getBridgeContext(),
       createSessionBridge: () => createNativeCommandSessionBridge(deps.ctx, sessionID),
+      ...(tool?.annotateArgs ? { annotateArgs: tool.annotateArgs } : {}),
+      ...(launch ? { launch } : {}),
     });
   } finally {
+    tracked?.end();
     // The client may be watching the host's event stream for its session-URL
     // notice. A review that ends without sending feedback never settles that
     // watch on its own, so the invocation closes it. Disposing twice is a no-op.
