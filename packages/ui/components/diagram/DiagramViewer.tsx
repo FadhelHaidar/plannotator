@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { DiagramKind } from '@plannotator/core/diagram-anchor';
+import { buildDiagramAnchorValue, type DiagramAnchor, type DiagramKind, type DiagramTarget } from '@plannotator/core/diagram-anchor';
 import { cn } from '../../lib/utils';
 import { diagramFamilyOf } from '../../utils/diagram-anchor';
 import { diagramFinder, type DiagramTheme } from '../../utils/diagram-render';
@@ -33,6 +33,16 @@ const DiagramSourcePane = lazy(async () => ({ default: (await import('./DiagramS
  * Never `null` here — that would collapse the row back onto the canvas. */
 const PANE_CLASS = 'order-last min-h-0 shrink-0 basis-2/5 border-t border-border md:order-first md:w-80 md:basis-auto md:border-r md:border-t-0';
 
+/** A question typed in the composer, asked about the part instead of saved
+ * as a comment. The anchor is the one a comment there would carry (its
+ * `sourceLine` already in document lines). Resolve false (or throw) to keep
+ * the draft open; anything else closes it. */
+export type DiagramAskAI = (
+  question: string,
+  anchor: DiagramAnchor,
+  additionalTargets: readonly DiagramTarget[],
+) => boolean | void | Promise<boolean | void>;
+
 export interface DiagramViewerProps {
   readonly kind: DiagramKind;
   /** The diagram text. With `onSave` this is the saved baseline the pane's
@@ -42,6 +52,8 @@ export interface DiagramViewerProps {
   readonly comments: readonly DiagramComment[];
   /** A comment composed on a part. Absent: clicks open nothing. */
   readonly onCreateComment?: DiagramCreateComment;
+  /** Ask AI from the composer. Absent: the composer offers no Ask AI. */
+  readonly onAskAI?: DiagramAskAI;
   /** Save the pane's text. Absent: there is no Source pane. */
   readonly onSave?: (source: string) => Promise<SaveResult>;
   /** With `onSave`: show the pane read-only (no edit access). */
@@ -92,6 +104,7 @@ export function DiagramViewer({
   theme,
   comments,
   onCreateComment,
+  onAskAI,
   onSave,
   readOnlySource = false,
   sourceOpen = false,
@@ -177,6 +190,21 @@ export function DiagramViewer({
     if (!sourceOpen) cancelComposer();
   }, [cancelComposer, sourceOpen]);
 
+  // Ask AI asks about the part the draft is on; the host's handler decides
+  // whether the question was taken, and a taken question closes the draft
+  // exactly as the markdown composer closes.
+  const composerDraft = commentsState.composer;
+  const askFromComposer = useMemo(() => {
+    if (onAskAI === undefined || composerDraft === null || onCreateComment === undefined) return undefined;
+    return async (question: string): Promise<boolean> => {
+      const anchor = buildDiagramAnchorValue(composerDraft.primary.target, composerDraft.sourceLine);
+      const accepted = await onAskAI(question, anchor, composerDraft.additional.map((extra) => extra.target));
+      if (accepted === false) return false;
+      cancelComposer();
+      return true;
+    };
+  }, [cancelComposer, composerDraft, onAskAI, onCreateComment]);
+
   const overlay = useCallback(
     (handle: DiagramCanvasHandle) => (
       <DiagramOverlay
@@ -199,12 +227,13 @@ export function DiagramViewer({
               disabledReason={commentingDisabledReason}
               onSubmit={(text) => void commentsState.submit(text)}
               onCancel={commentsState.cancel}
+              onAskAI={askFromComposer}
             />
           )
         }
       />
     ),
-    [commentingDisabledReason, commentsState, onSelectComment, selectedCommentId, sourceDirty],
+    [askFromComposer, commentingDisabledReason, commentsState, onSelectComment, selectedCommentId, sourceDirty],
   );
 
   const showFallback = render.svgNode === null;

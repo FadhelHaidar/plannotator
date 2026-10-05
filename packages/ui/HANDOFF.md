@@ -1783,6 +1783,39 @@ Both are gone from `components/CommentPopover`.
 
 ---
 
+## Ask AI from a diagram comment (next ui release; additive, no core change)
+
+The diagram composer can offer the same "Ask AI" the markdown and HTML
+composers offer. All new props are optional; a host that passes none of them
+renders the composer it had (Cancel + Comment, no Ask AI).
+
+- **`DiagramViewer` / `DiagramPopout` `onAskAI?: DiagramAskAI`** —
+  `(question, anchor, additionalTargets) => boolean | void | Promise<boolean | void>`.
+  `anchor` is the `DiagramAnchor` a comment on that part would carry
+  (`sourceLine` already in document lines). Resolve `false` (or throw) to keep
+  the draft open; anything else closes the composer. The button is disabled
+  until text is typed and has no key binding: Enter stays Comment.
+- **`MermaidBlock` / `GraphvizBlock` (`DiagramBlockProps`) `onAskAI?: CommentAskAIHandler`**
+  and **`askAISourcePath?: string`** — the same handler `Viewer` /
+  `CommentPopover` take. The block builds the `CommentAskAIContext` with
+  `utils/diagramAskAI`'s `diagramAskAIContext`: `kind: 'selection'`, label
+  `"Mermaid diagram node D"`, `text` = the part's label, and `detail` = the
+  export's location line (`diagramAnchorLocationLine`), the engine and family,
+  and the diagram source (bounded to 40 lines / 4000 chars, a window around
+  the part when longer) in document lines. `detail` is the #1694 field that
+  `buildDefaultPrompt` puts on the user message before the question. Ignored
+  when `readOnly`. A question asked in the popout closes the popout, since it
+  covers the panel the answer streams into.
+- **`Viewer`** forwards its existing `onAskAI` to its diagram fences (and the
+  `sourcePath` it already sends from the markdown composer), so a host that
+  passes `onAskAI` to `Viewer` gets Ask AI on diagram comments too. A host
+  that wants Ask AI on text but not on diagrams has no switch for that yet.
+
+Pinned by `components/DiagramBlock.askAI.test.tsx` and
+`utils/diagramAskAI.test.ts`.
+
+---
+
 ## The law (guardrails for anyone editing `@plannotator/ui`)
 
 These are enforced socially and, where possible, by CI. They exist because a prior from-scratch reimplementation of this UI broke the app and was reverted.

@@ -1434,6 +1434,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 onAddAnnotation={readOnly ? undefined : onAddAnnotation}
                 readOnly={readOnly}
                 onRestoreReport={onRestoreReport}
+                onAskAI={readOnly ? undefined : onAskAI}
+                askAISourcePath={linkedDocInfo?.filepath ?? sourceInfo}
               />
             </Suspense>
           ) : group.block.type === 'code' && isGraphvizLanguage(group.block.language) ? (
@@ -1446,6 +1448,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 onAddAnnotation={readOnly ? undefined : onAddAnnotation}
                 readOnly={readOnly}
                 onRestoreReport={onRestoreReport}
+                onAskAI={readOnly ? undefined : onAskAI}
+                askAISourcePath={linkedDocInfo?.filepath ?? sourceInfo}
               />
             </Suspense>
           ) : group.block.type === 'table' ? (
