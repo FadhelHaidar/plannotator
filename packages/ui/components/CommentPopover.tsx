@@ -75,8 +75,9 @@ interface CommentPopoverProps {
    * toolbar's 👍). Renders an emoji-only button beside Save, named "Looks
    * good" for assistive tech and in its tooltip; disabled once anything is
    * typed or attached so a click can never discard a draft. It takes no
-   * keyboard shortcut: Enter / Mod+Enter still Save. The parent owns
-   * annotation creation and closing. Absent renders nothing.
+   * keyboard shortcut: Enter / Mod+Enter still Save. Like Save, a click
+   * clears the `draftKey` draft and returns focus to the opener. The parent
+   * owns annotation creation and closing. Absent renders nothing.
    */
   onQuickLookGood?: () => void;
   /** Optional live draft observer for submit paths outside the popover. */
@@ -598,17 +599,27 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   // toolbar's 👍 (same hover tint). Disabled once anything is typed or
   // attached so a click can never discard a draft; with content, Save is the
   // path. A plain click handler only: Enter / Mod+Enter stay on Save.
+  // The grey-out is an inline filter, not a Tailwind filter utility: this
+  // file is scanned into the pinned guides.show viewer CSS, and every class
+  // below already exists there, so the 👍 adds nothing to that bundle.
+  const handleQuickLookGood = () => {
+    if (!onQuickLookGood || hasUnsavedContent) return;
+    if (draftKey) draftStore.delete(draftKey);
+    onQuickLookGood();
+    restoreOpeningFocus();
+  };
   const quickLookGoodButton = onQuickLookGood ? (
     <button
       type="button"
-      onClick={onQuickLookGood}
+      onClick={handleQuickLookGood}
       disabled={hasUnsavedContent}
       aria-label="Looks good"
       title={hasUnsavedContent ? 'Looks good (clear the comment to use it)' : 'Looks good'}
       data-quick-look-good="true"
       data-pn-touch-target="true"
       data-pn-touch-target-icon="true"
-      className="inline-flex h-7 w-7 items-center justify-center rounded-md text-sm leading-none hover:bg-green-500/10 outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-40 disabled:grayscale disabled:cursor-not-allowed disabled:hover:bg-transparent transition-colors"
+      style={hasUnsavedContent ? { filter: 'grayscale(1)' } : undefined}
+      className="inline-flex h-7 w-7 items-center justify-center rounded-md text-sm leading-none hover:bg-green-500/10 outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent transition-colors"
     >
       <span aria-hidden="true">👍</span>
     </button>

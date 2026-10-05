@@ -201,6 +201,23 @@ describe.if(hasDom)('CommentPopover multi-target seams', () => {
     expect(fired).toBe(1);
   });
 
+  test('a thumbs-up click returns focus to the opener, like Save', async () => {
+    // Without the restore, focus drops to <body> once the host closes the
+    // composer, and the next keystroke goes nowhere.
+    const opener = document.createElement('button');
+    document.body.appendChild(opener);
+    opener.focus();
+    await mountPopover({ onQuickLookGood: () => {} });
+    const thumbs = document.querySelector<HTMLButtonElement>('[data-comment-popover] [data-quick-look-good]');
+    if (!thumbs) throw new Error('thumbs-up missing');
+    thumbs.focus();
+    await act(async () => thumbs.click());
+    await act(async () => {
+      await new Promise((r) => requestAnimationFrame(() => r(null)));
+    });
+    expect(document.activeElement).toBe(opener);
+  });
+
   test('yieldState drives fade and click-through classes with a reduced-motion-aware style', async () => {
     await mountPopover({ targetChips: CHIPS, yieldState: 'none' });
     expect(popoverEl().className).toContain('pn-composer-yieldable');

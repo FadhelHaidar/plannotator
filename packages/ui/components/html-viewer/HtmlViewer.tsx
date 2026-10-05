@@ -1254,6 +1254,8 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
               mentionSource={mentionSource}
               // A pinpoint click opens this composer directly (never the
               // selection toolbar), so it carries the surface's one-click 👍.
+              // It also shows when the composer opens from a text selection's
+              // Comment button: a harmless duplicate of the toolbar 👍.
               onQuickLookGood={hook.handleCommentLooksGood}
               onClose={hook.handleCommentClose}
               skillReferences

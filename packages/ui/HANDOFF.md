@@ -1773,7 +1773,11 @@ brought back before any release, so hosts see no API change for it.
   creation and closing, disabled once anything is typed or attached. Only its
   look changed: it is now an emoji-only 👍 button beside Save (no "Looks
   good" text), named "Looks good" through `aria-label` and its tooltip, marked
-  `data-quick-look-good`. It takes no key; `Mod+Enter` still saves. Why it is
+  `data-quick-look-good`. It takes no key; `Mod+Enter` still saves. Like
+  Save, a click clears the `draftKey` draft and returns focus to the opener.
+  Its classes are all ones the pinned guides.show viewer CSS already has (the
+  disabled grey-out is an inline filter), so it does not change that bundle.
+  Why it is
   needed: a pinpoint click on an HTML / live-app element opens this composer
   directly and never shows the selection toolbar, so without it an element
   cannot get a one-click thumbs-up.
