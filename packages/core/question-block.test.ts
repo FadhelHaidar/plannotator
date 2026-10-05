@@ -114,6 +114,118 @@ iOS background execution is unreliable.
   });
 });
 
+// The owner's live report (pando-ops review): plain-bullet choices that wrap
+// onto indented lines were cut at the first line, and the rest of each choice
+// landed in the context above the options.
+const WRAPPED_PLAIN_BULLETS = `**4. How does a Cloudflare-run agent show in the Machines tab and on its work?**
+
+The rulings say agents act as the person who launched them. Two ways to
+name it:
+
+- **One per session:** "ramos · cloud-3", "ramos · cloud-4". Each agent shows
+  as its own machine in the Machines tab and beside its comments and pushes
+  ("ramos, cloud-3"). Revoking one stops only that agent. A busy week can
+  list dozens of them (ended ones sort to the bottom).
+- **One per person:** "ramos · cloud", shared by all your cloud agents. A
+  short Machines tab; revoking it stops all of them at once.
+
+Commits are authored as you either way.
+
+**Recommendation:** one per session. Answer: per session / per
+person.`;
+
+describe("plain-bullet choices keep their wrapped lines", () => {
+  test("indented continuation lines belong to their bullet, not the context", () => {
+    const q = parseQuestionBlock("question", WRAPPED_PLAIN_BULLETS)!;
+    expect(q.kind).toBe("single");
+    expect(q.choices.map((c) => c.label)).toEqual(["One per session", "One per person"]);
+    expect(q.choices[0].description).toBe(
+      `"ramos · cloud-3", "ramos · cloud-4". Each agent shows as its own machine in the Machines tab and beside its comments and pushes ("ramos, cloud-3"). Revoking one stops only that agent. A busy week can list dozens of them (ended ones sort to the bottom).`,
+    );
+    expect(q.choices[1].description).toBe(`"ramos · cloud", shared by all your cloud agents. A short Machines tab; revoking it stops all of them at once.`);
+    expect(q.context).toBe(
+      "The rulings say agents act as the person who launched them. Two ways to\nname it:\n\nCommits are authored as you either way.",
+    );
+  });
+
+  test("a wrapped recommendation line stays the recommendation and matches a choice by its bold label", () => {
+    const q = parseQuestionBlock("question", WRAPPED_PLAIN_BULLETS)!;
+    expect(q.recommendation).toBe("one per session. Answer: per session / per person.");
+    expect(q.context).not.toContain("person.");
+    expect(q.choices.map((c) => c.recommended)).toEqual([true, false]);
+    expect(q.suggestedText).toBeUndefined();
+    const named = parseQuestionBlock("question", `Pick\n\n- **Alpha:** first\n  wrapped\n- **Beta:** second\n\nRecommended: Beta — it is cheaper`)!;
+    expect(named.choices.map((c) => c.recommended)).toEqual([false, true]);
+    // A recommendation naming no choice is still a suggested answer, in full.
+    const free = parseQuestionBlock("question", `Pick\n\n- Alpha\n- Beta\n\nRecommended: neither of these. Build a third\nthing instead.`)!;
+    expect(free.suggestedText).toBe("neither of these. Build a third thing instead.");
+    // The whole joined bullet text matches too (raws keep the continuation).
+    const whole = parseQuestionBlock("question", `Pick\n\n- Alpha first\n  wrapped\n- Beta\n\nRecommended: Alpha first wrapped`)!;
+    expect(whole.choices.map((c) => [c.label, c.recommended])).toEqual([["Alpha first wrapped", true], ["Beta", false]]);
+  });
+
+  test("the answer quotes the full label", () => {
+    const index = indexQuestionBlocks([{ id: "b", type: "directive", directiveKind: "question", content: WRAPPED_PLAIN_BULLETS, startLine: 1 }]);
+    const rec = recommendedQuestionAnswer(index[0])!;
+    expect(rec.selected).toEqual(["One per session"]);
+    expect(formatQuestionAnswerText(rec)).toBe("Answer: One per session");
+  });
+
+  test("lazy (unindented) lines continue a bullet, as in CommonMark; a new block ends it", () => {
+    const q = parseQuestionBlock("question", `Pick\n\n- Alpha runs\non two lines\n- Beta\n# not part of Beta\n\nAfter.`)!;
+    expect(q.choices.map((c) => c.label)).toEqual(["Alpha runs on two lines", "Beta"]);
+    expect(q.context).toBe("# not part of Beta\n\nAfter.");
+  });
+
+  test("an indented paragraph after a blank line continues the bullet; an unindented one does not", () => {
+    const q = parseQuestionBlock(
+      "question",
+      `Pick\n\n- **Alpha:** first paragraph.\n\n  Second paragraph of Alpha.\n- **Beta:** only one.\n\nClosing prose.`,
+    )!;
+    expect(q.choices.map((c) => [c.label, c.description])).toEqual([
+      ["Alpha", "first paragraph. Second paragraph of Alpha."],
+      ["Beta", "only one."],
+    ]);
+    expect(q.context).toBe("Closing prose.");
+  });
+
+  test("a bold name runs into the label only when punctuation sets it off", () => {
+    const q = parseQuestionBlock("question", `Pick\n\n- **Fast** mode with cache\n- **Slow** (no cache)\n- **a. It stops.** It waits.`)!;
+    expect(q.choices.map((c) => [c.label, c.description])).toEqual([
+      ["**Fast** mode with cache", undefined],
+      ["Slow", "(no cache)"],
+      ["a. It stops.", "It waits."],
+    ]);
+  });
+
+  test("an over-long label is cut at a sentence so it can still be picked, never dropped", () => {
+    const sentence = "This first sentence names the option plainly.";
+    const long = `${sentence} ${"More words follow here without any break at all ".repeat(6).trim()}`;
+    const q = parseQuestionBlock("question", `Pick\n\n- ${long}\n- Short`)!;
+    expect(q.choices[0].label).toBe(sentence);
+    expect(`${q.choices[0].label} ${q.choices[0].description}`).toBe(long);
+  });
+
+  test("bullets that are not choices stay in the context exactly as before", () => {
+    const text = parseQuestionBlock("question-text", `Describe it\n\n- one\n  wrapped\n- two\n\nEnd.`)!;
+    expect(text.kind).toBe("text");
+    expect(text.context).toBe("- one\nwrapped\n- two\n\nEnd.");
+
+    const withTasks = parseQuestionBlock("question", `Pick\n\nFacts:\n\n- a fact\n  that wraps\n\n- [ ] Yes\n- [ ] No`)!;
+    expect(withTasks.choices.map((c) => c.label)).toEqual(["Yes", "No"]);
+    expect(withTasks.context).toBe("Facts:\n\n- a fact\nthat wraps");
+  });
+
+  test("task-list choices are unchanged: bold names and lazy lines are not reinterpreted", () => {
+    const q = parseQuestionBlock("question", `Pick\n- [ ] **Local** — cheap\n  still cheap\n- [ ] **Remote:** costly\nTrailing prose`)!;
+    expect(q.choices.map((c) => [c.label, c.description])).toEqual([
+      ["**Local**", "cheap still cheap"],
+      ["**Remote:** costly", undefined],
+    ]);
+    expect(q.context).toBe("Trailing prose");
+  });
+});
+
 describe("question identity", () => {
   test("the key ignores case, whitespace and emphasis but not the kind", () => {
     expect(questionKey("single", "Where  is **it**?")).toBe(questionKey("single", "where is it?"));

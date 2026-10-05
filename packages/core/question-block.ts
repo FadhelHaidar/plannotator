@@ -38,7 +38,10 @@
  *   from the description. `- [x]` marks a choice as already SETTLED (the
  *   agent echoing an earlier decision), exactly what a checked box means on
  *   GitHub. A `question` / `question-multi` block with no task-list items
- *   treats plain `- label` bullets as its choices.
+ *   treats plain `- label` bullets as its choices. A plain bullet keeps its
+ *   wrapped lines the way CommonMark reads a list item (indented lines, lazy
+ *   unindented lines, an indented paragraph after a blank line), and a bold
+ *   name set off by punctuation (`- **Name:** prose`) is its label.
  * - Recommendation: `Recommended: <text>` (aliases `Recommendation:`,
  *   `➡️`, `->`, `=>`, `→`). Text that names a choice label (normalized,
  *   case-insensitive; a `label — reason` tail is allowed) marks that choice
@@ -136,6 +139,21 @@ const LABEL_DESC_SEP_RE = /\s+(?:—|–|-)\s+/;
 const DECISION_RE = /^decision\s*:\s*(.*?)\s*$/i;
 const DECISION_FLAG_RE = /^when answered\.?$/i;
 const DECISION_LINK_RE = /^\[([^\]]+)\]\((\S+)\)\.?$/;
+// An unindented line that opens a block of its own (list item, heading,
+// quote, fence, directive, table row, HTML, rule) ends a plain bullet instead
+// of continuing it lazily.
+const STARTS_OTHER_BLOCK_RE = /^(?:[-*+]\s|\d{1,9}[.)]\s|#{1,6}(?:\s|$)|>|```|~~~|:::|\||<[A-Za-z/!]|(?:[-*_]\s*){3,}$)/;
+
+/** Leading whitespace width in columns (a tab counts 4). */
+const indentWidth = (line: string): number => {
+  let width = 0;
+  for (const ch of line) {
+    if (ch === ' ') width += 1;
+    else if (ch === '\t') width += 4 - (width % 4);
+    else break;
+  }
+  return width;
+};
 
 /** The decision link a `Decision:` value names, or null when the value is not
  *  exactly one markdown link to an absolute http(s) URL. */
@@ -164,6 +182,47 @@ const splitLabel = (raw: string): { label: string; description?: string } => {
     ...(description ? { description } : {}),
   };
 };
+
+const BOLD_LEAD_RE = /^(\*\*|__)(.+?)\1(.*)$/s;
+
+/** A choice written as a bold name and then prose (`**One per session:**
+ *  "ramos · cloud-3", …`): the bold name is the label and the rest the
+ *  description. Only when the name is set off by punctuation (a `:` `.` `?`
+ *  `!` closing the bold text, or `:` `,` `;` `(` or a dash after it), so
+ *  `**Fast** mode with cache` stays one label. */
+const splitBoldLead = (raw: string): { label: string; description: string } | null => {
+  const m = raw.trim().match(BOLD_LEAD_RE);
+  if (!m) return null;
+  const inner = m[2].trim();
+  const rest = m[3];
+  if (!/[:.?!]$/.test(inner) && !/^\s*[:,;(—–]/.test(rest) && !/^\s+-\s/.test(rest)) return null;
+  const label = inner.replace(/\s*:$/, '').trim();
+  const description = rest.replace(/^\s*[:,;—–-]?\s*/, '').trim();
+  if (!label || !description) return null;
+  return { label, description };
+};
+
+/** A label longer than an answer may quote (`MAX_QUESTION_CHOICE_LABEL_CHARS`)
+ *  could never show as picked, so it is cut at its first sentence end (else
+ *  its last space) within the cap; the rest leads the description. Nothing
+ *  is dropped. */
+const capChoiceLabel = (split: { label: string; description?: string }): { label: string; description?: string } => {
+  const { label, description } = split;
+  if (label.length <= MAX_QUESTION_CHOICE_LABEL_CHARS) return split;
+  const head = label.slice(0, MAX_QUESTION_CHOICE_LABEL_CHARS);
+  const sentence = head.match(/^.+?[.!?]["'”’)\]]?(?=\s)/);
+  const space = head.lastIndexOf(' ');
+  const at = sentence ? sentence[0].length : space > 0 ? space : MAX_QUESTION_CHOICE_LABEL_CHARS;
+  const tail = label.slice(at).trim();
+  const desc = [tail, description].filter(Boolean).join(' — ');
+  return { label: label.slice(0, at).trim(), ...(desc ? { description: desc } : {}) };
+};
+
+/** Label and description of a choice's text. A task-list item splits on its
+ *  first dash separator exactly as it always has; a plain bullet (`boldLead`)
+ *  takes a set-off bold name first. */
+const splitChoiceText = (raw: string, boldLead: boolean): { label: string; description?: string } =>
+  capChoiceLabel((boldLead ? splitBoldLead(raw) : null) ?? splitLabel(raw));
 
 /** Normalization for comparing labels and prompts: markdown emphasis and code
  *  ticks dropped, whitespace collapsed, case folded, trailing punctuation
@@ -209,6 +268,12 @@ const matchRecommendation = (text: string, raws: string[], choices: QuestionChoi
   if (whole !== -1) return [whole];
   const head = match(splitLabel(text).label);
   if (head !== -1) return [head];
+  // `**Name:** why` and `Name. Why…` (a recommendation that wraps on into its
+  // reasons) name a choice by their lead.
+  for (const lead of [splitBoldLead(text)?.label, text.match(/^.+?[.!?](?=\s)/)?.[0]]) {
+    const hit = lead ? match(lead) : -1;
+    if (hit !== -1) return [hit];
+  }
   if (!multi) return [];
   for (const sep of [/\s*;\s*/, /\s*,\s*|\s+(?:and|&|\+)\s+/i]) {
     const parts = text.split(sep).map((p) => p.trim()).filter(Boolean);
@@ -237,9 +302,19 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
   const contextLines: string[] = [];
   const choices: QuestionChoice[] = [];
   const raws: string[] = [];
-  const plainBullets: { text: string; contextIndex: number }[] = [];
+  // A plain bullet's context lines: its own line plus every continuation
+  // line, so all of them leave the context when the bullets become choices.
+  const plainBullets: { text: string; contextIndices: number[] }[] = [];
   let recommendation: string | undefined;
+  // The recommendation line wraps like any paragraph: the lines right under
+  // it (up to a blank line or another block) are part of it, never context.
+  let recommendationOpen = false;
   let lastChoice = -1;
+  // The plain bullet the next line may continue (CommonMark list-item
+  // paragraph rules): an indented line, or an unindented "lazy" line that
+  // starts no other block, continues it; after a blank line only a line
+  // indented to the bullet's content column does (a further paragraph).
+  let openBullet: { index: number; contentColumn: number; afterBlank: boolean } | null = null;
   let decisionFlag = false;
   let decision: QuestionDecisionLink | undefined;
 
@@ -251,6 +326,8 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
     const line = lines[i];
     if (line.trim() === '') {
       lastChoice = -1;
+      if (openBullet) openBullet.afterBlank = true;
+      recommendationOpen = false;
       if (contextLines.length > 0 && contextLines[contextLines.length - 1] !== '') pushContext('');
       continue;
     }
@@ -258,7 +335,7 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
     if (choice) {
       if (choices.length >= MAX_QUESTION_CHOICES) continue;
       const raw = choice[2].trim();
-      const { label, description } = splitLabel(raw);
+      const { label, description } = splitChoiceText(raw, false);
       if (!label) continue;
       choices.push({
         label,
@@ -268,13 +345,17 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
       });
       raws.push(raw);
       lastChoice = choices.length - 1;
+      openBullet = null;
+      recommendationOpen = false;
       continue;
     }
     const rec = line.match(RECOMMENDED_RE) ?? line.match(ARROW_RE);
     if (rec) {
       const text = rec[1].replace(/[*_]{1,2}$/, '').trim();
       if (text) recommendation = text;
+      recommendationOpen = !!text;
       lastChoice = -1;
+      openBullet = null;
       continue;
     }
     if (!prompt) {
@@ -288,14 +369,25 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
       if (!decisionFlag && DECISION_FLAG_RE.test(decisionLine[1])) {
         decisionFlag = true;
         lastChoice = -1;
+        openBullet = null;
+        recommendationOpen = false;
         continue;
       }
       const link = decision ? null : parseDecisionLink(decisionLine[1]);
       if (link) {
         decision = link;
         lastChoice = -1;
+        openBullet = null;
+        recommendationOpen = false;
         continue;
       }
+    }
+    if (recommendationOpen) {
+      if (recommendation && !PLAIN_BULLET_RE.test(line) && (indentWidth(line) > 0 || !STARTS_OTHER_BLOCK_RE.test(line))) {
+        recommendation = `${recommendation} ${line.trim().replace(/[*_]{1,2}$/, '').trim()}`.trim();
+        continue;
+      }
+      recommendationOpen = false;
     }
     // An indented line right under a choice continues that choice.
     if (lastChoice !== -1 && /^\s+\S/.test(line)) {
@@ -308,8 +400,28 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
     }
     lastChoice = -1;
     const bullet = line.match(PLAIN_BULLET_RE);
+    if (openBullet && !bullet) {
+      const indent = indentWidth(line);
+      const continues = openBullet.afterBlank
+        ? indent >= openBullet.contentColumn
+        : indent > 0 || !STARTS_OTHER_BLOCK_RE.test(line);
+      if (continues) {
+        const target = plainBullets[openBullet.index];
+        target.text = `${target.text} ${line.trim()}`;
+        target.contextIndices.push(contextLines.length);
+        openBullet.afterBlank = false;
+        pushContext(line.trim());
+        continue;
+      }
+    }
+    openBullet = null;
     if (bullet && bullet[1].trim()) {
-      plainBullets.push({ text: bullet[1].trim(), contextIndex: contextLines.length });
+      plainBullets.push({ text: bullet[1].trim(), contextIndices: [contextLines.length] });
+      openBullet = {
+        index: plainBullets.length - 1,
+        contentColumn: indentWidth(line) + (line.trimStart().length - bullet[1].length),
+        afterBlank: false,
+      };
     }
     pushContext(line.trim());
   }
@@ -320,11 +432,11 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
   if (choices.length === 0 && directiveKind !== 'question-text' && plainBullets.length > 0) {
     const taken = new Set<number>();
     for (const bullet of plainBullets.slice(0, MAX_QUESTION_CHOICES)) {
-      const { label, description } = splitLabel(bullet.text);
+      const { label, description } = splitChoiceText(bullet.text, true);
       if (!label) continue;
       choices.push({ label, ...(description ? { description } : {}), settled: false, recommended: false });
       raws.push(bullet.text);
-      taken.add(bullet.contextIndex);
+      for (const index of bullet.contextIndices) taken.add(index);
     }
     for (let i = contextLines.length - 1; i >= 0; i--) if (taken.has(i)) contextLines.splice(i, 1);
   }
