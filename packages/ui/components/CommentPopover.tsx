@@ -69,6 +69,16 @@ interface CommentPopoverProps {
    * arguments it has always been.
    */
   onSubmit: (text: string, images?: ImageAttachment[], mentions?: readonly string[]) => void;
+  /**
+   * One-click 👍 "Looks good" (comment-only HTML / live-app surfaces, where a
+   * pinpoint click opens this composer directly and never shows the selection
+   * toolbar's 👍). Renders an emoji-only button beside Save, named "Looks
+   * good" for assistive tech and in its tooltip; disabled once anything is
+   * typed or attached so a click can never discard a draft. It takes no
+   * keyboard shortcut: Enter / Mod+Enter still Save. The parent owns
+   * annotation creation and closing. Absent renders nothing.
+   */
+  onQuickLookGood?: () => void;
   /** Optional live draft observer for submit paths outside the popover. */
   onDraftChange?: (text: string, images?: ImageAttachment[]) => void;
   /** Called when popover is closed/cancelled */
@@ -171,6 +181,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   isGlobal,
   initialText = '',
   onSubmit,
+  onQuickLookGood,
   onDraftChange,
   onClose,
   draftKey,
@@ -583,6 +594,26 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   const canAskAI = !!onAskAI && !askAIDisabled && text.trim().length > 0;
   const showsSkillMenu = skillAc.menu !== null;
 
+  // Shared by both footers, sits beside Save. Emoji-only like the selection
+  // toolbar's 👍 (same hover tint). Disabled once anything is typed or
+  // attached so a click can never discard a draft; with content, Save is the
+  // path. A plain click handler only: Enter / Mod+Enter stay on Save.
+  const quickLookGoodButton = onQuickLookGood ? (
+    <button
+      type="button"
+      onClick={onQuickLookGood}
+      disabled={hasUnsavedContent}
+      aria-label="Looks good"
+      title={hasUnsavedContent ? 'Looks good (clear the comment to use it)' : 'Looks good'}
+      data-quick-look-good="true"
+      data-pn-touch-target="true"
+      data-pn-touch-target-icon="true"
+      className="inline-flex h-7 w-7 items-center justify-center rounded-md text-sm leading-none hover:bg-green-500/10 outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-40 disabled:grayscale disabled:cursor-not-allowed disabled:hover:bg-transparent transition-colors"
+    >
+      <span aria-hidden="true">👍</span>
+    </button>
+  ) : null;
+
   if (mode === 'dialog') {
     return createPortal(
       <div
@@ -701,6 +732,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
               >
                 {isGlobal ? 'Add' : 'Save'}
               </button>
+              {quickLookGoodButton}
               {onAskAI && (
                 <button
                   onClick={handleAskAI}
@@ -853,6 +885,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
           >
             {isGlobal ? 'Add' : 'Save'}
           </button>
+          {quickLookGoodButton}
           {onAskAI && (
             <button
               onClick={handleAskAI}

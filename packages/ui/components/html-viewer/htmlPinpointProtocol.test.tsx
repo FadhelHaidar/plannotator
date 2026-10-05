@@ -15,6 +15,7 @@ import { createRoot } from 'react-dom/client';
 import type { Annotation } from '../../types';
 import { AnnotationType } from '../../types';
 import { BRIDGE_PROTOCOL_VERSION } from './bridge-script';
+import { THUMBS_UP_LABEL } from '../../utils/quickLabels';
 
 const hasDom = typeof document !== 'undefined';
 const hookModule = hasDom ? await import('./useHtmlAnnotation') : null;
@@ -309,6 +310,65 @@ describe.if(hasDom)('pinpoint click-to-pin flow', () => {
     expect(added[0]?.type).toBe(AnnotationType.COMMENT);
     expect(added[0]?.isQuickLabel).toBe(true);
     expect(added[0]?.text).toBe('Looks good');
+  });
+
+  function composerThumbsUp(): HTMLButtonElement | null {
+    return document.querySelector<HTMLButtonElement>(
+      '[data-comment-popover] button[aria-label="Looks good"]',
+    );
+  }
+
+  test('the pinpoint composer thumbs-up labels the pinned element in one click', async () => {
+    // A pinpoint click opens the composer, never the toolbar, so without
+    // this button an element cannot get a one-click thumbs-up at all. It
+    // must mint the same labeled comment the toolbar 👍 does, on the pinned
+    // element, carrying the anchor and element context a typed comment would.
+    const added: Annotation[] = [];
+    const { postSelection } = await mountViewer({ mode: 'selection', onAdd: (ann) => added.push(ann) });
+    await postSelection({
+      ...selectionMessage,
+      pinpoint: true,
+      context: { tag: 'p', path: 'body > p' },
+    });
+    const thumbs = composerThumbsUp();
+    if (!thumbs) throw new Error('composer thumbs-up missing');
+    // Emoji only: the "Looks good" name lives in aria-label / tooltip.
+    expect(thumbs.textContent).toBe('👍');
+    await act(async () => thumbs.click());
+    expect(added).toHaveLength(1);
+    expect(added[0]!.type).toBe(AnnotationType.COMMENT);
+    expect(added[0]!.isQuickLabel).toBe(true);
+    expect(added[0]!.text).toBe(THUMBS_UP_LABEL.text);
+    expect(added[0]!.quickLabelTip).toBe(THUMBS_UP_LABEL.tip);
+    expect(added[0]!.originalText).toBe('Pinpoint target');
+    expect(added[0]!.htmlAnchor).toEqual(selectionMessage.anchor);
+    expect(added[0]!.elementContext).toMatchObject({ tag: 'p', path: 'body > p' });
+    expect(document.querySelector('[data-comment-popover]')).toBeNull();
+  });
+
+  test('Mod+Enter still saves the typed comment; the thumbs-up takes no key and disables once typed', async () => {
+    const added: Annotation[] = [];
+    const { postSelection } = await mountViewer({ mode: 'selection', onAdd: (ann) => added.push(ann) });
+    await postSelection({ ...selectionMessage, pinpoint: true });
+    const textarea = document.querySelector<HTMLTextAreaElement>('[data-comment-popover] textarea');
+    if (!textarea) throw new Error('composer textarea missing');
+    const pressModEnter = async () => {
+      await act(async () => {
+        textarea.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Enter', metaKey: true, ctrlKey: true, bubbles: true, cancelable: true,
+        }));
+      });
+    };
+    // Empty composer: Mod+Enter is not routed to the thumbs-up.
+    await pressModEnter();
+    expect(added).toHaveLength(0);
+
+    await typeComment('the spacing is off here');
+    expect(composerThumbsUp()?.disabled).toBe(true);
+    await pressModEnter();
+    expect(added).toHaveLength(1);
+    expect(added[0]!.text).toBe('the spacing is off here');
+    expect(added[0]!.isQuickLabel).toBeUndefined();
   });
 
   test('redline mode is CLAMPED on HTML surfaces: a pinpoint selection opens the composer instead of auto-deleting', async () => {
@@ -904,6 +964,21 @@ describe.if(hasDom)('multi-target composer flow (chips, promotion, submit)', () 
     await save();
     expect(added[0]!.htmlAdditionalTargets!.length).toBe(3);
 
+    // The composer's one-click 👍 submits the shift-click targets too, under
+    // the same cap.
+    await post(primarySelection({ targetKey: 'ht-2' }));
+    for (let i = 0; i < 8; i++) {
+      await post(addedTarget(`host-cap-b-${i}`, `Target ${i}`));
+    }
+    const thumbs = document.querySelector<HTMLButtonElement>(
+      '[data-comment-popover] button[aria-label="Looks good"]',
+    );
+    if (!thumbs) throw new Error('composer thumbs-up missing');
+    await act(async () => { thumbs.click(); });
+    expect(added[1]!.isQuickLabel).toBe(true);
+    expect(added[1]!.htmlAdditionalTargets!.map((t) => t.text)).toEqual([
+      'Target 0', 'Target 1', 'Target 2',
+    ]);
   });
 
   test('without maxAdditionalTargets the arm message and the 16 cap are unchanged', async () => {
