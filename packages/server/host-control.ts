@@ -16,8 +16,9 @@ export type { HostControl, HostSessionStatus, HostCloseOutcome } from "@plannota
 /**
  * The token the host-control endpoints accept: `explicit` (tests, an
  * in-process caller), else the pull-bridge token the host launched this CLI
- * with. Available exactly where the pull bridge is: never in remote mode, and
- * `--tailscale` discards the env token before any server starts.
+ * with. Never in remote mode, and `--tailscale` discards the env token before
+ * any server starts. Unlike the pull bridge, NOT turned off by
+ * `PLANNOTATOR_AI=disabled`: closing a review is not an AI feature.
  */
 export function resolveHostControlToken(explicit?: string): string | undefined {
   if (isRemoteSession()) return undefined;

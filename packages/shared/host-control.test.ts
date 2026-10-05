@@ -54,4 +54,17 @@ describe("countUnsentDraftComments", () => {
     expect(countUnsentDraftComments(null)).toBe(0);
     expect(countUnsentDraftComments({ annotations: "x" })).toBe(0);
   });
+
+  // The failure: "N unsent comments" counts a review agent's or linter's
+  // findings as the reviewer's, or misses the reviewer's PR-mode notes.
+  test("only the reviewer's own comments: source-tagged entries are skipped, PR notes count", () => {
+    expect(
+      countUnsentDraftComments({
+        codeAnnotations: [{ id: "a" }, { id: "b", source: "review-agent" }, { id: "c", source: "browser-agent" }],
+        annotations: [{ id: "d", source: "eslint" }, { id: "e" }],
+        descriptionAnnotations: [{ id: "f" }],
+        commentAnnotations: [{ id: "g" }, { id: "h" }],
+      }),
+    ).toBe(5);
+  });
 });

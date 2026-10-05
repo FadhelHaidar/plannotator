@@ -1888,6 +1888,9 @@ export async function startReviewServer(options: {
 		};
 	});
 
+	const reviewAlreadyDecided = (res: import("node:http").ServerResponse) =>
+		json(res, { error: "This review session has already been decided." }, 409);
+
 	// Host-only session control: mirrors packages/server/review.ts. Closing is
 	// the reviewer's Close, marked closedBy "agent", WITHOUT settling the draft
 	// or archiving a decision the reviewer never made.
@@ -3822,6 +3825,12 @@ export async function startReviewServer(options: {
 			handleApiNotFound(res, url.pathname);
 			return;
 		} else if (url.pathname === "/api/exit" && req.method === "POST") {
+			// Already decided (the host closed it, or another tab decided):
+			// archiving or settling now would delete a draft the close kept.
+			if (reviewDecided) {
+				reviewAlreadyDecided(res);
+				return;
+			}
 			// Decision-only line: dismissal rate is behavior data, and a
 			// contentless failure must not change the legacy draft behavior.
 			archiveReviewSubmission("", [], "dismissed");
@@ -3831,6 +3840,13 @@ export async function startReviewServer(options: {
 		} else if (url.pathname === "/api/feedback" && req.method === "POST") {
 			try {
 				const body = await parseBody(req);
+				// Checked after the body is read: a host close can land while
+				// it streams. A decided session must not archive, delete the
+				// draft, or answer ok for feedback nobody will receive.
+				if (reviewDecided) {
+					reviewAlreadyDecided(res);
+					return;
+				}
 				// Archive BEFORE the draft delete: a failed write keeps the
 				// draft as the reviewer's recovery copy (#678 ordering).
 				// Defensive on the body's own types: a malformed value must

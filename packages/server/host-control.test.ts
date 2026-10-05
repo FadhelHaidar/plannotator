@@ -171,6 +171,17 @@ describe("host control: review", () => {
       const draft = await (await loadDraft(server.url)).json();
       expect(draft.codeAnnotations).toHaveLength(1);
       expect((await close(server.url)).status).toBe(409);
+
+      // The tab still open after the close: its late decision is refused
+      // rather than answered ok, and must not delete the kept draft.
+      const feedback = await fetch(`${server.url}/api/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved: false, feedback: "late", annotations: [{ id: "c1" }] }),
+      });
+      expect(feedback.status).toBe(409);
+      expect((await fetch(`${server.url}/api/exit`, { method: "POST" })).status).toBe(409);
+      expect((await (await loadDraft(server.url)).json()).codeAnnotations).toHaveLength(1);
     } finally {
       server.stop();
     }

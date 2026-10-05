@@ -5,16 +5,19 @@
  * OpenCode 2 through the same functions in-process) can ask what the review
  * holds and close it when it no longer needs it. Closing is the reviewer's
  * Close (decision `dismissed`, nothing sent to the agent) except that it is
- * marked `closedBy: "agent"` and the annotation draft is KEPT, so the
- * reviewer's unsent comments come back when the review is reopened.
+ * marked `closedBy: "agent"` and the annotation draft is KEPT (it is not
+ * deleted; whether a later session restores it follows that surface's own
+ * draft key: annotate by document content, code review by patch or PR).
  *
  * Guarded exactly like the pull bridge (packages/ai/session-bridge-pull.ts):
  * a loopback Host header naming this server's port (DNS-rebinding guard), no
  * `Origin` header (a browser page is never the host), and
  * `Authorization: Bearer <token>`, the per-launch secret the host started the
  * server with (`PLANNOTATOR_SESSION_BRIDGE_TOKEN`). Without a token the paths
- * answer 404, which a host reads as "an older Plannotator". Available exactly
- * where the pull bridge is: never in remote mode or a `--tailscale` session.
+ * answer 404, which a host reads as "an older Plannotator". Available wherever
+ * the host launched the server with that token, including under
+ * `PLANNOTATOR_AI=disabled` (which turns the pull bridge itself off); never in
+ * remote mode or a `--tailscale` session (which discards the token).
  *
  * Privacy: status carries counts, never comment text.
  *
@@ -51,12 +54,30 @@ export interface HostControl {
 	close?: () => HostCloseOutcome;
 }
 
-/** The comments a draft holds that the reviewer has not sent: annotations plus code annotations. */
+/**
+ * The comments a draft holds that the REVIEWER wrote and has not sent:
+ * document annotations, code annotations, and code review's PR description
+ * and PR comment notes. Entries carrying a `source` (review agents, WebMCP
+ * browser agents, linters and other external tools) are not the reviewer's
+ * and are not counted.
+ */
 export function countUnsentDraftComments(draft: unknown): number {
 	if (!draft || typeof draft !== "object") return 0;
-	const value = draft as { annotations?: unknown; codeAnnotations?: unknown };
-	const count = (list: unknown) => (Array.isArray(list) ? list.length : 0);
-	return count(value.annotations) + count(value.codeAnnotations);
+	const value = draft as Record<string, unknown>;
+	const count = (list: unknown) =>
+		Array.isArray(list)
+			? list.filter((entry) => {
+					if (!entry || typeof entry !== "object") return false;
+					const source = (entry as { source?: unknown }).source;
+					return typeof source !== "string" || source.length === 0;
+				}).length
+			: 0;
+	return (
+		count(value.annotations) +
+		count(value.codeAnnotations) +
+		count(value.descriptionAnnotations) +
+		count(value.commentAnnotations)
+	);
 }
 
 /** Constant-time comparison of two short ASCII tokens. */

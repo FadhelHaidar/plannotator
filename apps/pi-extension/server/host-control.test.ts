@@ -76,8 +76,20 @@ describe("Pi host control", () => {
 			const server = await startReviewServer({ rawPatch: "diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b\n", gitRef: "HEAD", htmlContent: MINIMAL_HTML });
 			try {
 				expect((await fetch(`${server.url}/api/host/status`, { headers: auth })).status).toBe(404);
-				expect(server.hostControl.close?.()).toEqual({ closed: true, unsentAnnotations: 0 });
+				await saveDraft(server.url, { annotations: [], codeAnnotations: [{ id: "c1" }], globalAttachments: [] });
+				expect(server.hostControl.close?.()).toEqual({ closed: true, unsentAnnotations: 1 });
 				expect(await server.waitForDecision()).toMatchObject({ exit: true, closedBy: "agent" });
+
+				// The tab still open after the close: its late decision is refused
+				// rather than answered ok, and must not delete the kept draft.
+				const feedback = await fetch(`${server.url}/api/feedback`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ approved: false, feedback: "late", annotations: [{ id: "c1" }] }),
+				});
+				expect(feedback.status).toBe(409);
+				expect((await fetch(`${server.url}/api/exit`, { method: "POST" })).status).toBe(409);
+				expect((await (await fetch(`${server.url}/api/draft`)).json()).codeAnnotations).toHaveLength(1);
 			} finally {
 				server.stop();
 			}
