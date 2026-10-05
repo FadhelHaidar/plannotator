@@ -100,6 +100,7 @@ export {
   SESSION_BRIDGE_ERROR,
   SESSION_ASK_HEADER,
   SESSION_ASK_TRANSIENT_NOTE,
+  SESSION_ASK_TAKEN_OVER_TEXT,
   formatSessionAskText,
   sessionBridgeLabel,
 } from "./session-bridge.ts";

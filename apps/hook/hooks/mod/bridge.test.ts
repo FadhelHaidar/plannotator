@@ -5,9 +5,9 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { createPullSessionBridge, type PullSessionBridge } from '../../../../packages/ai/session-bridge-pull.ts'
-import { createBridge } from './bridge'
+import { createBridge, TAKEN_OVER_INTERRUPT_TEXT } from './bridge'
 import { fakeHost, type FakeHost } from './testing/fake-host'
-import { TurnTracker } from './turns'
+import { TAKEN_OVER_TEXT, TurnTracker } from './turns'
 
 const TOKEN = 'k'.repeat(64)
 let server: PullSessionBridge | null = null
@@ -42,7 +42,7 @@ async function until(check: () => boolean, ms = 3_000) {
 }
 
 function collector() {
-  const seen = { deltas: '', done: null as string | null, error: null as string | null }
+  const seen = { deltas: '', done: null as string | null, error: null as string | null, message: null as string | null }
   return {
     seen,
     sink: {
@@ -52,8 +52,9 @@ function collector() {
       done: (answer: string) => {
         seen.done = answer
       },
-      error: (code: string) => {
+      error: (code: string, message?: string) => {
         seen.error = code
+        seen.message = message ?? null
       },
     },
   }
@@ -129,6 +130,46 @@ describe('Ask this session over the pull bridge', () => {
 
     await until(() => seen.error !== null)
     expect(turns.onTurnStart('late-turn', '[Plannotator Ask AI] Q')).toBe('late-turn')
+
+    live = false
+    server.dispose()
+    await running
+  })
+
+  // The failure this guards: the person typed into the question's turn, and
+  // the reply to their prompt streamed into Plannotator as the answer, and
+  // "Interrupt and ask now" then aborted the person's own work.
+  test('a prompt typed into the question\'s turn settles it as taken over, and the turn is never interrupted', async () => {
+    live = true
+    server = createPullSessionBridge({ token: TOKEN, host: 'claude-code', modes: { turn: true, transient: false } })
+    const host = fakeHost()
+    wire(host, server)
+    const turns = new TurnTracker()
+    const client = createBridge({ host, baseUrl: 'http://127.0.0.1:4321', token: TOKEN, turns, isLive: () => live })
+    const running = client.run()
+
+    await until(() => server!.bridge.status() === 'ready')
+    const { seen, sink } = collector()
+    const controller = new AbortController()
+    server.bridge.ask({ askId: 'ask-3', text: '[Plannotator Ask AI] Why step 2?', mode: 'turn' }, sink, controller.signal)
+    await until(() => host.submits.length === 1)
+
+    turns.onTurnStart('turn-3', 'The plannotator plugin sent a message:\n[Plannotator Ask AI] Why step 2?')
+    turns.onStep('turn-3')
+    turns.onText('turn-3', 'Because ')
+    turns.onPromptEntered({ text: 'also fix the tests', fromUs: false, turnId: 'turn-3', originKind: 'composer' })
+    turns.onStep('turn-3')
+    turns.onText('turn-3', 'Fixed the tests.')
+
+    await until(() => seen.error !== null)
+    expect(seen.error).toBe('taken_over')
+    expect(seen.message).toBe(TAKEN_OVER_TEXT)
+    expect(seen.deltas).toBe('Because ')
+
+    // A late Stop and "Interrupt and ask now" both leave the person's turn alone.
+    controller.abort()
+    await expect(server.bridge.interrupt!()).rejects.toThrow(TAKEN_OVER_INTERRUPT_TEXT)
+    expect(host.aborted).toEqual([])
 
     live = false
     server.dispose()

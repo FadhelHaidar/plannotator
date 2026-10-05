@@ -44,7 +44,14 @@ export type SessionBridgeHost = "pi" | "opencode" | "claude-code";
 
 export type SessionBridgeAskMode = "turn" | "transient";
 
-export type SessionBridgeErrorCode = "busy" | "blocked" | "gone" | "aborted" | "failed";
+/**
+ * `taken_over`: someone else's prompt (the person typing into the session, a
+ * peer, another plugin) entered the turn that was answering our question, so
+ * the rest of that turn answers them. The host stops streaming at once, keeps
+ * what it already sent, and settles with this code; the client shows the
+ * partial answer with a note, not an error.
+ */
+export type SessionBridgeErrorCode = "busy" | "blocked" | "gone" | "aborted" | "failed" | "taken_over";
 
 export interface SessionBridgeSink {
 	delta(text: string): void;
@@ -69,6 +76,11 @@ export interface SessionBridge {
 	 * Send one question. The host reports through `sink` exactly once with
 	 * `done` or `error`. Aborting `signal` cancels OUR question only: drop it if
 	 * it was not delivered yet, stop the turn only if the running turn is ours.
+	 *
+	 * Take-over rule (every host): once a prompt we did not send enters the
+	 * turn that is answering the question, that turn is no longer ours. The
+	 * host stops streaming, settles with `error("taken_over")`, and from then
+	 * on neither an abort of this question nor `interrupt()` stops that turn.
 	 */
 	ask(req: SessionBridgeAskRequest, sink: SessionBridgeSink, signal: AbortSignal): void;
 	/**
@@ -98,7 +110,12 @@ export const SESSION_BRIDGE_ERROR = {
 	gone: "session_gone",
 	inFlight: "ask_in_flight",
 	failed: "session_ask_failed",
+	takenOver: "session_taken_over",
 } as const;
+
+/** The note shown under a partial answer whose turn someone else's prompt took over. */
+export const SESSION_ASK_TAKEN_OVER_TEXT =
+	"You typed into this session while it was answering, so the rest of the reply went to your prompt.";
 
 const HOST_LABELS: Record<SessionBridgeHost, string> = {
 	pi: "Pi",
@@ -450,7 +467,9 @@ export class SessionBridgeSession extends BaseSession {
 								? errorMessage(SESSION_BRIDGE_ERROR.blocked, message || BLOCKED_TEXT)
 								: code === "busy"
 									? errorMessage(SESSION_BRIDGE_ERROR.agentBusy, message || BUSY_TEXT)
-									: errorMessage(SESSION_BRIDGE_ERROR.failed, message || "The session could not answer.");
+									: code === "taken_over"
+										? errorMessage(SESSION_BRIDGE_ERROR.takenOver, message || SESSION_ASK_TAKEN_OVER_TEXT)
+										: errorMessage(SESSION_BRIDGE_ERROR.failed, message || "The session could not answer.");
 					settle(mapped);
 				},
 			};

@@ -84,3 +84,18 @@ export const SessionAskActions: React.FC<{
 
   return null;
 };
+
+/**
+ * A muted note under an "Ask this session" answer that stopped early because
+ * the person typed into the session while it answered (the rest of that turn
+ * went to their prompt). The partial answer above it stands. Renders nothing
+ * for any other response.
+ */
+export const SessionAskNote: React.FC<{ response: Pick<AIResponse, 'notice'> }> = ({ response }) => {
+  if (!response.notice) return null;
+  return (
+    <p className="mt-1.5 text-[11px] text-muted-foreground" data-session-ask-note="taken-over">
+      {response.notice}
+    </p>
+  );
+};

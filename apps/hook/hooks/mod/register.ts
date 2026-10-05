@@ -303,9 +303,18 @@ export function register(on: On) {
     if (instance && !instance.isDisposed && result && typeof result.text === 'string') {
       // Every prompt seen here is someone else's (the engine skips our hooks
       // for prompts our own code submitted): its turn is never a question's.
+      // A prompt typed (or delivered) while a turn ran carries that turn's id:
+      // when the turn is a question's, the rest of it answers this prompt
+      // instead (turns.ts, take-over). A background task's notification
+      // (`task-notification`) is the agent's own work and takes nothing over.
       const origin = result.origin ?? e.origin
       const fromUs = !!origin && origin.kind === 'plugin' && origin.name === PLUGIN_NAME
-      instance.onPromptEntered(result.text, fromUs)
+      instance.onPromptEntered({
+        text: result.text,
+        fromUs,
+        ...(typeof e.turnId === 'string' ? { turnId: e.turnId } : {}),
+        ...(origin && typeof origin.kind === 'string' ? { originKind: origin.kind } : {}),
+      })
     }
     return result
   })
@@ -321,6 +330,10 @@ export function register(on: On) {
   on('turn.step', async function* ($: Engine, e: any, next: Next) {
     const instance = allowed ? mod : null
     if (!instance || !instance.turns.ownsTurn(e.turnId)) return yield* next(e)
+    // A question's turn that someone else's prompt entered settles here: this
+    // request carries their prompt, so nothing it says is the question's answer.
+    instance.onTurnStep(e.turnId)
+    if (!instance.turns.ownsTurn(e.turnId)) return yield* next(e)
     const stream = next(e)
     let step = await stream.next()
     while (!step.done) {

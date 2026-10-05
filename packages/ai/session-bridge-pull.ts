@@ -112,7 +112,7 @@ export interface PullSessionBridge {
 }
 
 const STATUSES: ReadonlySet<string> = new Set(["ready", "busy", "blocked", "gone"]);
-const ERROR_CODES: ReadonlySet<string> = new Set(["busy", "blocked", "gone", "aborted", "failed"]);
+const ERROR_CODES: ReadonlySet<string> = new Set(["busy", "blocked", "gone", "aborted", "failed", "taken_over"]);
 const BRIDGE_HOSTS: ReadonlySet<string> = new Set(["pi", "opencode", "claude-code"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {

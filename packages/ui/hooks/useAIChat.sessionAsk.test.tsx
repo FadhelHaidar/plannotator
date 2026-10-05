@@ -98,6 +98,29 @@ describe.if(hasDom)('useAIChat — Ask this session', () => {
     expect(answered.status).toBeUndefined();
   });
 
+  // The failure this guards: session_taken_over handled like any error, which
+  // hides the partial answer and raises the panel's error banner.
+  test('session_taken_over keeps the streamed answer and records the note, not an error', async () => {
+    setAITransport({
+      session: async () => Response.json({ sessionId: 's1' }),
+      query: async () =>
+        sse(
+          { type: 'text_delta', delta: 'Because ' },
+          { type: 'error', code: 'session_taken_over', error: 'NOTE-SENTINEL' },
+        ),
+      abort: async () => {},
+      permission: () => {},
+    } satisfies AITransport);
+    const chat = await mount();
+    await act(async () => { await chat.current!.ask({ prompt: 'why?' }); });
+    const { response } = chat.current!.messages[0];
+    expect(response.text).toBe('Because ');
+    expect(response.notice).toBe('NOTE-SENTINEL');
+    expect(response.error).toBeUndefined();
+    expect(response.isStreaming).toBe(false);
+    expect(chat.current!.error).toBeNull();
+  });
+
   test('the fallback re-asks on a fresh session of the other provider', async () => {
     const sessions: Array<Record<string, unknown>> = [];
     const queries: Array<Record<string, unknown>> = [];

@@ -12,7 +12,7 @@ import { AIConfigBar } from './AIConfigBar';
 import { submitHint } from '@plannotator/ui/utils/platform';
 import { OverlayScrollArea } from '@plannotator/ui/components/OverlayScrollArea';
 import type { AIProviderOption } from '@plannotator/ui/utils/aiProvider';
-import { SessionAskActions, SessionAskStatus, sessionAskErrorTone, type SessionAskAction } from '@plannotator/ui/components/ai/SessionAskNotice';
+import { SessionAskActions, SessionAskNote, SessionAskStatus, sessionAskErrorTone, type SessionAskAction } from '@plannotator/ui/components/ai/SessionAskNotice';
 
 interface AITabProps {
   messages: AIChatEntry[];
@@ -419,6 +419,7 @@ const QAPair = memo<{
             <span className="ai-streaming-cursor" /> Thinking...
           </span>
         ) : null}
+        {!response.error && <SessionAskNote response={response} />}
       </div>
     </div>
   );

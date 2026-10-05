@@ -14,7 +14,8 @@
  * (it waits for idle), the turn's streamed text goes back as deltas, and
  * `turn.complete`'s answer as `done`. Busy = Claude is mid-turn: reported as
  * `busy`, so the reviewer chooses wait or interrupt; an interrupt aborts the
- * running turn with `$.turn.abort`. Plan review does not block the session
+ * running turn with `$.turn.abort`, except a question's turn the person typed
+ * into (turns.ts, take-over), which is theirs. Plan review does not block the session
  * under the mod, so the status is never `blocked`.
  */
 
@@ -27,6 +28,9 @@ export const BRIDGE_HOST = 'claude-code'
 export const BRIDGE_MODES = 'turn'
 /** Long-poll wait we ask for; below the server's 25 s cap and any fetch timeout. */
 export const BRIDGE_POLL_WAIT_MS = 15_000
+/** Why "Interrupt and ask now" refuses a turn the person took over. */
+export const TAKEN_OVER_INTERRUPT_TEXT =
+  'The session is answering a prompt you typed into it, so Plannotator will not stop it. Ask when it finishes instead.'
 
 type BridgeCommand =
   | { type: 'ask'; askId: string; text: string; mode: string }
@@ -155,6 +159,11 @@ export function createBridge(options: BridgeOptions): BridgeHandle {
     const running = turns.runningTurnId
     if (!running) {
       emit({ type: 'interrupted', interruptId, ok: true })
+      return
+    }
+    // A question's turn that the person typed into is theirs now: never stopped from Plannotator.
+    if (turns.isTakenOver(running)) {
+      emit({ type: 'interrupted', interruptId, ok: false, message: TAKEN_OVER_INTERRUPT_TEXT })
       return
     }
     try {

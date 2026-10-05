@@ -473,6 +473,12 @@ export interface AIResponse {
   errorCode?: string;
   /** "Ask this session": the question is waiting for a busy session, or interrupting it. */
   status?: 'waiting' | 'interrupting';
+  /**
+   * "Ask this session": a note shown under the answer (not an error). Set when
+   * the person typed into the session while it answered, so the answer stops
+   * where their prompt took the turn over.
+   */
+  notice?: string;
   createdAt: number;
 }
 

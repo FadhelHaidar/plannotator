@@ -52,7 +52,7 @@ import {
   scriptOnlyAnnotateFlag,
   scriptOnlyAnnotateFlagText,
 } from './tool'
-import { TurnTracker } from './turns'
+import { TurnTracker, type EnteredPrompt } from './turns'
 
 /** Persisted in `$.store` so open reviews reattach after a restart or `--resume`. */
 export interface LaunchRecord {
@@ -674,9 +674,19 @@ export class PlannotatorMod {
   }
 
   /** A prompt entered the session (prompt.submit), from register.ts. */
-  onPromptEntered(text: string, fromUs: boolean): void {
-    this.host.debug(`prompt.submit${fromUs ? ' (ours)' : ''}: ${JSON.stringify(text.slice(0, 160))}`)
-    this.turns.onPromptEntered(text, fromUs)
+  onPromptEntered(prompt: EnteredPrompt): void {
+    const { text, fromUs, turnId, originKind } = prompt
+    this.host.debug(
+      `prompt.submit${fromUs ? ' (ours)' : ''}${originKind ? ` [${originKind}]` : ''}${turnId ? ` into ${turnId}` : ''}: ${JSON.stringify(text.slice(0, 160))}`,
+    )
+    const wasOurs = !!turnId && this.turns.ownsTurn(turnId)
+    this.turns.onPromptEntered(prompt)
+    if (wasOurs && turnId && this.turns.isTakenOver(turnId)) this.host.debug(`ask turn ${turnId} taken over`)
+  }
+
+  /** A model request of a turn is about to go out (turn.step), from register.ts. */
+  onTurnStep(turnId: string): void {
+    this.turns.onStep(turnId)
   }
 
   /** Turn events, from register.ts. */

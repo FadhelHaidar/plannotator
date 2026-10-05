@@ -4,9 +4,10 @@ import {
   createOpenCodeSessionBridge,
   markPlanReviewPending,
   readAnswerAfter,
+  TAKEN_OVER_TEXT,
   type OpenCodeSessionBridge,
 } from "./opencode-session-bridge";
-import type { SessionBridgeErrorCode } from "@plannotator/ai/session-bridge";
+import { SESSION_ASK_TAKEN_OVER_TEXT, type SessionBridgeErrorCode } from "@plannotator/ai/session-bridge";
 
 const SESSION = "ses_test";
 
@@ -247,6 +248,67 @@ describe("OpenCode session bridge", () => {
     expect(host.interrupts).toBe(0);
     host.emit("session.inbox.delivered", { inboxID: host.prompts[0].id });
     await waitFor(() => host.interrupts === 1);
+  });
+
+  // The failure these guard: the person typed into the OpenCode run answering
+  // the reviewer's question, and the reply to THEIR prompt streamed into
+  // Plannotator as the answer, and a Plannotator Stop interrupted their work.
+  test("a prompt delivered into the run answering our question takes it over: streaming stops, Stop and interrupt leave the run alone", async () => {
+    const host = fakeHost();
+    const bridge = bridgeFor(host);
+    const sink = recordingSink();
+    const controller = new AbortController();
+    bridge.ask({ askId: "a1", text: "q", mode: "turn" }, sink.sink, controller.signal);
+    await waitFor(() => host.prompts.length === 1);
+    host.emit("session.execution.started");
+    host.emit("session.inbox.delivered", { inboxID: host.prompts[0].id });
+    host.emit("session.step.started", { assistantMessageID: "m1" });
+    host.emit("session.text.started", { assistantMessageID: "m1", ordinal: 0 });
+    host.emit("session.text.delta", { assistantMessageID: "m1", ordinal: 0, delta: "Because " });
+    // The person steers a prompt of their own into the running execution.
+    host.emit("session.inbox.delivered", { inboxID: "msg_person" });
+    host.emit("session.step.started", { assistantMessageID: "m2" });
+    host.emit("session.text.started", { assistantMessageID: "m2", ordinal: 0 });
+    host.emit("session.text.delta", { assistantMessageID: "m2", ordinal: 0, delta: "Fixed the tests." });
+
+    await waitFor(() => sink.error !== undefined);
+    expect(sink.error).toEqual({ code: "taken_over", message: TAKEN_OVER_TEXT });
+    expect(sink.deltas).toEqual(["Because "]);
+
+    controller.abort();
+    await expect(Promise.resolve(bridge.interrupt?.())).rejects.toThrow(/prompt you typed/);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(host.interrupts).toBe(0);
+
+    // Once that execution ends, interrupting the session works again.
+    host.emit("session.execution.succeeded");
+    host.emit("session.execution.started");
+    await bridge.interrupt?.();
+    expect(host.interrupts).toBe(1);
+  });
+
+  test("a row promoted in the same batch as our question (a command's notice) is not a take-over", async () => {
+    const host = fakeHost();
+    const bridge = bridgeFor(host);
+    const sink = recordingSink();
+    bridge.ask({ askId: "a1", text: "q", mode: "turn" }, sink.sink, new AbortController().signal);
+    await waitFor(() => host.prompts.length === 1);
+    host.emit("session.execution.started");
+    host.emit("session.inbox.delivered", { inboxID: "msg_notice" });
+    host.emit("session.inbox.delivered", { inboxID: host.prompts[0].id });
+    host.emit("session.inbox.delivered", { inboxID: "msg_notice_after" });
+    host.emit("session.step.started", { assistantMessageID: "m1" });
+    host.emit("session.text.started", { assistantMessageID: "m1", ordinal: 0 });
+    host.emit("session.text.delta", { assistantMessageID: "m1", ordinal: 0, delta: "Because of X." });
+    host.emit("session.execution.succeeded");
+    await waitFor(() => sink.done !== undefined);
+    expect(sink.done).toBe("Because of X.");
+    expect(sink.error).toBeUndefined();
+  });
+
+  test("the plugin sends the same take-over note the provider would", () => {
+    // Spelled out in the plugin so an older CLI server still shows it.
+    expect(TAKEN_OVER_TEXT).toBe(SESSION_ASK_TAKEN_OVER_TEXT);
   });
 
   test("refuses an interrupt while the session waits on a plan review", async () => {

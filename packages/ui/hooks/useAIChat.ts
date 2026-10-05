@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AIContext } from '@plannotator/core';
 import type { AIQuestion, AIResponse } from '../types';
 import { generateId } from '../utils/generateId';
+import { SESSION_ASK_ERROR_CODES } from '../utils/aiProvider';
 
 export interface AIChatEntry {
   question: AIQuestion;
@@ -421,6 +422,25 @@ export function useAIChat({
                 description: msg.description,
                 toolUseId: msg.toolUseId,
               }]);
+            } else if (msg.type === 'error' && msg.code === SESSION_ASK_ERROR_CODES.takenOver) {
+              // "Ask this session": the person typed into the session while it
+              // answered. The answer so far stands; the reason is a note under
+              // it, not an error that would replace it.
+              updateMessages(prev =>
+                prev.map(m =>
+                  m.question.id === questionId
+                    ? {
+                        ...m,
+                        response: {
+                          ...m.response,
+                          notice: typeof msg.error === 'string' ? msg.error : undefined,
+                          ...(m.response.status && { status: undefined }),
+                          isStreaming: false,
+                        },
+                      }
+                    : m
+                )
+              );
             } else if (msg.type === 'error') {
               updateMessages(prev =>
                 prev.map(m =>

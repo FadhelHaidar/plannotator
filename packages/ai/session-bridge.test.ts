@@ -5,6 +5,7 @@ import { BaseSession } from "./base-session.ts";
 import { SessionManager } from "./session-manager.ts";
 import {
   SESSION_ASK_HEADER,
+  SESSION_ASK_TAKEN_OVER_TEXT,
   SESSION_BRIDGE_ERROR,
   SESSION_BRIDGE_PROVIDER_NAME,
   SessionBridgeProvider,
@@ -226,6 +227,20 @@ describe("SessionBridgeProvider", () => {
     host.asks[0].sink.error("gone");
     await run.done;
     expect(run.messages).toEqual([expect.objectContaining({ code: SESSION_BRIDGE_ERROR.gone })]);
+  });
+
+  test("a taken-over answer keeps what streamed and ends with session_taken_over and the note", async () => {
+    const host = fakeBridge("ready");
+    const run = collect((await newSession(new SessionBridgeProvider(host.bridge))).query("q"));
+    await waitFor(() => host.asks.length === 1);
+    host.asks[0].sink.delta("Because ");
+    host.asks[0].sink.error("taken_over");
+    host.asks[0].sink.delta("their reply");
+    await run.done;
+    expect(run.messages).toEqual([
+      { type: "text_delta", delta: "Because " },
+      { type: "error", code: SESSION_BRIDGE_ERROR.takenOver, error: SESSION_ASK_TAKEN_OVER_TEXT },
+    ]);
   });
 
   test("blocked: refuses without a transient mode, asks transiently with one", async () => {

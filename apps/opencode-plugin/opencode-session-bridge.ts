@@ -35,6 +35,15 @@
  * - `session.interrupt` stops the WHOLE execution. It is only called for a
  *   turn that is ours, or when the reviewer chose "Interrupt and ask now", and
  *   never while the session waits on a plan review (status `blocked`).
+ * - Take-over: once our question is delivered and the model has started
+ *   answering it (`session.step.started`, or any answer output), another
+ *   `session.inbox.delivered` in the same session is a prompt we did not send
+ *   (the person steering, a queued row promoted mid-run) entering the run, so
+ *   the rest of the run answers it. Rows promoted in the same batch as ours
+ *   (a command's session-URL notice) are delivered before the model starts
+ *   and take nothing over. On a take-over the question settles at once with
+ *   `taken_over` (deltas already sent stand), and neither a Stop nor
+ *   "Interrupt and ask now" interrupts that execution afterwards.
  */
 
 import type {
@@ -128,7 +137,22 @@ interface ActiveTurn {
 	streamed: Set<string>;
 	needsSeparator: boolean;
 	watchdog: ReturnType<typeof setTimeout> | null;
+	/** The model began answering after our row was delivered: a later delivery is someone else's prompt. */
+	answering: boolean;
 }
+
+/**
+ * Sent with `taken_over`, so an older CLI server (it reads an unknown code as
+ * `failed`) still says why the answer stopped. Equal to
+ * `SESSION_ASK_TAKEN_OVER_TEXT` (packages/ai/session-bridge.ts; a test holds
+ * them together), spelled out to keep this module's imports type-only.
+ */
+export const TAKEN_OVER_TEXT =
+	"You typed into this session while it was answering, so the rest of the reply went to your prompt.";
+
+/** Why "Interrupt and ask now" refuses an execution the person took over. */
+const TAKEN_OVER_INTERRUPT_TEXT =
+	"The session is answering a prompt you typed into it, so Plannotator will not stop it. Ask when it finishes instead.";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object";
@@ -180,6 +204,8 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 	const controller = new AbortController();
 	let probeTimer: ReturnType<typeof setTimeout> | null = null;
 	let probing = false;
+	/** The execution that answered our question was taken over: never interrupted from Plannotator. */
+	let takenOverRun = false;
 
 	const status = (): SessionBridgeStatus => {
 		if (gone || disposed) return "gone";
@@ -326,12 +352,22 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 					clearWatchdog(turn);
 					// Stopped before it reached the model: stop it now that it is ours.
 					if (turn.cancelled) void session?.interrupt?.({ sessionID }).catch(() => {});
+				} else if (turn?.delivered && turn.answering && !turn.cancelled) {
+					// Someone else's prompt entered the run answering our question.
+					takenOverRun = true;
+					finishTurn(turn, () => turn.sink.error("taken_over", TAKEN_OVER_TEXT));
 				}
 				return;
+			case "session.step.started":
+			case "session.reasoning.started":
+				if (turn?.delivered) turn.answering = true;
+				return;
 			case "session.text.started":
+				if (turn?.delivered) turn.answering = true;
 				if (turn?.delivered && turn.answer) turn.needsSeparator = true;
 				return;
 			case "session.text.delta":
+				if (turn?.delivered) turn.answering = true;
 				if (turn?.delivered && typeof data.delta === "string") {
 					turn.streamed.add(`${String(data.assistantMessageID)}:${String(data.ordinal)}`);
 					appendText(turn, data.delta);
@@ -345,12 +381,14 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 				}
 				return;
 			case "session.tool.input.started":
+				if (turn?.delivered) turn.answering = true;
 				if (turn?.delivered && !turn.cancelled && typeof data.name === "string") turn.sink.tool?.(data.name);
 				return;
 			case "session.execution.succeeded":
 			case "session.execution.failed":
 			case "session.execution.interrupted": {
 				running = false;
+				takenOverRun = false;
 				if (!turn?.delivered) return;
 				if (turn.cancelled) {
 					finishTurn(turn, () => turn.sink.error("aborted"));
@@ -399,6 +437,7 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 			streamed: new Set(),
 			needsSeparator: false,
 			watchdog: null,
+			answering: false,
 		};
 		active = turn;
 
@@ -528,6 +567,8 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 			// The provider never asks while blocked, but a plan review may have
 			// started since: interrupting now would kill it.
 			if (isPlanReviewPending(sessionID)) throw new Error("The session is waiting on a plan review.");
+			// The person typed into the run that answered a question: it is theirs.
+			if (takenOverRun && running) throw new Error(TAKEN_OVER_INTERRUPT_TEXT);
 			const interrupt = session?.interrupt;
 			if (typeof interrupt !== "function") throw new Error("This OpenCode host cannot interrupt a session from a plugin.");
 			await interrupt({ sessionID });

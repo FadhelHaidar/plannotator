@@ -45,6 +45,8 @@ export const SESSION_ASK_ERROR_CODES = {
   agentBusy: 'agent_busy',
   blocked: 'session_blocked',
   gone: 'session_gone',
+  /** The person typed into the session while it answered: a note under the partial answer, not an error. */
+  takenOver: 'session_taken_over',
 } as const;
 
 export function isSessionBridgeProvider(provider: Pick<AIProviderOption, 'name' | 'sessionBridge'> | null | undefined): boolean {

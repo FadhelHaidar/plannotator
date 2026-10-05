@@ -5,7 +5,7 @@ import { formatRelativeTime, renderChatMarkdown } from '../../utils/aiChatFormat
 import { OverlayScrollArea } from '../OverlayScrollArea';
 import { SparklesIcon } from '../SparklesIcon';
 import { AIProviderBar } from './AIProviderBar';
-import { SessionAskActions, SessionAskStatus, sessionAskErrorTone, type SessionAskAction } from './SessionAskNotice';
+import { SessionAskActions, SessionAskNote, SessionAskStatus, sessionAskErrorTone, type SessionAskAction } from './SessionAskNotice';
 import { submitHint } from '../../utils/platform';
 
 interface DocumentAIChatPanelProps {
@@ -220,6 +220,7 @@ const DocumentQAPair = memo<{
             <span className="ai-streaming-cursor" /> Thinking...
           </span>
         ) : null}
+        {!response.error && <SessionAskNote response={response} />}
       </div>
     </div>
   );

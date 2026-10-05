@@ -78,6 +78,14 @@ describe.if(hasDom)('Ask this session notices in the document chat panel', () =>
     expect(el.querySelector('[data-session-ask-actions]')).toBeNull();
   });
 
+  // The failure this guards: a taken-over answer rendered as an error, which
+  // replaces the partial answer the reviewer already read.
+  test('taken over: the partial answer stays, with the note under it', () => {
+    const el = render({ messages: [entry({ text: 'Because of X', notice: 'NOTE-SENTINEL' })] });
+    expect(el.textContent).toContain('Because of X');
+    expect(el.querySelector('[data-session-ask-note="taken-over"]')?.textContent).toBe('NOTE-SENTINEL');
+  });
+
   test('a waiting question shows the waiting status instead of "Thinking"', () => {
     const el = render({ messages: [entry({ isStreaming: true, status: 'waiting' })] });
     expect(el.querySelector('[data-session-ask-status="waiting"]')).not.toBeNull();

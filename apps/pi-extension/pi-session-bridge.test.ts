@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpRequest } from "node:http";
 import { createPiSessionBridgeHub, PLANNOTATOR_ASK_CUSTOM_TYPE } from "./pi-session-bridge.ts";
-import { SESSION_ASK_HEADER, SessionBridgeProvider } from "./generated/ai/session-bridge.ts";
+import { SESSION_ASK_HEADER, SESSION_ASK_TAKEN_OVER_TEXT, SessionBridgeProvider } from "./generated/ai/session-bridge.ts";
 import type { AIMessage } from "./generated/ai/types.ts";
 import { startAnnotateServer } from "./server/serverAnnotate.ts";
 
@@ -63,6 +63,7 @@ function fakePi() {
 		startTurn(askId: string) {
 			idle = false;
 			emit("agent_start", { type: "agent_start" });
+			emit("turn_start", { type: "turn_start" });
 			emit("message_start", {
 				type: "message_start",
 				message: { role: "custom", customType: PLANNOTATOR_ASK_CUSTOM_TYPE, details: { askId } },
@@ -77,6 +78,11 @@ function fakePi() {
 					assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta },
 				});
 			}
+		},
+		/** The loop finishes one assistant turn (tool results in) and starts the next. */
+		nextTurn() {
+			emit("turn_end", { type: "turn_end" });
+			emit("turn_start", { type: "turn_start" });
 		},
 		/** One agent run ends; Pi may still retry it before the prompt settles. */
 		endRun(stopReason = "stop", errorMessage?: string) {
@@ -251,6 +257,94 @@ describe("Pi session bridge", () => {
 		host.startTurn("a");
 		host.emit("session_shutdown", { type: "session_shutdown", reason: "new" });
 		expect(first.calls.at(-1)?.slice(0, 2)).toEqual(["error", "gone"]);
+	});
+
+	// The failure these guard: the person typed into Pi while it answered the
+	// reviewer's question, and the reply to THEIR prompt streamed into
+	// Plannotator as the answer, and a Plannotator Stop aborted their work.
+	test("a message the person steers into our run takes it over: streaming stops, Stop and interrupt leave the run alone", () => {
+		const host = fakePi();
+		const bridge = createPiSessionBridgeHub(host.pi).createBridge(host.ctx as never, {});
+		const out = sink();
+		const controller = new AbortController();
+		bridge.ask({ askId: "ask-1", text: "Question text", mode: "turn" }, out.sink, controller.signal);
+		host.startTurn("ask-1");
+		host.assistantText("Because ");
+		// The person steers; the loop delivers it right after the next turn_start.
+		host.nextTurn();
+		host.emit("message_start", { type: "message_start", message: { role: "user", content: "also fix the tests" } });
+		host.assistantText("Fixed the tests.");
+
+		expect(out.calls).toEqual([
+			["delta", "Because "],
+			["error", "taken_over", undefined],
+		]);
+		controller.abort();
+		expect(host.aborts).toHaveLength(0);
+		expect(() => bridge.interrupt?.()).toThrow(/prompt you typed/);
+		expect(host.aborts).toHaveLength(0);
+
+		// Once that run ends, interrupting the session works again.
+		host.endTurn();
+		host.setIdle(false);
+		void bridge.interrupt?.();
+		expect(host.aborts).toHaveLength(1);
+	});
+
+	test("a triggering custom message from another extension, steered into our run, takes it over", () => {
+		const host = fakePi();
+		const bridge = createPiSessionBridgeHub(host.pi).createBridge(host.ctx as never, {});
+		const out = sink();
+		bridge.ask({ askId: "ask-1", text: "Question text", mode: "turn" }, out.sink, new AbortController().signal);
+		host.startTurn("ask-1");
+		host.assistantText("Because ");
+		host.nextTurn();
+		host.emit("message_start", { type: "message_start", message: { role: "custom", customType: "other-ext", details: {} } });
+		expect(out.calls.at(-1)).toEqual(["error", "taken_over", undefined]);
+	});
+
+	test("a display-only custom message appended at turn_end is not a take-over", () => {
+		const host = fakePi();
+		const bridge = createPiSessionBridgeHub(host.pi).createBridge(host.ctx as never, {});
+		const out = sink();
+		bridge.ask({ askId: "ask-1", text: "Question text", mode: "turn" }, out.sink, new AbortController().signal);
+		host.startTurn("ask-1");
+		host.assistantText("Because ");
+		// Pi appends a non-triggering custom message (e.g. plannotator-handoff)
+		// while handling turn_end, before the next turn_start.
+		host.emit("turn_end", { type: "turn_end" });
+		host.emit("message_start", { type: "message_start", message: { role: "custom", customType: "plannotator-handoff", details: {} } });
+		host.emit("turn_start", { type: "turn_start" });
+		host.assistantText("of X.");
+		host.endTurn();
+		expect(out.calls).toEqual([
+			["delta", "Because "],
+			["delta", "\n\nof X."],
+			["done", "Because \n\nof X."],
+		]);
+	});
+
+	test("through the provider: a take-over keeps the partial answer and ends with the note", async () => {
+		const host = fakePi();
+		const bridge = createPiSessionBridgeHub(host.pi).createBridge(host.ctx as never, {});
+		const provider = new SessionBridgeProvider(bridge, { pollIntervalMs: 5 });
+		const session = await provider.createSession({
+			context: { mode: "annotate", annotate: { content: "", filePath: "last-message" } },
+		});
+		const messages: AIMessage[] = [];
+		const done = (async () => {
+			for await (const message of session.query("What did you mean?")) messages.push(message);
+		})();
+		while (host.sent.length === 0) await new Promise((resolve) => setTimeout(resolve, 2));
+		host.startTurn(host.sent[0].message.details!.askId!);
+		host.assistantText("I meant ");
+		host.nextTurn();
+		host.emit("message_start", { type: "message_start", message: { role: "user", content: "never mind" } });
+		await done;
+		expect(messages).toEqual([
+			{ type: "text_delta", delta: "I meant " },
+			{ type: "error", code: "session_taken_over", error: SESSION_ASK_TAKEN_OVER_TEXT },
+		]);
 	});
 
 	test("interrupt stops the session's own turn", () => {

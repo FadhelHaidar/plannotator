@@ -157,6 +157,22 @@ describe("pull session bridge", () => {
     expect(run.messages.at(-1)).toMatchObject({ type: "result", success: true, result: "Because of #12." });
   });
 
+  // The failure this guards: a host's `taken_over` read as an unknown code,
+  // so the reviewer saw "the session could not answer" instead of the note.
+  test("a host's taken_over crosses the pull bridge as session_taken_over with the partial answer kept", async () => {
+    const { provider, host, startHost } = setup();
+    void startHost();
+    const session = await provider.createSession({ context: CONTEXT });
+    const run = collect(session.query("Why this change?"));
+    await waitFor(() => host.asks.length === 1);
+    host.asks[0].sink.delta("Because ");
+    host.asks[0].sink.error("taken_over", "the person typed");
+    await run.done;
+    const text = run.messages.filter((m) => m.type === "text_delta").map((m) => (m as { delta: string }).delta).join("");
+    expect(text).toBe("Because ");
+    expect(run.messages.at(-1)).toEqual({ type: "error", code: SESSION_BRIDGE_ERROR.takenOver, error: "the person typed" });
+  });
+
   test("a question asked before the host connects waits for its first poll", async () => {
     const { provider, host, startHost } = setup();
     const session = await provider.createSession({ context: CONTEXT });
