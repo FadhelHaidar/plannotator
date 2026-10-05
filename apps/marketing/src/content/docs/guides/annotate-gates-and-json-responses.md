@@ -167,6 +167,8 @@ By default, every decision exits `0`; existing plaintext, JSON, and hook integra
 
 Strict invocations that are misconfigured or cannot start exit `2` — bad flag combinations, an invalid `--result-file` destination, and every annotate startup failure (missing or unreadable path, unreachable URL, empty folder, ambiguous filename, oversized file). Those startup failures exit `1` for non-strict invocations, as they always have; under a strict flag `1` means "the reviewer did not approve", so a mistyped path must never be reported as a rejection.
 
+A strict gate takes one target, or several existing file paths to review together (`plannotator annotate spec.md plan.md tasks.md --gate --json --require-approval`): one review of all of them, in that order, where Approve covers every file. Any other set of arguments exits `2`: a list with a missing file, a URL or folder among the paths, or extra words. Extra words used to be ignored silently.
+
 A failed atomic publish also exits `2`, but that code means the result *file* was not published — the reviewer's decision was already written to stdout. Only a stdout write failure leaves no record at all.
 
 This follows the grep convention: `0` approved, `1` not approved, `2` the gate itself errored.

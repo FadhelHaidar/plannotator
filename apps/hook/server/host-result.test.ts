@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { annotateHostResult, isAllowedHostResultPath, reviewHostResult, takeHostResultPath, HOST_RESULT_FILE_ENV } from "./host-result";
 import { buildReviewOutput } from "./review-output";
+import { deliveryFor } from "../hooks/mod/delivery";
 
 describe("reviewHostResult", () => {
   test("LGTM and Close never reach the agent; feedback does, as the CLI prints it", () => {
@@ -25,8 +26,53 @@ describe("reviewHostResult", () => {
   });
 
   test("a review posted to the PR platform is marked so the host only logs it", () => {
-    const posted = { approved: false, feedback: "Pull request reviewed on GitHub: https://github.com/o/r/pull/1", annotations: [] };
-    expect(reviewHostResult(posted, buildReviewOutput(posted, "claude-code"))).toMatchObject({ noop: true, platform: true });
+    const status = "Pull request reviewed on GitHub: https://github.com/o/r/pull/1";
+    const posted = { approved: false, feedback: status, annotations: [], platform: true };
+    const record = reviewHostResult(posted, buildReviewOutput(posted, "claude-code"));
+    expect(record).toMatchObject({ decision: "annotated", noop: true, platform: true });
+    // The status line, never the request-changes suffix.
+    expect(record.message).toBe(status);
+  });
+
+  // The review editor sends only code comments in `annotations`; PR
+  // description comments, PR comment notes and VS Code editor comments ride
+  // only in `feedback`. Zero annotations must therefore never read as the
+  // platform post (that silently dropped these reviews under the mod).
+  test.each([
+    ["PR description comments", "## PR description\n\n> Adds the parser\n\nExplain why the fallback exists."],
+    ["PR comment notes", "## PR comments\n\n> @alice: looks risky\n\nAgree, split this."],
+    ["VS Code editor comments", "# Editor Annotations\n\n## src/a.ts:3\n\nRename this."],
+  ])("feedback made only of %s is delivered", (_label, feedback) => {
+    const result = { approved: false, feedback, annotations: [] };
+    const output = buildReviewOutput(result, "claude-code");
+    const record = reviewHostResult(result, output);
+    expect(record).toMatchObject({ decision: "annotated", noop: false, annotationCount: 0 });
+    expect(record.platform).toBeUndefined();
+    expect(record.message).toBe(output.message);
+    expect(record.message).toContain(feedback);
+  });
+
+  // End to end on the mod path: the record the CLI writes for such feedback
+  // reaches the mod's delivery decision as a turn, while the marked platform
+  // post still only logs with the follow-up suggestion.
+  test("the mod submits zero-annotation feedback and only logs the platform post", () => {
+    const context = { subject: "PR #1", overflowPath: "/data/x/feedback.md" };
+    const descriptionOnly = { approved: false, feedback: "## PR description\n\nExplain the fallback.", annotations: [] };
+    const delivered = deliveryFor(reviewHostResult(descriptionOnly, buildReviewOutput(descriptionOnly, "claude-code")), context);
+    expect(delivered.action).toBe("submit");
+    expect(delivered.action === "submit" && delivered.text).toContain("Explain the fallback.");
+
+    const posted = { approved: false, feedback: "Pull request reviewed on GitHub: https://github.com/o/r/pull/1", annotations: [], platform: true };
+    const logged = deliveryFor(reviewHostResult(posted, buildReviewOutput(posted, "claude-code")), context);
+    expect(logged.action).toBe("log");
+    expect(logged.action === "log" && logged.suggest).toBe("address the review comments on PR #1");
+  });
+
+  test("an empty submit with no annotations stays a no-op", () => {
+    const empty = { approved: false, feedback: "  ", annotations: [] };
+    const record = reviewHostResult(empty, buildReviewOutput(empty, "claude-code"));
+    expect(record).toMatchObject({ decision: "annotated", noop: true, annotationCount: 0 });
+    expect(record.platform).toBeUndefined();
   });
 });
 

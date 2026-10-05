@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { PlannotatorMod, STORE_LAUNCHES } from './controller'
 import { PLAN_APPROVAL_NEXT_STEP } from './delivery'
 import { CLASSIC_PLAN_REVIEW_TEXT } from './plan'
+import { PLANNOTATOR_BUNDLE_HINT_LINE, PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT } from './tool'
 import { fakeHost, type FakeHost, type RunCall } from './testing/fake-host'
 
 const SESSION = { sessionId: 'session-1', dataDir: '/data', interactive: true }
@@ -853,17 +854,86 @@ describe('the plannotator tool: list and close (contract v2)', () => {
     expect(host.submits[0]).toContain('fix line 3')
   })
 
-  test('several files and reply answer with an error and launch nothing yet', async () => {
+  test('reply answers with an error and launches nothing yet', async () => {
     const host = fakeHost()
     serveOnLaunch(host)
     const mod = new PlannotatorMod(host, SESSION)
 
-    expect('deny' in (await mod.runTool({ action: 'annotate', target: ['a.md', 'b.md'] }))).toBe(true)
     expect('deny' in (await mod.runTool({ action: 'reply', session: 'pn-ababab', comment: 'c1', text: 'done' }))).toBe(true)
     expect(launches(host)).toHaveLength(0)
 
     // A one-file list is the plain call.
     await mod.runTool({ action: 'annotate', target: ['a.md'] })
     expect(launches(host)[0]?.argv.slice(5)).toEqual(['plannotator', 'annotate', 'a.md'])
+  })
+})
+
+// Reviews of several files (bundles). The failures: a list launched as
+// something other than the CLI's bundle invocation (re-split, reordered), the
+// decision heading naming one file of several, or an older CLI's "pick one"
+// error shown to Claude as if its call were wrong.
+describe('the plannotator tool: several files', () => {
+  test('a list launches one CLI with the files in order, and the result and decision name the bundle', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+
+    const answer = await mod.runTool({ action: 'annotate', target: ['spec.md', 'ui/mock.html', 'notes.md'], gate: true })
+
+    expect('text' in answer && answer.text).toContain('Opened 3 files: spec.md, mock.html, notes.md in Plannotator')
+    const [launch] = launches(host)
+    expect(launch?.argv.slice(5)).toEqual(['plannotator', 'annotate', 'spec.md', 'ui/mock.html', 'notes.md', '--gate'])
+
+    decide(host, launch!, { surface: 'annotate', decision: 'annotated', message: 'two notes', noop: false, annotationCount: 2 })
+    await host.tick()
+    expect(host.submits[0]).toStartWith('Plannotator: 3 files: spec.md, mock.html, notes.md (pn-')
+  })
+
+  test('an older CLI refusing several paths reads as "update Plannotator", for the tool and the slash command', async () => {
+    const olderRefusal = [
+      'Ambiguous annotate arguments: 2 of them each resolve to an existing target.',
+      '  a.md -> /r/a.md',
+      '  b.md -> /r/b.md',
+      'Re-run with exactly one target: plannotator annotate <file.md | file.txt | file.html | https://... | folder/>',
+    ].join('\n')
+    const host = fakeHost()
+    host.onRun = (call) => {
+      if (isLaunch(call)) {
+        host.files.set(`${launchDirOf(call)}/stderr`, olderRefusal)
+        host.files.set(`${launchDirOf(call)}/exit`, '1')
+      }
+    }
+    const mod = new PlannotatorMod(host, SESSION)
+
+    const answer = await mod.runTool({ action: 'annotate', target: ['a.md', 'b.md'] })
+    expect('deny' in answer && answer.deny).toBe(PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT)
+    expect(await mod.runCommand('annotate', 'a.md b.md')).toBe(PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT)
+    // Prose around two paths is the user's own ambiguity, shown as the CLI said it.
+    expect(await mod.runCommand('annotate', 'compare a.md and b.md')).toContain('Ambiguous annotate arguments')
+  })
+
+  test("a current CLI's ambiguity error (a URL among the files) is shown as it is", async () => {
+    const host = fakeHost()
+    host.onRun = (call) => {
+      if (isLaunch(call)) {
+        host.files.set(
+          `${launchDirOf(call)}/stderr`,
+          `Ambiguous annotate arguments: 2 of them each resolve to an existing target.\n${PLANNOTATOR_BUNDLE_HINT_LINE}`,
+        )
+        host.files.set(`${launchDirOf(call)}/exit`, '1')
+      }
+    }
+    const mod = new PlannotatorMod(host, SESSION)
+    const answer = await mod.runTool({ action: 'annotate', target: ['a.md', 'https://example.com'] })
+    expect('deny' in answer && answer.deny).toContain(PLANNOTATOR_BUNDLE_HINT_LINE)
+  })
+
+  test('the slash command names several file paths as a bundle', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host, 5555)
+    const mod = new PlannotatorMod(host, SESSION)
+    const text = await mod.runCommand('annotate', 'spec.md notes.md')
+    expect(text).toContain('2 files: spec.md, notes.md')
+    expect(launches(host)[0]?.argv.slice(5)).toEqual(['plannotator', 'annotate', 'spec.md', 'notes.md'])
   })
 })

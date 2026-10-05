@@ -28,7 +28,6 @@ import { join } from "node:path";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import plannotator, { type PlannotatorExtensionDeps } from "./index.ts";
 import {
-	PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT,
 	PLANNOTATOR_TOOL_DESCRIPTION,
 	PLANNOTATOR_TOOL_INPUT_SCHEMA,
 	PLANNOTATOR_TOOL_NAME,
@@ -75,6 +74,8 @@ type BranchEntry = { id: string; type: string; message?: unknown };
 interface Launch {
 	kind: "annotate" | "last" | "review";
 	text?: string;
+	mode?: string;
+	bundle?: string[];
 	recent?: Array<{ messageId: string; text: string }>;
 	gate: boolean | undefined;
 	sessionBridge: unknown;
@@ -146,11 +147,11 @@ function createHarness(options: { sessionId?: string; hasUI?: boolean; branch?: 
 
 	// Real servers; only the browser launch is skipped.
 	const startAnnotation: NonNullable<PlannotatorExtensionDeps["startAnnotation"]> = async (
-		_ctx, filePath, markdown, mode, folderPath, _sourceInfo, _converted, gate, _rawHtml, _renderHtml, _convertHtml, _recent, _live, sessionBridge,
+		_ctx, filePath, markdown, mode, folderPath, _sourceInfo, _converted, gate, _rawHtml, _renderHtml, _convertHtml, _recent, _live, sessionBridge, bundleFiles,
 	) => {
-		const server = await startAnnotateServer({ markdown, filePath, mode, folderPath, gate, htmlContent: MINIMAL_HTML });
+		const server = await startAnnotateServer({ markdown, filePath, mode, folderPath, gate, bundleFiles, htmlContent: MINIMAL_HTML });
 		servers.push(server);
-		launches.push({ kind: "annotate", text: filePath, gate, sessionBridge, url: server.url });
+		launches.push({ kind: "annotate", text: filePath, mode, bundle: bundleFiles?.map((file) => file.path), gate, sessionBridge, url: server.url });
 		return { url: server.url, waitForDecision: server.waitForDecision, stop: server.stop, hostControl: server.hostControl };
 	};
 	const startLastMessageAnnotation: NonNullable<PlannotatorExtensionDeps["startLastMessageAnnotation"]> = async (
@@ -282,6 +283,45 @@ describe("plannotator tool on Pi", () => {
 		expect((await harness.call({ action: "list" })).content[0]!.text).toContain("No open Plannotator reviews");
 	});
 
+	test("a list target opens one bundle review of those files, in order; list, feedback and close cover it", async () => {
+		const harness = createHarness();
+		const spec = harness.writeFile("spec.md", "# Spec\n");
+		const notes = harness.writeFile("notes.md", "# Notes\n");
+		const result = await harness.call({ action: "annotate", target: ["spec.md", "notes.md"] });
+
+		expect(result.terminate).toBe(true);
+		const text = result.content[0]!.text;
+		const id = sessionIdIn(text)!;
+		expect(text).toContain("Opened 2 files: spec.md, notes.md in Plannotator");
+		const launch = harness.launches[0]!;
+		expect(launch.mode).toBe("annotate-bundle");
+		expect(launch.bundle).toEqual([spec, notes]);
+		expect(launch.sessionBridge).toBeDefined();
+		const plan = await (await fetch(`${launch.url}/api/plan`)).json();
+		expect(plan.bundle.map((file: { path: string }) => file.path)).toEqual([spec, notes]);
+		expect((await harness.call({ action: "list" })).content[0]!.text).toContain(`${id} · annotate · 2 files: spec.md, notes.md`);
+
+		await postJson(`${launch.url}/api/feedback`, { feedback: "Merge the two intros.", annotations: [{ id: "b1" }] });
+		await until(() => harness.sent.length > 0);
+		expect(firstLine(harness.sent[0]!.text)).toBe(`Plannotator: 2 files: spec.md, notes.md (${id}) — Feedback · 1 comment.`);
+		expect(harness.sent[0]!.text).toContain("Merge the two intros.");
+		expect(harness.sent[0]!.text).toContain(spec);
+		expect(harness.sent[0]!.text).toContain(notes);
+
+		// Closing a bundle the agent opened works like any other review.
+		const again = await harness.call({ action: "annotate", target: ["spec.md", "notes.md"] });
+		const againId = sessionIdIn(again.content[0]!.text)!;
+		expect((await harness.call({ action: "close", session: againId })).content[0]!.text).toContain(`Closed 2 files: spec.md, notes.md (${againId})`);
+	});
+
+	test("a list target never opens fewer files than named", async () => {
+		const harness = createHarness();
+		harness.writeFile("notes.md", "# Notes\n");
+		await expect(harness.call({ action: "annotate", target: ["notes.md", "missing.md"] })).rejects.toThrow("missing.md");
+		await expect(harness.call({ action: "annotate", target: ["notes.md", "."] })).rejects.toThrow("every entry must be an existing file");
+		expect(harness.launches).toHaveLength(0);
+	});
+
 	test("a gated session the tool opened delivers a bare approval", async () => {
 		const harness = createHarness();
 		harness.writeFile("spec.md", "# Spec\n");
@@ -389,14 +429,32 @@ describe("plannotator tool on Pi", () => {
 		expect(harness.sent[0]!.options).toEqual({ deliverAs: "followUp" });
 	});
 
-	test("review feedback carried only in the text (PR description or editor notes, no annotations) is still delivered", async () => {
+	test("review feedback carried only in the text (PR description or editor notes, no annotations) reaches the agent through the tool path", async () => {
 		const harness = createHarness();
-		await harness.command("plannotator-review", "");
+		const id = sessionIdIn((await harness.call({ action: "review" })).content[0]!.text)!;
 		const launch = harness.launches[0]!;
 		await postJson(`${launch.url}/api/feedback`, { approved: false, feedback: "## PR description\n\nSay why, not what.", annotations: [] });
 		await until(() => harness.sent.length > 0);
-		expect(firstLine(harness.sent[0]!.text)).toMatch(/^Plannotator: local changes \(pn-[0-9a-f]{6}\) — Changes requested\.$/);
-		expect(harness.sent[0]!.text).toContain("Say why, not what.");
+		const message = harness.sent[0]!.text;
+		expect(firstLine(message)).toBe(`Plannotator: local changes (${id}) — Changes requested.`);
+		expect(message).toContain("Say why, not what.");
+		// Real feedback gets the verification suffix even with no annotations.
+		expect(message).toContain("Treat the findings above as unverified review input.");
+	});
+
+	test("the PR-platform status post (platform: true) is delivered verbatim, labeled as posted", async () => {
+		const harness = createHarness();
+		await harness.command("plannotator-review", "");
+		const launch = harness.launches[0]!;
+		await postJson(`${launch.url}/api/feedback`, {
+			approved: false,
+			feedback: "Pull request reviewed on GitHub: https://github.com/o/r/pull/1",
+			annotations: [],
+			platform: true,
+		});
+		await until(() => harness.sent.length > 0);
+		expect(firstLine(harness.sent[0]!.text)).toMatch(/— Posted to the pull request\.$/);
+		expect(harness.sent[0]!.text).not.toContain("Treat the findings above as unverified review input.");
 	});
 
 	test("the agent closes a code review: the draft is kept and nothing is delivered", async () => {
@@ -491,10 +549,9 @@ describe("plannotator tool on Pi", () => {
 		expect(result.content[0]!.text).toContain("Opened local changes in Plannotator: http://localhost:6001");
 	});
 
-	test("refuses what it cannot open: bad calls, file lists, reply, no UI, a missing file", async () => {
+	test("refuses what it cannot open: bad calls, reply, no UI, a missing file", async () => {
 		const harness = createHarness();
 		await expect(harness.call({ action: "list", target: "x.md" })).rejects.toThrow('action "list" takes no target');
-		await expect(harness.call({ action: "annotate", target: ["a.md", "b.md"] })).rejects.toThrow(PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT);
 		await expect(harness.call({ action: "reply", session: "pn-abcdef", comment: "c1", text: "done" })).rejects.toThrow(PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT);
 		await expect(harness.call({ action: "annotate", target: "missing.md" })).rejects.toThrow("Plannotator did not open: File not found");
 		// One target is one argument: words are never split into a tolerant search.

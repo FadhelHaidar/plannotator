@@ -11,6 +11,7 @@ import type { Annotation, EditorMode, ImageAttachment } from '../types';
 import { AnnotationType } from '../types';
 import type { QuickLabel } from '../utils/quickLabels';
 import { getIdentity } from '../utils/identity';
+import { annotationOwnsHighlight } from '../utils/annotationOwnsHighlight';
 import { transformPlainText } from '../utils/inlineTransforms';
 
 // --- Exported state types ---
@@ -281,6 +282,37 @@ const paintedTextOf = (doms: readonly HTMLElement[]): string => {
     }
   }
   return painted;
+};
+
+/** The block element a painted highlight sits in, found the way an
+ *  annotation's `blockId` is found when it is created (walk up from the
+ *  parent of the first highlighted node to the nearest `data-block-id`), so an
+ *  unchanged document resolves every restore to the block it was made in. */
+const blockElementOf = (dom: Node | null | undefined): HTMLElement | null => {
+  let parent = dom?.parentElement ?? null;
+  while (parent && !parent.dataset.blockId) parent = parent.parentElement;
+  return parent;
+};
+
+/** Where `quote` starts in `text`, matching whitespace-insensitively (the
+ *  same comparison the restore verification uses: a quote that crossed a
+ *  block boundary or a soft wrap carries different whitespace than the
+ *  block's text). 0 when it is not there, as at creation. */
+const quoteOffsetIn = (text: string, quote: string): number => {
+  const exact = text.indexOf(quote);
+  if (exact !== -1) return exact;
+  const needle = compactText(quote);
+  if (!needle) return 0;
+  // Compact the text while remembering each kept character's original index.
+  const positions: number[] = [];
+  let compact = '';
+  for (let i = 0; i < text.length; i++) {
+    if (/\s/.test(text[i])) continue;
+    compact += text[i];
+    positions.push(i);
+  }
+  const at = compact.indexOf(needle);
+  return at === -1 ? 0 : positions[at];
 };
 
 /**
@@ -661,9 +693,34 @@ export interface AnnotationRestoreReport {
   /** Ids the pass considered — including ones already painted, which are
    *  anchored by definition. A host clears their unanchored marks. */
   attempted: string[];
-  /** Of those, the ones left with no highlight because the stored positions
-   *  resolved onto the wrong text AND the quote was nowhere in the document. */
+  /** Of those, the ones left with no highlight: neither the stored positions
+   *  (absent, unresolvable, or resolved onto the wrong text) nor a search for
+   *  the quote found it in the document. */
   unanchored: string[];
+  /** Annotations whose stored `blockId` no longer names where their text is,
+   *  because the document changed since they were made (a draft restored
+   *  after an edit, a plan revision). Each entry says where the text is NOW:
+   *  `blockId` is the block the highlight landed in, or `''` when the text is
+   *  gone (every unanchored id is listed here too). Annotations whose stored
+   *  block still holds their text are never listed, so an unchanged document
+   *  reports nothing here. A host that exports line numbers from `blockId`
+   *  should write these back. Optional so older reporters (the diagram
+   *  overlay) need not produce it. */
+  moved?: RestoredAnchor[];
+}
+
+/** Where a restored annotation's text sits now (see `moved`). */
+export interface RestoredAnchor {
+  id: string;
+  /** The block the highlight landed in; `''` when the text is gone. */
+  blockId: string;
+  /** Offset of the quote in that block's text (same rule as creation);
+   *  absent when the text is gone. */
+  startOffset?: number;
+  /** The stored `startMeta`/`endMeta` did not lead to the text (unresolvable,
+   *  or onto other text) and should be dropped so later restores search by
+   *  text instead. False when the stored positions themselves were verified. */
+  positionsStale: boolean;
 }
 
 /** Annotation UI state and mutation commands owned by one rendered document. */
@@ -1097,9 +1154,36 @@ export function useAnnotationHighlighter({
 
     const attempted: string[] = [];
     const unanchored: string[] = [];
+    const moved: RestoredAnchor[] = [];
+
+    // Record where a restored annotation's text sits when its stored blockId
+    // no longer names that place. Block ids are positional (`block-N`), so
+    // after the document changed the stored id can name a different block,
+    // and a line label read from it would point at the wrong line. Nothing is
+    // recorded while the stored block still holds the quote — an unchanged
+    // document, or a quote that also appears in the stored block — so the
+    // stored id (and the export built from it) stays exactly as it was.
+    const noteAnchor = (ann: Annotation, firstDom: Node | null | undefined, positionsStale: boolean) => {
+      if (!ann.blockId) return;
+      const blockEl = blockElementOf(firstDom);
+      const blockId = blockEl?.dataset.blockId;
+      if (!blockEl || !blockId || blockId === ann.blockId) return;
+      const stored = containerRef.current?.querySelector(
+        `[data-block-id="${escapeAttrValue(ann.blockId)}"]`,
+      );
+      const quote = compactText(ann.originalText);
+      if (stored && quote && compactText(stored.textContent ?? '').includes(quote)) return;
+      moved.push({ id: ann.id, blockId, startOffset: quoteOffsetIn(blockEl.textContent ?? '', ann.originalText), positionsStale });
+    };
 
     anns.forEach(ann => {
       if (ann.type === AnnotationType.GLOBAL_COMMENT) return;
+      // Diff-view comments (`diff-block-N`, drawn by the diff view) and
+      // checkbox toggles (raw-markdown quotes keyed by their block) are never
+      // text highlights. Callers filter them out; skipping them here as well
+      // keeps a stray one from being reported unanchored or moved, which would
+      // rewrite its blockId.
+      if (!annotationOwnsHighlight(ann)) return;
       // A comment on a rendered diagram part has no text anchor: the
       // diagram overlay restores it against its render and reports its own
       // verdict, so it is neither attempted nor unanchored here (the same
@@ -1128,7 +1212,8 @@ export function useAnnotationHighlighter({
       if (existingManual) return;
 
       const mathTargets = findMathElementsForAnnotation(ann);
-      if (mathTargets.length > 0) {
+      const paintedMath = mathTargets.length > 0;
+      if (paintedMath) {
         applyMathTargets(mathTargets, ann.id, ann.type);
         if (!ann.startMeta && !ann.endMeta && !ann.mathTargets?.length) {
           return;
@@ -1160,6 +1245,7 @@ export function useAnnotationHighlighter({
               } else if (ann.type === AnnotationType.COMMENT) {
                 highlighter.addClass('comment', ann.id);
               }
+              if (!paintedMath) noteAnchor(ann, restoredDoms[0] as Node, false);
               return;
             }
           }
@@ -1169,8 +1255,14 @@ export function useAnnotationHighlighter({
       const range = findTextInDOM(ann.originalText);
       if (!range) {
         if (rejectedRestoreText !== null) {
-          unanchored.push(ann.id);
           onRestoreMismatchRef.current?.(ann, rejectedRestoreText);
+        }
+        // Nothing painted it: not the stored positions (absent, unresolvable,
+        // or onto other text) and not the search. A formula the math path
+        // painted above is anchored, whatever its quote search says.
+        if (!paintedMath) {
+          unanchored.push(ann.id);
+          moved.push({ id: ann.id, blockId: '', positionsStale: true });
         }
         console.warn(`Could not find text for annotation ${ann.id}: "${ann.originalText.slice(0, 50)}..."`);
         return;
@@ -1229,6 +1321,8 @@ export function useAnnotationHighlighter({
           return;
         }
 
+        if (!paintedMath) noteAnchor(ann, textNodes[0].node, true);
+
         textNodes.reverse().forEach(({ node, start, end }) => {
           try {
             const nodeRange = document.createRange();
@@ -1259,7 +1353,9 @@ export function useAnnotationHighlighter({
       }
     });
 
-    if (attempted.length > 0) onRestoreReportRef.current?.({ attempted, unanchored });
+    if (attempted.length > 0) {
+      onRestoreReportRef.current?.({ attempted, unanchored, ...(moved.length > 0 ? { moved } : {}) });
+    }
   }, [findMathElementsForAnnotation, findTextInDOM, verifyRestoredContent]);
 
   const removeHighlight = useCallback((id: string) => {

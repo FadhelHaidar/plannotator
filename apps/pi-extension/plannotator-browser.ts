@@ -26,6 +26,7 @@ import {
 import { BROWSER_SESSION_STOPPED } from "./browser-session-error.ts";
 import type { SessionBridge } from "./generated/ai/session-bridge.ts";
 import type { HostControl } from "./generated/host-control.ts";
+import type { AnnotateBundleFile } from "./generated/annotate-bundle.ts";
 import { openBrowser, isRemoteSession } from "./server/network.ts";
 import { detectProjectName } from "./server/project.ts";
 import { parsePRUrl, checkPRAuth, fetchPR } from "./server/pr.ts";
@@ -61,7 +62,7 @@ export {
 	hasReviewBrowserHtml,
 } from "./plannotator-browser-runtime.ts";
 
-export type AnnotateMode = "annotate" | "annotate-folder" | "annotate-last" | "annotate-app";
+export type AnnotateMode = "annotate" | "annotate-folder" | "annotate-last" | "annotate-app" | "annotate-bundle";
 export interface PlanReviewDecision {
 	approved: boolean;
 	feedback?: string;
@@ -143,6 +144,8 @@ export type CodeReviewDecision = {
 	annotations?: unknown[];
 	agentSwitch?: string;
 	exit?: boolean;
+	/** The PR-platform status post (the review went to GitHub/GitLab/Bitbucket); `feedback` is only its status line. */
+	platform?: true;
 } & AgentClosedFields;
 
 const CODE_REVIEW_PROGRESS_STATUS = "plannotator-review";
@@ -843,6 +846,8 @@ export async function startMarkdownAnnotationSession(
 	liveTargetUrl?: string,
 	/** "Ask this session": the bridge to the Pi session that opened this annotation. */
 	sessionBridge?: SessionBridge,
+	/** Several files reviewed as one (mode "annotate-bundle"), in review order. */
+	bundleFiles?: AnnotateBundleFile[],
 ): Promise<BrowserDecisionSession<AnnotateDecision>> {
 	if (!ctx.hasUI) {
 		throw new Error("Plannotator annotation browser is unavailable in this session.");
@@ -888,6 +893,7 @@ export async function startMarkdownAnnotationSession(
 		mode,
 		liveApp,
 		folderPath,
+		bundleFiles,
 		recentMessages,
 		sourceInfo,
 		sourceConverted,

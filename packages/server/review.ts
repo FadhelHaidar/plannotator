@@ -311,6 +311,8 @@ export interface ReviewServerResult {
     closedBy?: "agent";
     /** With `closedBy`: the reviewer's unsent comments kept in the draft. */
     unsentAnnotations?: number;
+    /** The review was posted to the PR platform (`POST /api/pr-action`); `feedback` is only its status line. */
+    platform?: true;
   }>;
   /** Stop the server */
   stop: () => void;
@@ -1916,6 +1918,8 @@ export async function startReviewServer(
     closedBy?: "agent";
     /** With `closedBy`: the reviewer's unsent comments kept in the draft. */
     unsentAnnotations?: number;
+    /** The review was posted to the PR platform (`POST /api/pr-action`); `feedback` is only its status line. */
+    platform?: true;
   }) => void;
   const decisionPromise = new Promise<{
     approved: boolean;
@@ -1928,6 +1932,8 @@ export async function startReviewServer(
     closedBy?: "agent";
     /** With `closedBy`: the reviewer's unsent comments kept in the draft. */
     unsentAnnotations?: number;
+    /** The review was posted to the PR platform (`POST /api/pr-action`); `feedback` is only its status line. */
+    platform?: true;
   }>((resolve) => {
     resolveDecision = (result) => {
       reviewDecided = true;
@@ -3907,6 +3913,7 @@ export async function startReviewServer(
                 annotations: unknown[];
                 agentSwitch?: string;
                 draftGeneration?: number;
+                platform?: unknown;
               };
 
               // Checked after the body is read: a host close can land while
@@ -3937,6 +3944,11 @@ export async function startReviewServer(
                   ? { reviewDirectory: resolveAgentCwd() } : {}),
                 annotations: annotationsValue,
                 agentSwitch: body.agentSwitch,
+                // The platform path's status post marks itself; only a real
+                // boolean true counts, so consumers never infer it from an
+                // empty annotation list (PR description, PR comment and
+                // editor comments ride only in `feedback`).
+                ...(body.platform === true && { platform: true as const }),
               });
 
               return Response.json({ ok: true });

@@ -18,6 +18,7 @@ import {
   cliArgvFor,
   failedText,
   fileIn,
+  isSeveralFilePaths,
   launchArgv,
   launchDirOf,
   openedText,
@@ -48,7 +49,9 @@ import {
   type PendingApproval,
 } from './plan'
 import {
+  isOlderCliBundleRefusal,
   parsePlannotatorToolInput,
+  plannotatorBundleSubject,
   plannotatorSessionId,
   plannotatorToolArgs,
   plannotatorToolCloseText,
@@ -411,6 +414,11 @@ export class PlannotatorMod {
     const opened = await this.open(kind, rawArgs, subjectFor(kind, rawArgs))
     switch (opened.state) {
       case 'error':
+        // Several file paths given to a CLI that predates reviews of several
+        // files: say to update instead of showing its "pick one" error.
+        if (kind === 'annotate' && isOlderCliBundleRefusal(opened.text) && isSeveralFilePaths(wordsOf(rawArgs))) {
+          return PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT
+        }
         return opened.text
       case 'starting':
         return `Starting Plannotator for ${opened.subject}… it opens in your browser when ready, and your feedback comes back here as a message.`
@@ -442,14 +450,17 @@ export class PlannotatorMod {
       case 'last':
         break
     }
-    // Several files as one review need a CLI with bundles; none has them yet.
-    if (Array.isArray(call.target)) return { deny: PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT }
     const action = call.action
     const gate = call.gate === true
-    const subject = subjectFor(action, plannotatorToolTargets(call))
+    const targets = plannotatorToolTargets(call)
+    // A list of files is one review of all of them (a bundle), named as such.
+    const bundle = Array.isArray(call.target)
+    const subject = bundle ? plannotatorBundleSubject(targets) : subjectFor(action, targets)
     const opened = await this.open(action, plannotatorToolArgs(call), subject, gate ? { deliverApproval: true } : {})
     switch (opened.state) {
       case 'error':
+        // An older CLI answers several paths with its ambiguity error.
+        if (bundle && isOlderCliBundleRefusal(opened.text)) return { deny: PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT }
         return { deny: opened.text }
       case 'starting':
         return { text: plannotatorToolOpenedText(opened.subject, undefined, gate, opened.sessionId) }

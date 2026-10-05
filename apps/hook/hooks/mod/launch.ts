@@ -20,6 +20,7 @@
 
 import type { SessionKind } from './delivery'
 import { splitShellWords } from './shell-words'
+import { looksLikeFilePath, plannotatorBundleSubject } from './tool'
 
 /** The wrapper. `$1` is the launch directory; the CLI argv follows. */
 export const LAUNCH_SCRIPT = [
@@ -238,6 +239,16 @@ function baseName(path: string): string {
   return trimmed.slice(trimmed.lastIndexOf('/') + 1) || trimmed
 }
 
+/**
+ * Whether annotate's words (flags ignored) are several file paths, i.e. a
+ * review of several files (the CLI checks they exist; this only reads their
+ * shape, for naming the session and for reading an older CLI's refusal).
+ */
+export function isSeveralFilePaths(words: readonly string[]): boolean {
+  const targets = [...new Set(words.filter((word) => !word.startsWith('-')))]
+  return targets.length > 1 && targets.every(looksLikeFilePath)
+}
+
 /** How the status line, the command output and the plugin turn name a session. */
 export function subjectFor(kind: SessionKind, args: string | readonly string[], version?: number): string {
   const words = wordsOf(args).filter((word) => !word.startsWith('-'))
@@ -255,6 +266,8 @@ export function subjectFor(kind: SessionKind, args: string | readonly string[], 
       return directory ? `changes in ${baseName(directory)}` : 'local changes'
     }
     case 'annotate': {
+      // Several file paths open as one review: name it as a bundle.
+      if (isSeveralFilePaths(words)) return plannotatorBundleSubject([...new Set(words)])
       const target = words.find((word) => /^https?:\/\//i.test(word) || /[./]/.test(word)) ?? words[0]
       if (!target) return 'document'
       if (/^https?:\/\//i.test(target)) {

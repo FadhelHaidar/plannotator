@@ -117,6 +117,8 @@ interface SubmittedBody {
   body?: string;
   approved?: boolean;
   feedback?: string;
+  /** /api/feedback only: set by the platform path's status post, never by an agent-path decision. */
+  platform?: unknown;
   annotations?: Array<{
     id?: string;
     type?: string;
@@ -390,6 +392,9 @@ describe.if(hasDom)("review decision control (agent mode)", () => {
     expect(body.approved).toBe(false);
     expect((body.annotations ?? []).some((a) => a.id === "ext-1")).toBe(true);
     expect(body.feedback).toContain("still drops null");
+    // Agent-path feedback is never marked as the platform status post: a host
+    // that saw the flag would log it instead of delivering it.
+    expect("platform" in body).toBe(false);
   });
 
   test("Request changes… delivers the note as a scope:'general' sentinel annotation and in the export", async () => {
@@ -825,6 +830,32 @@ describe.if(hasDom)("review decision control (platform mode)", () => {
     expect(posted[0]!.action).toBe("request_changes");
     // GitHub refuses an empty REQUEST_CHANGES body; inline-only gets the placeholder.
     expect(posted[0]!.body?.trim()).toBeTruthy();
+  });
+
+  // The status post that follows a platform submission is the ONLY
+  // /api/feedback body that may carry `platform: true`. Hosts used to infer it
+  // from an empty annotations array, which silently dropped agent-path
+  // feedback made only of PR description / PR comment / editor comments.
+  test("the status post after a platform submission marks itself platform: true", async () => {
+    seedPlatformSession();
+    seededExternalAnnotations = [EXTERNAL_FINDING];
+    await mountReview();
+    await settle();
+    await settle();
+
+    await act(async () => primaryButton()!.click());
+    await settle();
+    const confirm = dialogConfirm("Post Comments");
+    if (!confirm) throw new Error("Post Comments confirm did not render");
+    await act(async () => confirm.click());
+    await settle();
+    await settle();
+
+    expect(submissions.filter((s) => s.endpoint === "pr-action")).toHaveLength(1);
+    const status = submissions.filter((s) => s.endpoint === "feedback");
+    expect(status).toHaveLength(1);
+    expect(status[0]!.platform).toBe(true);
+    expect(status[0]!.annotations).toEqual([]);
   });
 
   test("empty-state Request changes… preselects Request changes and posts it", async () => {

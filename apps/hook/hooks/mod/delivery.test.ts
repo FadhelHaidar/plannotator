@@ -45,6 +45,35 @@ describe('deliveryFor', () => {
     expect(delivery.action === 'log' && delivery.suggest).toBe('address the review comments on PR #412')
   })
 
+  // Every status line the review editor posts after a platform submission
+  // (`statusMessage` in packages/review-editor/App.tsx), built the same way.
+  test('every editor status line still logs as the platform post', () => {
+    const lines = [
+      ...['Pull request', 'Merge request'].flatMap((kind) =>
+        ['approved', 'reviewed'].map((verb) => `${kind} ${verb} on GitLab: https://x/-/merge_requests/9`),
+      ),
+      'Changes requested on GitHub: https://x/pull/412',
+      'Pull request reviewed on Bitbucket',
+    ]
+    for (const message of lines) {
+      const delivery = deliveryFor(record({ surface: 'review', noop: true, platform: true, message }), CONTEXT)
+      expect(delivery.action).toBe('log')
+    }
+  })
+
+  // Old-CLI guard: 0.28.0 to 0.28.3 marked feedback with zero code annotations
+  // (PR description / PR comment / editor comments only) as the platform post.
+  test('an old CLI record that marked description-only feedback as the platform post is delivered', () => {
+    const feedback = '## PR description\n\n> Adds the parser\n\nExplain why the fallback exists.'
+    const delivery = deliveryFor(
+      record({ surface: 'review', decision: 'annotated', noop: true, platform: true, annotationCount: 0, message: feedback }),
+      { ...CONTEXT, subject: 'PR #412' },
+    )
+    expect(delivery.action).toBe('submit')
+    expect(delivery.action === 'submit' && delivery.text).toContain('Explain why the fallback exists.')
+    expect(delivery.action === 'submit' && delivery.text).toContain('Changes requested')
+  })
+
   test('a plan approval asks for the ExitPlanMode call that completes it', () => {
     const delivery = deliveryFor(record({ surface: 'plan', decision: 'approved', message: 'Plan approved.' }), { ...CONTEXT, subject: 'Plan v2' })
     expect(delivery.action === 'submit' && delivery.text.endsWith(PLAN_APPROVAL_NEXT_STEP)).toBe(true)

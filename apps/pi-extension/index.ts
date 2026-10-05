@@ -80,15 +80,17 @@ import {
 import { getServerPorts, isRemoteSession, isUrlHostOverridden } from "./server/network.ts";
 import { isBrowserSessionStoppedError } from "./browser-session-error.ts";
 import { classifyAnnotateOutcome } from "./annotate-outcome.ts";
+import { classifyReviewOutcome } from "./review-outcome.ts";
 import { createPiSessionBridgeHub } from "./pi-session-bridge.ts";
 import type { BrowserDecisionSession, PlanReviewBrowserSession, PlanReviewDecision } from "./plannotator-browser.ts";
+import type { AnnotateBundleFile } from "./generated/annotate-bundle.ts";
 import {
-	PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT,
 	PLANNOTATOR_TOOL_DESCRIPTION,
 	PLANNOTATOR_TOOL_INPUT_SCHEMA,
 	PLANNOTATOR_TOOL_NAME,
 	PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT,
 	parsePlannotatorToolInput,
+	plannotatorBundleSubject,
 	plannotatorDecisionHeading,
 	plannotatorToolArgs,
 	plannotatorToolOpenedText,
@@ -124,9 +126,10 @@ function loadPlannotatorPrompts(): Promise<PlannotatorPromptsModule> {
 }
 
 async function loadAnnotateCommandModules() {
-	const [annotateArgs, annotateTarget, atReference, resolveFile, referenceCommon] = await Promise.all([
+	const [annotateArgs, annotateTarget, annotateBundle, atReference, resolveFile, referenceCommon] = await Promise.all([
 		import("./generated/annotate-args.ts"),
 		import("./generated/annotate-target.ts"),
+		import("./generated/annotate-bundle.ts"),
 		import("./generated/at-reference.ts"),
 		import("./generated/resolve-file.ts"),
 		import("./generated/reference-common.ts"),
@@ -136,7 +139,13 @@ async function loadAnnotateCommandModules() {
 		annotateInputNamesExistingTarget: annotateTarget.annotateInputNamesExistingTarget,
 		buildAmbiguousAnnotateArgsMessage: annotateTarget.buildAmbiguousAnnotateArgsMessage,
 		buildUnresolvedAnnotateArgsMessage: annotateTarget.buildUnresolvedAnnotateArgsMessage,
+		buildMissingAnnotateFilesMessage: annotateTarget.buildMissingAnnotateFilesMessage,
 		probeAnnotateToken: annotateTarget.probeAnnotateToken,
+		probeAnnotateBundlePath: annotateTarget.probeAnnotateBundlePath,
+		annotatePathExists: annotateTarget.annotatePathExists,
+		resolveAnnotateBundleFiles: annotateTarget.resolveAnnotateBundleFiles,
+		annotateBundleRoot: annotateBundle.annotateBundleRoot,
+		annotateBundleTargetText: annotateBundle.annotateBundleTargetText,
 		selectAnnotateTokenTarget: annotateTarget.selectAnnotateTokenTarget,
 		resolveAtReference: atReference.resolveAtReference,
 		hasMarkdownFiles: resolveFile.hasMarkdownFiles,
@@ -943,44 +952,44 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			};
 			const review = trackReview(ctx, origin, "review", { subject }, session, errors, async (result, tracked) => {
 				if (result.feedback) result.feedback = withReviewDirectory(result.feedback, result.reviewDirectory);
-				if (result.exit) {
+				const outcome = classifyReviewOutcome(result);
+				if (outcome.kind === "closed") {
 					safeNotify(ctx, "Code review session closed.", "info", origin);
 					return;
 				}
-				if (result.approved) {
+				if (outcome.kind === "approved") {
 					// PR5 delivery (spec §6.4, consumer #4): bare approvals send
 					// the approved prompt alone; approvals carrying reviewer notes
 					// send the approved-with-notes framing (non-blocking guidance).
 					const { composeReviewApprovedMessage } = await loadPlannotatorPrompts();
-					const outcome = result.feedback ? `Approved with notes${commentCountSuffix(result.annotations)}` : "Approved";
+					const label = result.feedback ? `Approved with notes${commentCountSuffix(result.annotations)}` : "Approved";
 					sendUserMessageWithCurrentSessionFallback(
 						pi,
-						withDecisionHeading(tracked, outcome, composeReviewApprovedMessage("pi", result.feedback, loadConfig())),
+						withDecisionHeading(tracked, label, composeReviewApprovedMessage("pi", result.feedback, loadConfig())),
 						{ deliverAs: "followUp" },
 						errors.send,
 						origin,
 					);
 					return;
 				}
-				if (!result.feedback) {
+				if (outcome.kind === "no-feedback") {
 					safeNotify(ctx, "Code review closed (no feedback).", "info", origin);
 					return;
 				}
-				// Append the verification-only suffix when the reviewer sent
-				// annotations to act on (PR mode included). Platform PR actions
-				// (approve/comment posted to the host) come back with an empty
-				// annotation set and a status message — don't tell the agent to
-				// "address" a platform action. Feedback with zero annotations is
-				// still delivered: PR description and PR comment notes and editor
-				// comments ride only in the feedback text.
-				let reviewFeedback = result.feedback;
-				if ((result.annotations?.length ?? 0) > 0) {
+				// The verification-only suffix goes on everything the reviewer
+				// sent; only the platform status post, which the review server
+				// marks, goes through verbatim (see classifyReviewOutcome).
+				let reviewFeedback = result.feedback ?? "";
+				if (outcome.appendDeniedSuffix) {
 					const { getReviewDeniedSuffix } = await loadPlannotatorPrompts();
 					reviewFeedback += getReviewDeniedSuffix("pi", loadConfig());
 				}
+				const label = result.platform === true
+					? "Posted to the pull request"
+					: `Changes requested${commentCountSuffix(result.annotations)}`;
 				sendUserMessageWithCurrentSessionFallback(
 					pi,
-					withDecisionHeading(tracked, `Changes requested${commentCountSuffix(result.annotations)}`, reviewFeedback),
+					withDecisionHeading(tracked, label, reviewFeedback),
 					{ deliverAs: "followUp" },
 					errors.send,
 					origin,
@@ -1002,6 +1011,11 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		noJina: boolean;
 		app: boolean;
 		static: boolean;
+		/**
+		 * The tool's list target: several files as ONE review (a bundle), in
+		 * this order. Every entry must be an existing file named by its path.
+		 */
+		targets?: string[];
 	}
 
 	async function launchAnnotate(ctx: ExtensionContext, request: AnnotateRequest, options: LaunchOptions = {}): Promise<LaunchResult> {
@@ -1012,6 +1026,12 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			buildAmbiguousAnnotateArgsMessage,
 			buildUnresolvedAnnotateArgsMessage,
 			probeAnnotateToken,
+			buildMissingAnnotateFilesMessage,
+			probeAnnotateBundlePath,
+			annotatePathExists,
+			resolveAnnotateBundleFiles,
+			annotateBundleRoot,
+			annotateBundleTargetText,
 			selectAnnotateTokenTarget,
 			resolveAtReference,
 			resolveUserPath,
@@ -1021,6 +1041,11 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			MAX_ANNOTATABLE_FILE_BYTES,
 		} = await loadAnnotateCommandModules();
 		let { filePath, rawFilePath } = request;
+		const probeToken = (token: string) => probeAnnotateToken(token, ctx.cwd, { bareDirectories: false });
+		const bundleProbes = {
+			bundlePath: (token: string) => probeAnnotateBundlePath(token, ctx.cwd),
+			pathExists: (token: string) => annotatePathExists(token, ctx.cwd),
+		};
 		const { gate, renderHtml: renderHtmlFlag, renderMarkdown: renderMarkdownFlag, noJina, app: appFlag, static: staticFlag } = request;
 		// Same flag-conflict-first ordering as the Bun CLI.
 		if (appFlag && staticFlag) {
@@ -1037,15 +1062,41 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		// only count in the sole-arg pre-pass, and unrecognized
 		// dash-prefixed tokens disable tolerance so a typo'd flag errors
 		// the way it always did.
-		if (options.tolerant !== false && !annotateInputNamesExistingTarget(rawFilePath, ctx.cwd)) {
-			const selection = selectAnnotateTokenTarget(rawFilePath, (token: string) =>
-				probeAnnotateToken(token, ctx.cwd, { bareDirectories: false }),
-			);
-			if (selection.kind === "single") {
+		// Several existing file paths (every word one) open as one review,
+		// in the typed order: the shared bundle rule, same as the CLI.
+		let bundleFiles: AnnotateBundleFile[] | undefined;
+		const openBundle = (paths: string[]): string | null => {
+			const checked = resolveAnnotateBundleFiles(paths, { convertHtml: renderMarkdownFlag });
+			if (!checked.ok) return checked.message;
+			bundleFiles = checked.files;
+			return null;
+		};
+		if (request.targets) {
+			// The tool's list: the same shared selection, but only a bundle may
+			// open from it (never fewer files than the agent named).
+			const selection = selectAnnotateTokenTarget(request.targets, probeToken, bundleProbes);
+			if (selection.kind === "missing") return { ok: false, error: buildMissingAnnotateFilesMessage(selection.missing) };
+			if (selection.kind !== "bundle") {
+				return {
+					ok: false,
+					error: `A list target opens several files as one review, so every entry must be an existing file named by its path (no folders, URLs or bare names): ${request.targets.join(", ")}`,
+				};
+			}
+			const problem = openBundle(selection.files.map((file) => file.value));
+			if (problem) return { ok: false, error: problem };
+		} else if (options.tolerant !== false && !annotateInputNamesExistingTarget(rawFilePath, ctx.cwd)) {
+			const selection = selectAnnotateTokenTarget(rawFilePath, probeToken, bundleProbes);
+			if (selection.kind === "missing") {
+				// A list of files with a typo: never review fewer than named.
+				return { ok: false, error: buildMissingAnnotateFilesMessage(selection.missing) };
+			} else if (selection.kind === "bundle") {
+				const problem = openBundle(selection.files.map((file) => file.value));
+				if (problem) return { ok: false, error: problem };
+			} else if (selection.kind === "single") {
 				filePath = selection.candidate.value;
 				rawFilePath = selection.candidate.value;
 			} else if (selection.kind === "multiple") {
-				return { ok: false, error: buildAmbiguousAnnotateArgsMessage(selection.candidates) };
+				return { ok: false, error: buildAmbiguousAnnotateArgsMessage(selection.candidates, { bundleHint: true }) };
 			} else if (selection.kind === "none" && selection.words.length > 1) {
 				// Content flags only; --gate is transport for this
 				// invocation, not a property of the target.
@@ -1068,14 +1119,14 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		let rawHtml: string | undefined;
 		let absolutePath: string;
 		let folderPath: string | undefined;
-		let mode: "annotate" | "annotate-folder" | "annotate-app" | undefined;
+		let mode: "annotate" | "annotate-folder" | "annotate-app" | "annotate-bundle" | undefined;
 		let sourceInfo: string | undefined;
 		let sourceConverted = false;
 		let isFolder = false;
 		let liveTargetUrl: string | undefined;
 
 		// --- URL annotation ---
-		const isUrl = /^https?:\/\//i.test(filePath);
+		const isUrl = !bundleFiles && /^https?:\/\//i.test(filePath);
 
 		// --app is contracted to fail loudly whenever it cannot apply; a
 		// file or folder target silently swallowing it would hide the
@@ -1085,7 +1136,14 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			return { ok: false, error: LIVE_APP_REQUIRES_URL_MESSAGE };
 		}
 
-		if (isUrl) {
+		if (bundleFiles) {
+			// The deepest directory holding every file stands in for the
+			// session's path; the files ride the server's `bundleFiles`.
+			markdown = "";
+			absolutePath = annotateBundleRoot(bundleFiles.map((file) => file.path));
+			mode = "annotate-bundle";
+			ctx.ui.notify(`Opening annotation UI for ${bundleFiles.length} files...`, "info");
+		} else if (isUrl) {
 			// --- Live app detection (shared probe: same 3s timeout, same
 			// "< 500 + HTML + same loopback origin" gate as the Bun CLI) ---
 			const {
@@ -1219,13 +1277,16 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				undefined,
 				liveTargetUrl,
 				sessionBridgeFor(ctx, origin),
+				bundleFiles,
 			);
 			ctx.ui.notify(sessionOpenedMessage("Annotation opened", session.url), "info");
 			const errors = {
 				send: "Plannotator annotation feedback could not be sent",
 				session: "Plannotator annotation session failed",
 			};
-			const review = trackReview(ctx, origin, "annotate", { subject: annotateSubject(absolutePath) }, session, errors, async (result, tracked) => {
+			const bundlePaths = bundleFiles?.map((file) => file.path);
+			const subject = bundlePaths ? plannotatorBundleSubject(bundlePaths) : annotateSubject(absolutePath);
+			const review = trackReview(ctx, origin, "annotate", { subject }, session, errors, async (result, tracked) => {
 				const outcome = classifyAnnotateOutcome(result);
 				if (outcome.notification === "closed") {
 					safeNotify(ctx, "Annotation session closed.", "info", origin);
@@ -1253,15 +1314,18 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 					getAnnotateApprovedWithNotesPrompt,
 					getAnnotateFileFeedbackPrompt,
 				} = await loadPlannotatorPrompts();
-				const context = `${isFolder ? "Folder" : "File"}: ${absolutePath}`;
+				// A bundle names every file of the review, in order.
+				const fileHeader = bundlePaths ? "Files" : isFolder ? "Folder" : "File";
+				const targetText = bundlePaths ? annotateBundleTargetText(bundlePaths) : absolutePath;
+				const context = `${fileHeader}: ${targetText}`;
 				const prompt = outcome.promptKind === "approved-with-notes"
 					? getAnnotateApprovedWithNotesPrompt("pi", loadConfig(), {
 							context,
 							feedback: outcome.feedback,
 						})
 					: getAnnotateFileFeedbackPrompt("pi", loadConfig(), {
-							fileHeader: isFolder ? "Folder" : "File",
-							filePath: absolutePath,
+							fileHeader,
+							filePath: targetText,
 							feedback: outcome.feedback,
 						});
 				const label = `${outcome.promptKind === "approved-with-notes" ? "Approved with notes" : "Feedback"}${commentCountSuffix(result.annotations)}`;
@@ -1390,7 +1454,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	});
 
 	pi.registerCommand("plannotator-annotate", {
-		description: "Open markdown file or folder in annotation UI",
+		description: "Open a file, several files, a URL or a folder in the annotation UI",
 		handler: async (args, ctx) => {
 			const { parseAnnotateArgs } = await import("./generated/annotate-args.ts");
 			// Split known annotate flags from the path. --json is silently
@@ -1470,8 +1534,6 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			case "last":
 				break;
 		}
-		// Several files as one review need the bundle mode; it has not landed yet.
-		if (Array.isArray(call.target)) throw new Error(PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT);
 		if (!ctx.hasUI) {
 			throw new Error(
 				"Plannotator did not open: this Pi session has no interactive UI (print or JSON mode), so nothing could deliver the reviewer's decision later. Ask the user to run it from an interactive Pi session.",
@@ -1495,11 +1557,14 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		} else if (call.action === "last") {
 			launched = await launchLastMessage(ctx, false, { skipToolCallId: toolCallId });
 		} else {
-			const target = call.target as string;
+			// A list of files is ONE review of all of them (a bundle), in order.
+			const targets = Array.isArray(call.target) ? call.target : undefined;
+			const target = targets ? targets[0]! : (call.target as string);
 			const { stripAtPrefix } = await import("./generated/at-reference.ts");
 			launched = await launchAnnotate(
 				ctx,
 				{
+					...(targets ? { targets } : {}),
 					filePath: stripAtPrefix(target),
 					rawFilePath: target,
 					gate,

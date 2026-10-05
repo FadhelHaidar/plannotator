@@ -95,6 +95,33 @@ function byteLength(text: string): number {
 }
 
 /**
+ * The status lines the review editor posts after a review goes to the PR
+ * platform (`statusMessage` in packages/review-editor/App.tsx; delivery.test.ts
+ * builds them the same way): "Pull request|Merge request approved|reviewed on
+ * <platform>…" and "Changes requested on <platform>…".
+ */
+const PLATFORM_STATUS_LINE = /^(?:(?:Pull request|Merge request) (?:approved|reviewed) on |Changes requested on )/
+
+export function isPlatformStatusLine(message: string): boolean {
+  return PLATFORM_STATUS_LINE.test(message.trim())
+}
+
+/**
+ * OLD-CLI GUARD (0.28.0 to 0.28.3). Those CLIs read any review with zero code
+ * annotations as the PR-platform status post and wrote `platform: true,
+ * noop: true`, so feedback made only of PR description, PR comment or editor
+ * comments (which ride only in the feedback text) reached Claude as nothing.
+ * The mod updates from main independently of the binary, so it still meets
+ * those records. A `platform` record whose message is not one of the editor's
+ * status lines is that misread feedback: deliver it. A CLI with the fix sets
+ * `platform` only on the real status post, which always matches, so it never
+ * takes this path.
+ */
+function misreadAsPlatformPost(record: HostResultRecord): boolean {
+  return record.surface === 'review' && record.platform === true && record.message.trim() !== '' && !isPlatformStatusLine(record.message)
+}
+
+/**
  * Decide the delivery. Done / LGTM / Close never start a turn (a log line
  * instead); a review posted straight to a PR platform logs and suggests the
  * follow-up; everything else is submitted, prefixed with one line naming the
@@ -110,7 +137,8 @@ export function deliveryFor(record: HostResultRecord, context: DeliveryContext):
     return { action: 'log', text: `Claude closed ${subject}.${saved} Nothing was sent to Claude.` }
   }
 
-  if (record.surface === 'review' && record.platform) {
+  const platformPost = record.surface === 'review' && record.platform === true && isPlatformStatusLine(record.message)
+  if (platformPost) {
     const posted = record.message.trim() || 'review posted'
     return {
       action: 'log',
@@ -122,7 +150,7 @@ export function deliveryFor(record: HostResultRecord, context: DeliveryContext):
   // A gated session Claude opened itself (the `plannotator` tool): Claude was
   // told to wait for the sign-off, so a bare approval still starts a turn.
   const approvalAwaited = context.deliverApproval === true && record.decision === 'approved'
-  if (record.noop && !approvalAwaited) {
+  if (record.noop && !approvalAwaited && !misreadAsPlatformPost(record)) {
     const what = record.decision === 'approved' ? 'approved with no notes' : 'closed with no annotations'
     return { action: 'log', text: `${subject} ${what}. Nothing was sent to Claude.` }
   }
@@ -175,6 +203,8 @@ export const LEGACY_ANNOTATE_NO_FEEDBACK_TEXTS: readonly string[] = [
  * review approval (the default approved prompt) is an LGTM, as the newer CLI
  * reports it, rather than "Changes requested". A user-customized approved
  * prompt cannot be told apart from feedback and is delivered as feedback.
+ * Stdout does not say whether a review was the PR-platform status post, so
+ * that line also arrives as feedback; nothing here infers it from the text.
  */
 export function legacyResult(kind: SessionKind, printed: string): HostResultRecord {
   const surface = kind === 'review' ? 'review' : kind === 'last' ? 'annotate-last' : 'annotate'
