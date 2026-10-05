@@ -778,9 +778,24 @@ const commentHeadingLine = (ann: any): string => {
   if (context && typeof context.tag === 'string' && isElementPlaceholderQuote(ann.originalText)) {
     const tag = safeInline(context.tag, 32);
     const name = context.name ? safeInline(context.name, 120) : '';
-    return `Feedback on the <${tag}> element${name ? ` — "${name}"` : ''}`;
+    const file = elementSourceFileName(context);
+    return `Feedback on the <${tag}> element${name ? ` — "${name}"` : ''}${file && file !== name ? ` (${file})` : ''}`;
   }
   return `Feedback on: "${ann.originalText}"`;
+};
+
+/** The file a media element's (already scrubbed) `src` attribute names, so two nameless images read differently in a heading:
+ *  `team.jpg` for `https://cdn.test/img/team.jpg?…`, `data:image/png` for an
+ *  inline image. Empty when the context carries no source. */
+const elementSourceFileName = (context: any): string => {
+  const attrs = Array.isArray(context?.attrs) ? context.attrs : [];
+  const pair = attrs.find((p: unknown) => Array.isArray(p) && p[0] === 'src' && typeof p[1] === 'string');
+  if (!pair) return '';
+  const value: string = pair[1].trim();
+  if (/^data:/i.test(value)) return safeInline(`data:${value.slice(5).split(/[;,]/)[0] || 'unknown'}`, 60);
+  const path = value.replace(/\?…$/, '').replace(/\/+$/, '');
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  return safeInline(name || path, 60);
 };
 
 export interface ElementContextExportOptions {
@@ -880,6 +895,39 @@ const additionalTargetsExportBlock = (ann: any): string => {
     block += `- ${label}"${clipped}"${locators.length ? ` — ${locators.join(' · ')}` : ''}\n`;
   });
   return block;
+};
+
+/** One pinpointed element as the Ask AI composer holds it (a draft target). */
+export interface AskAIElementTarget {
+  text?: string;
+  anchor?: { selector?: string } | null;
+  context?: unknown;
+}
+
+/**
+ * The element identity behind an Ask AI question asked from a raw-HTML or
+ * live-app pinpoint: the same identity lines the feedback export prints
+ * (`elementContextExportBlock`), without the fenced outline (the costly part
+ * of a model turn). One entry per pinpointed element, numbered when the
+ * question covers several. Empty when no target carries element context, so
+ * a plain text selection asks exactly what it asked before.
+ */
+export const elementIdentityForAskAI = (targets: readonly AskAIElementTarget[] | null | undefined): string => {
+  if (!Array.isArray(targets)) return '';
+  const blocks = targets
+    .map((target) => ({
+      text: typeof target?.text === 'string' ? safeInline(target.text, 200) : '',
+      lines: elementContextExportBlock(
+        { elementContext: target?.context, htmlAnchor: target?.anchor },
+        { includeOutline: false, includeRoute: true },
+      ).trim(),
+    }))
+    .filter((block) => block.lines);
+  if (blocks.length === 0) return '';
+  if (blocks.length === 1) return blocks[0].lines;
+  return blocks
+    .map((block, i) => `Element ${i + 1}${block.text ? `: "${block.text}"` : ''}\n${block.lines}`)
+    .join('\n\n');
 };
 
 /**

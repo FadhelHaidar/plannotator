@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { buildReviewContextPreamble } from "./aiPrompt.ts";
 import { buildDefaultPrompt } from "../hooks/useAIChat.ts";
+import { elementIdentityForAskAI } from "./parser";
 
 describe("buildReviewContextPreamble", () => {
   const command =
@@ -69,5 +70,57 @@ describe("buildDefaultPrompt with contextPreamble", () => {
   test("no preamble → unchanged behavior", () => {
     expect(buildDefaultPrompt({ prompt: "hi" })).toBe("hi");
     expect(buildDefaultPrompt({ prompt: "hi", contextPreamble: "   " })).toBe("hi");
+  });
+});
+
+// Failure to catch: an Ask AI question asked from an image pinpoint reaching
+// the model (SDK provider or "Ask this session", which both send this
+// prompt) as a bare "[element: Image]" with nothing that says WHICH image.
+describe("buildDefaultPrompt — pinpointed element identity", () => {
+  const imageTarget = {
+    text: '[element: Image "Team photo" (team.jpg)]',
+    anchor: { selector: 'img[alt="Team photo"]' },
+    context: {
+      tag: "img",
+      path: "body > main > div.gallery > img:nth-of-type(2)",
+      role: "img",
+      name: "Team photo",
+      attrs: [["src", "https://cdn.test/img/team.jpg?…"], ["alt", "Team photo"]],
+      outline: '<img src="https://cdn.test/img/team.jpg?…" alt="Team photo">',
+    },
+  };
+
+  test("the question carries the element's selector, path and src, without the outline", () => {
+    const detail = elementIdentityForAskAI([imageTarget]);
+    const out = buildDefaultPrompt({
+      prompt: "which photo is this?",
+      scope: { kind: "selection", label: "Selected HTML", text: imageTarget.text, detail },
+    });
+    expect(out).toContain('img[alt="Team photo"]');
+    expect(out).toContain("body > main > div.gallery > img:nth-of-type(2)");
+    expect(out).toContain("team.jpg");
+    expect(out).toContain('**name** "Team photo"');
+    expect(out).not.toContain("````html");
+    expect(out.indexOf("team.jpg")).toBeLessThan(out.indexOf("which photo is this?"));
+  });
+
+  test("several pinpointed elements are numbered so each stays distinguishable", () => {
+    const second = {
+      text: "[element: Image (logo.svg)]",
+      anchor: { selector: "#logo" },
+      context: { tag: "img", attrs: [["src", "/logo.svg"]] },
+    };
+    const detail = elementIdentityForAskAI([imageTarget, second]);
+    expect(detail).toContain('Element 1: "[element: Image');
+    expect(detail).toContain('Element 2: "[element: Image (logo.svg)]"');
+    expect(detail).toContain("`#logo`");
+  });
+
+  test("a selection with no element context asks exactly what it asked before", () => {
+    expect(elementIdentityForAskAI([{ text: "plain words", anchor: null }])).toBe("");
+    const scope = { kind: "selection" as const, label: "Selected HTML", text: "plain words" };
+    expect(buildDefaultPrompt({ prompt: "q", scope: { ...scope, detail: "" } })).toBe(
+      buildDefaultPrompt({ prompt: "q", scope }),
+    );
   });
 });

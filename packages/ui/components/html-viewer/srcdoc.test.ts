@@ -1497,6 +1497,66 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
     document.body.replaceChildren();
   });
 
+  // Failure to catch: a pinpoint on one of several images quoting only
+  // "[element: Image]", so the agent cannot tell which image was meant.
+  test("a text-less pinpoint names WHICH element: alt, else the source file, never a query or data payload", async () => {
+    document.body.innerHTML = [
+      '<div class="gallery">',
+      '<img id="i-alt" alt="Team photo" src="https://cdn.test/img/team.jpg?sig=SECRET#frag">',
+      '<img id="i-file" src="/assets/avatars/jane%20doe.png?v=3">',
+      '<img id="i-data" src="data:image/png;base64,iVBORw0KGgoSECRETPAYLOAD">',
+      '<img id="i-lazy" src="data:image/gif;base64,R0lGOD" data-src="/img/hero-banner.webp">',
+      '<img id="i-bracket" alt="Chart [Q3] &quot;final&quot;" src="chart.svg">',
+      '<button id="b-icon" aria-label="Open menu"><svg></svg></button>',
+      '<video id="v-title" title="Product demo"><source src="/media/demo.mp4?t=1"></video>',
+      '<iframe id="f-src" src="prototype.html?step=2"></iframe>',
+      "</div>",
+    ].join("");
+    postBridge({ type: "plannotator-bridge-set-vim-mode", enabled: false });
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "pinpoint" });
+
+    const cases: Array<[string, string]> = [
+      ["#i-alt", '[element: Image "Team photo" (team.jpg)]'],
+      ["#i-file", "[element: Image (jane doe.png)]"],
+      ["#i-data", "[element: Image (data:image/png)]"],
+      ["#i-lazy", "[element: Image (hero-banner.webp)]"],
+      // Brackets and double quotes cannot break the one-token placeholder.
+      ["#i-bracket", "[element: Image \"Chart (Q3) 'final'\" (chart.svg)]"],
+      ["#b-icon", '[element: Button "Open menu"]'],
+      ["#v-title", '[element: Video "Product demo" (demo.mp4)]'],
+      ["#f-src", "[element: Frame (prototype.html)]"],
+    ];
+    let x = 10;
+    for (const [selector, expected] of cases) {
+      const el = document.querySelector<HTMLElement>(selector)!;
+      hoverAt(el, (x += 40), 40);
+      const { messages } = await clickAndCollectSelection(el, x, 40);
+      expect(messages.length).toBe(1);
+      expect(messages[0]!.text).toBe(expected);
+      postBridge({ type: "plannotator-bridge-cancel-selection" });
+    }
+
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
+    document.body.replaceChildren();
+  });
+
+  test("an image pin saved with the old bare placeholder still restores through its anchor", async () => {
+    // Restore never reads the quote for a text-less element: the anchor binds
+    // it. Drafts saved before the description grew must keep their marker.
+    document.body.innerHTML = '<div><img id="hero" alt="Hero" src="hero.png"><p>Body</p></div>';
+    postBridge({
+      type: "plannotator-bridge-find-and-mark",
+      id: "old-image-pin",
+      originalText: "[element: Image]",
+      annotationType: "comment",
+      anchor: { selector: "#hero", tagName: "img", text: "" },
+    });
+    await flushOverlay();
+    expect(markersFor("old-image-pin").length).toBe(1);
+    postBridge({ type: "plannotator-bridge-clear-marks" });
+    document.body.replaceChildren();
+  });
+
   test("identical text-less siblings fail closed instead of rebinding (D1)", async () => {
     // Two structurally identical icons: any structure-derived signature
     // (tag/classes/child count/size) is identical across them, so a
@@ -1601,7 +1661,7 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
     const toggle = document.querySelector<HTMLElement>("button.nav-toggle")!;
     hoverAt(toggle, 60, 30);
     const button = await clickAndCollectSelection(toggle, 60, 30);
-    expect(button.messages[0]!.text).toBe("[element: Button]");
+    expect(button.messages[0]!.text).toBe('[element: Button "Open menu"]');
     const buttonContext = button.messages[0]!.context as Record<string, unknown>;
     expect(buttonContext.name).toBe("Open menu");
     expect(buttonContext.role).toBe("button");
@@ -1789,6 +1849,21 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
     expect(context.text).toBe("Beta text");
     expect(new TextEncoder().encode(JSON.stringify(context)).length).toBeLessThanOrEqual(1024);
     expect(keys.get("alpha")).toBeTruthy();
+    postBridge({ type: "plannotator-bridge-cancel-selection" });
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
+    document.body.replaceChildren();
+  });
+
+  test("a shift-clicked image names which image it is, like the primary", async () => {
+    document.body.innerHTML = MULTI_MARKUP + '<img id="extra" alt="Pricing chart" src="/img/pricing.png?x=1">';
+    await startMultiDraft();
+    const img = document.querySelector<HTMLElement>("img#extra")!;
+    const added = await collectMessages(
+      ["plannotator-bridge-multi-target-added"],
+      () => clickAt(img, 60, 60, true),
+    );
+    expect(added.length).toBe(1);
+    expect(added[0]!.text).toBe('[element: Image "Pricing chart" (pricing.png)]');
     postBridge({ type: "plannotator-bridge-cancel-selection" });
     postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
     document.body.replaceChildren();

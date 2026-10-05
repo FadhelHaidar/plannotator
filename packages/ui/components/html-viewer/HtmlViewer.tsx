@@ -17,6 +17,7 @@ import {
 import type { Annotation, EditorMode, ImageAttachment, InputMethod } from "../../types";
 import { AnnotationType } from "../../types";
 import { copyTextPreservingFocus } from "../../utils/clipboard";
+import { elementIdentityForAskAI } from "../../utils/parser";
 import { getIdentity } from "../../utils/identity";
 import { THUMBS_UP_LABEL } from "../../utils/quickLabels";
 import {
@@ -674,6 +675,13 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
       }));
     }, [hook.draftTargets]);
 
+    // Ask AI from a pinpoint draft: which element(s) the question is about,
+    // in the identity lines the feedback export prints (no outline).
+    const askAIElementDetail = useMemo(
+      () => elementIdentityForAskAI(hook.draftTargets) || undefined,
+      [hook.draftTargets],
+    );
+
     useEffect(() => {
       function handler(e: MessageEvent<unknown>) {
         if (e.source !== iframeRef.current?.contentWindow) return;
@@ -1255,6 +1263,7 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
                 kind: "selection",
                 label: "Selected HTML",
                 text: hook.commentPopover.selectedText ?? hook.commentPopover.contextText,
+                ...(askAIElementDetail ? { detail: askAIElementDetail } : {}),
               }}
               targetChips={targetChips}
               onRemoveTargetChip={targetChips ? hook.removeDraftTarget : undefined}

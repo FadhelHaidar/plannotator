@@ -1215,7 +1215,7 @@ export const BRIDGE_SCRIPT = `(function() {
   }
 
   // Floating label naming the element under the cursor (like the markdown overlay).
-  var PINPOINT_LABELS = { H1:'Heading', H2:'Heading', H3:'Heading', H4:'Heading', H5:'Heading', H6:'Heading', P:'Paragraph', UL:'List', OL:'List', LI:'List item', A:'Link', BUTTON:'Button', IMG:'Image', TABLE:'Table', THEAD:'Table', TBODY:'Table', TR:'Row', TD:'Cell', TH:'Header cell', SECTION:'Section', NAV:'Navigation', HEADER:'Header', FOOTER:'Footer', ARTICLE:'Article', ASIDE:'Sidebar', BLOCKQUOTE:'Quote', PRE:'Code', CODE:'Code', FIGURE:'Figure', FIGCAPTION:'Caption', MAIN:'Main', FORM:'Form', INPUT:'Input', LABEL:'Label' };
+  var PINPOINT_LABELS = { H1:'Heading', H2:'Heading', H3:'Heading', H4:'Heading', H5:'Heading', H6:'Heading', P:'Paragraph', UL:'List', OL:'List', LI:'List item', A:'Link', BUTTON:'Button', IMG:'Image', TABLE:'Table', THEAD:'Table', TBODY:'Table', TR:'Row', TD:'Cell', TH:'Header cell', SECTION:'Section', NAV:'Navigation', HEADER:'Header', FOOTER:'Footer', ARTICLE:'Article', ASIDE:'Sidebar', BLOCKQUOTE:'Quote', PRE:'Code', CODE:'Code', FIGURE:'Figure', FIGCAPTION:'Caption', MAIN:'Main', FORM:'Form', INPUT:'Input', LABEL:'Label', VIDEO:'Video', AUDIO:'Audio', IFRAME:'Frame', CANVAS:'Canvas' };
 
   var MAX_HOVER_LABEL = 40;
   function truncateLabel(text) {
@@ -2916,6 +2916,14 @@ export const BRIDGE_SCRIPT = `(function() {
   function ctxScrubUrl(value) {
     var v = String(value).trim();
     if (/^javascript:/i.test(v)) return null;
+    // Srcdoc sessions serve a document's relative assets through the
+    // session's own asset route (/api/html-assets/<token>/<path>). The token
+    // means nothing outside this session; the path after it is the author's
+    // own, relative to the document, which is what an agent can find.
+    if (!LIVE) {
+      var asset = v.match(/^\\/api\\/html-assets\\/[^\\/?#]+\\/([^?#]*)/);
+      if (asset && asset[1]) v = asset[1] + v.slice(asset[0].length);
+    }
     if (/^data:/i.test(v)) {
       var comma = v.indexOf(',');
       return (comma > 0 ? v.slice(0, Math.min(comma, 40)) : v.slice(0, 40)) + ',…';
@@ -3364,11 +3372,80 @@ export const BRIDGE_SCRIPT = `(function() {
     }
   }
 
-  // Element text for an additional target: same capping and text-less
-  // description used by the primary element path in annotateElement.
+  // --- Text-less element descriptions ---
+  // A pinpoint on an element with no text quotes a description instead
+  // ("[element: …]"). The hover label alone ("Image") cannot tell one image
+  // from the next, so the description adds what identifies THIS element: its
+  // accessible name (aria-label, alt, title, ...) and, for media, the source
+  // file name. The source goes through the same scrub the element context
+  // uses (no query, no fragment, data: reduced to its media type). Square
+  // brackets become parentheses and double quotes single ones, so the whole
+  // description stays one "[element: …]" token the export recognizes.
+  var DESC_MAX_NAME = 80;
+  var DESC_MAX_FILE = 60;
+  var DESC_SRC_ATTR = { IMG: 'src', VIDEO: 'src', AUDIO: 'src', IFRAME: 'src', EMBED: 'src', SOURCE: 'src', TRACK: 'src', INPUT: 'src', OBJECT: 'data' };
+
+  function descClean(value, max) {
+    return ctxCollapse(String(value).replace(/\\[/g, '(').replace(/\\]/g, ')').replace(/"/g, "'"), max);
+  }
+
+  function descRawSource(el) {
+    var tag = el.tagName;
+    if (tag === 'INPUT' && String(el.getAttribute('type') || '').toLowerCase() !== 'image') return '';
+    var attr = DESC_SRC_ATTR[tag];
+    var src = '';
+    if (attr) src = (el.getAttribute(attr) || '').trim();
+    else if (el.ownerSVGElement && tag.toLowerCase() === 'image') src = (el.getAttribute('href') || el.getAttribute('xlink:href') || '').trim();
+    else return '';
+    // Lazy loaders put a data: placeholder in src and the real file in data-src.
+    var lazy = (el.getAttribute('data-src') || '').trim();
+    if (lazy && (!src || /^data:/i.test(src))) src = lazy;
+    if (!src && tag === 'IMG') {
+      var srcset = (el.getAttribute('srcset') || '').trim();
+      if (srcset) src = srcset.split(/\\s+/)[0] || '';
+    }
+    if (!src && (tag === 'VIDEO' || tag === 'AUDIO')) {
+      var child = el.querySelector && el.querySelector('source[src]');
+      if (child) src = (child.getAttribute('src') || '').trim();
+      if (!src && tag === 'VIDEO') src = (el.getAttribute('poster') || '').trim();
+    }
+    return src;
+  }
+
+  // The file name a source points at: "team.jpg" for
+  // https://cdn.test/img/team.jpg?sig=…, "data:image/png" for an inline image.
+  function descSourceName(el) {
+    var src = descRawSource(el);
+    if (!src) return '';
+    var scrubbed = ctxScrubUrl(src);
+    if (!scrubbed) return '';
+    if (/^data:/i.test(scrubbed)) {
+      var media = scrubbed.slice(5).split(/[;,]/)[0];
+      return descClean('data:' + (media || 'unknown'), DESC_MAX_FILE);
+    }
+    if (/^blob:/i.test(scrubbed)) return 'blob';
+    var path = scrubbed.replace(/\\?…$/, '').replace(/\\/+$/, '');
+    var name = path.slice(path.lastIndexOf('/') + 1);
+    try { name = decodeURIComponent(name); } catch (ex) {}
+    if (!name || /^[a-z][a-z0-9+.-]*:$/i.test(name)) name = path;
+    return descClean(name, DESC_MAX_FILE);
+  }
+
+  function describeTextlessElement(el, label) {
+    var out = descClean(label, DESC_MAX_NAME) || 'element';
+    var name = ctxName(el);
+    name = name ? descClean(name, DESC_MAX_NAME) : '';
+    if (name && name !== out) out += ' "' + name + '"';
+    var file = descSourceName(el);
+    if (file && file !== name) out += ' (' + file + ')';
+    return out;
+  }
+
+  // Element text for a pinpoint target (primary or additional): the
+  // element's own text, or for a text-less element its description.
   function elementTargetText(el, label) {
     var text = capSelectionText((el.textContent || '').trim());
-    if (!text) text = capSelectionText('[element: ' + label + ']');
+    if (!text) text = capSelectionText('[element: ' + describeTextlessElement(el, label) + ']');
     return text;
   }
 
@@ -3607,10 +3684,10 @@ export const BRIDGE_SCRIPT = `(function() {
       if (!posted) clearPendingPin();
       return posted;
     }
-    var elText = capSelectionText((el.textContent || '').trim());
-    // Text-less elements (icon buttons, decorative chips, empty containers)
-    // are still annotatable: describe the element instead of quoting it.
-    if (!elText) elText = capSelectionText('[element: ' + pinpointHoverLabel(el) + ']');
+    // Text-less elements (images, icon buttons, decorative chips, empty
+    // containers) are still annotatable: describe the element instead of
+    // quoting it, naming WHICH one it is where the page says so.
+    var elText = elementTargetText(el, pinpointHoverLabel(el));
     var r = el.getBoundingClientRect();
     pendingSelection = { element: true };
     pendingRange = null;

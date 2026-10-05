@@ -2198,6 +2198,21 @@ describe("exportAnnotations — element context (raw-HTML / live-app pinpoints)"
     expect(output.indexOf("**near**")).toBeLessThan(output.indexOf("\n---\n"));
   });
 
+  test("an image pinpoint's heading names which image: alt text, and the file when there is no alt", () => {
+    const img = (context: object, originalText: string) => ({
+      blockId: "", startOffset: 0, endOffset: 0, type: "COMMENT", text: "swap this",
+      originalText, htmlAnchor: { selector: "#hero", tagName: "img", text: "" },
+      elementContext: { tag: "img", role: "img", ...context },
+    });
+    const withAlt = exportAnnotations([], [img({ name: "Team photo", attrs: [["src", "https://cdn.test/img/team.jpg?…"], ["alt", "Team photo"]] }, '[element: Image "Team photo" (team.jpg)]')]);
+    expect(withAlt).toContain('## 1. Feedback on the <img> element — "Team photo" (team.jpg)\n');
+    expect(withAlt).toContain('- **attrs** `src="https://cdn.test/img/team.jpg?…" alt="Team photo"`\n');
+    const noAlt = exportAnnotations([], [img({ attrs: [["src", "/assets/avatars/jane.png?…"]] }, "[element: Image (jane.png)]")]);
+    expect(noAlt).toContain("## 1. Feedback on the <img> element (jane.png)\n");
+    const inline = exportAnnotations([], [img({ attrs: [["src", "data:image/png;base64,…"]] }, "[element: Image (data:image/png)]")]);
+    expect(inline).toContain("## 1. Feedback on the <img> element (data:image/png)\n");
+  });
+
   test("a pinpoint with real quoted text keeps its quote line and gains the block", () => {
     const output = exportAnnotations([], [navAnn({ originalText: "Home About Pricing Docs", elementContext: { ...NAV_CONTEXT, text: "Home About Pricing Docs" } })]);
     expect(output).toContain('## 1. Feedback on: "Home About Pricing Docs"\n> this\n');

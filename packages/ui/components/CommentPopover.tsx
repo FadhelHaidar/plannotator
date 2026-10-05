@@ -30,6 +30,9 @@ export interface CommentAskAIContext {
   label?: string;
   text?: string;
   sourcePath?: string;
+  /** Agent-facing identity of the selected element(s), for a pinpoint on a
+   *  raw-HTML or live-app surface. Rides with the question; not displayed. */
+  detail?: string;
 }
 
 export type CommentAskAIHandler = (

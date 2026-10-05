@@ -91,7 +91,8 @@ export function buildDefaultPrompt(params: AskAIParams): string {
       const label = params.scope.label ? `Re: ${params.scope.label}` : 'Re: selected text';
       const source = params.scope.sourcePath ? `\nSource: ${params.scope.sourcePath}` : '';
       const selection = params.scope.text ? `\n\nSelected text:\n\`\`\`\n${params.scope.text}\n\`\`\`` : '';
-      return `${label}${source}${selection}\n\n${params.prompt}`;
+      const detail = params.scope.detail?.trim() ? `\n\nSelected element:\n${params.scope.detail.trim()}` : '';
+      return `${label}${source}${selection}${detail}\n\n${params.prompt}`;
     }
 
     // General question (no explicit file/line/selection): tell the agent what the

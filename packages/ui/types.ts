@@ -446,6 +446,9 @@ export interface AIQuestion {
     label?: string;
     text?: string;
     sourcePath?: string;
+    /** Agent-facing identity of the selected element(s) (raw-HTML / live-app
+     *  pinpoints): sent with the question, never shown in the chat. */
+    detail?: string;
   };
   /** undefined = general question (no file scope) */
   filePath?: string;

@@ -33,11 +33,13 @@ function extractFunction(source: string, name: string): string {
   throw new Error(`unbalanced braces around ${name}`);
 }
 
-const scrub = new Function(
+const makeScrub = (live: unknown) => new Function(
   'CTX_MAX_ATTR_VALUE',
   'ctxTruncate',
+  'LIVE',
   `${extractFunction(BRIDGE_SCRIPT, 'ctxScrubUrl')}; return ctxScrubUrl;`,
-)(120, (s: string, max: number) => s.slice(0, max)) as (value: string) => string | null;
+)(120, (s: string, max: number) => s.slice(0, max), live) as (value: string) => string | null;
+const scrub = makeScrub(null);
 
 describe('ctxScrubUrl (bridge element context)', () => {
   test('relative URLs keep their path and lose query and fragment', () => {
@@ -58,5 +60,15 @@ describe('ctxScrubUrl (bridge element context)', () => {
     expect(scrub('https://example.com/a/b')).toBe('https://example.com/a/b');
     expect(scrub('data:image/png;base64,AAAA')).toBe('data:image/png;base64,…');
     expect(scrub('javascript:steal()')).toBeNull();
+  });
+
+  // Failure to catch: every srcdoc asset reaching the agent as
+  // /api/html-assets/<session token>/x.png, a path that exists nowhere in
+  // the author's source and changes every session.
+  test("a srcdoc session's asset route reads as the author's own relative path", () => {
+    expect(scrub('/api/html-assets/d4d63ee508f145c5/img/team.png')).toBe('img/team.png');
+    expect(scrub('/api/html-assets/d4d63ee508f145c5/team.png?v=2#x')).toBe('team.png?…');
+    // A live app's own paths are real routes of that app and stay whole.
+    expect(makeScrub({})('/api/html-assets/abc/team.png')).toBe('/api/html-assets/abc/team.png');
   });
 });

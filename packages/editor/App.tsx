@@ -5104,6 +5104,7 @@ const App: React.FC = () => {
       label: context.label,
       text: context.text,
       sourcePath: context.sourcePath ?? aiDocumentPath,
+      ...(context.detail ? { detail: context.detail } : {}),
     } : undefined;
     const scopedQuestion = buildDefaultPrompt({
       prompt: question,
@@ -5206,6 +5207,7 @@ const App: React.FC = () => {
         label: context.label,
         text: context.text,
         sourcePath: context.sourcePath ?? aiDocumentPath,
+        ...(context.detail ? { detail: context.detail } : {}),
       } : undefined,
       contextUpdate: aiSessionId ? aiAnnotationsContext : undefined,
     });
