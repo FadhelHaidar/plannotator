@@ -226,6 +226,106 @@ describe("plain-bullet choices keep their wrapped lines", () => {
     );
   });
 
+  // Review of #1699: a reason on the line right after `Recommended:` must stay
+  // what it was before this change (context), not join the recommendation and
+  // turn a recommended choice into a garbage "Other" suggestion. The expected
+  // values are what the parser on main (0.28.1) returns for these bodies.
+  test("a reason line under Recommended: parses exactly as before (task lists, multi, bold, arrow, text)", () => {
+    const tasks = "- [ ] Local only — cheap\n- [ ] Server-side per user\n- [ ] Nowhere";
+    const body = (rec: string) => `Where should it live?\n\nSome context.\n\n${tasks}\n${rec}`;
+    for (const rec of [
+      "Recommended: Local only\nIt is the cheapest option.",
+      "**Recommended:** Local only\nIt is the cheapest option.",
+      "Recommended: Local only.\nbecause it is cheap",
+      "➡️ Local only\nWe accept the loss elsewhere.",
+    ]) {
+      const q = parseQuestionBlock("question", body(rec))!;
+      expect(q.choices.map((c) => c.recommended)).toEqual([true, false, false]);
+      expect(q.suggestedText).toBeUndefined();
+      expect(q.recommendation).toMatch(/^Local only\.?$/);
+      expect(q.context).toBe(`Some context.\n\n${rec.split("\n")[1]}`);
+      // The export marks the reviewer's pick as the recommendation.
+      const [indexed] = indexQuestionBlocks([{ id: "b", type: "directive", directiveKind: "question", content: body(rec), startLine: 1 }]);
+      expect(recommendedQuestionAnswer(indexed)!.selected).toEqual(["Local only"]);
+    }
+    const multi = parseQuestionBlock("question-multi", body("Recommended: Local only and Nowhere\nBoth are cheap."))!;
+    expect(multi.choices.map((c) => c.recommended)).toEqual([true, false, true]);
+    expect(multi.context).toBe("Some context.\n\nBoth are cheap.");
+
+    const text = parseQuestionBlock("question-text", "Describe the test.\n\nRecommended: Two phones, one offline.\nThe second phone rejoins later.")!;
+    expect(text.suggestedText).toBe("Two phones, one offline.");
+    expect(text.context).toBe("The second phone rejoins later.");
+  });
+
+  test("only a genuine wrap (no sentence end, lower-case next line) continues the recommendation", () => {
+    const q = parseQuestionBlock("question", `Pick\n\n- [ ] Local only\n- [ ] Remote\n\nRecommended: Local only — because it\nneeds no server.`)!;
+    expect(q.choices.map((c) => c.recommended)).toEqual([true, false]);
+    expect(q.recommendation).toBe("Local only — because it needs no server.");
+    expect(q.context).toBe("");
+    // A first line naming no choice falls back to the wrapped text, which
+    // is then the suggested answer in full.
+    const free = parseQuestionBlock("question-text", `Describe it\n\nRecommended: two phones, one of them\noffline for a minute`)!;
+    expect(free.suggestedText).toBe("two phones, one of them offline for a minute");
+  });
+
+  test("task-list labels are never cut, so a long label and its recommendation keep working", () => {
+    const shared = "This option shares its first sentence.";
+    const long = (tail: string) => `${shared} ${"more words ".repeat(20).trim()} ${tail}`;
+    const q = parseQuestionBlock("question", `Pick\n\n- [ ] ${long("alpha")}\n- [ ] ${long("beta")}\n\nRecommended: ${long("alpha")}`)!;
+    expect(q.choices.map((c) => c.label)).toEqual([long("alpha"), long("beta")]);
+    expect(q.choices.map((c) => c.recommended)).toEqual([true, false]);
+  });
+
+  test("plain-bullet labels never collide: a cut or a bold name that two bullets share falls back", () => {
+    const shared = "This option shares its first sentence.";
+    const long = (tail: string) => `${shared} ${"more words ".repeat(20).trim()} ${tail}`;
+    const cut = parseQuestionBlock("question", `Pick\n\n- ${long("alpha")}\n- ${long("beta")}\n- Short\n\nRecommended: ${long("beta")}`)!;
+    expect(cut.choices.map((c) => c.label)).toEqual([long("alpha"), long("beta"), "Short"]);
+    expect(cut.choices.map((c) => c.recommended)).toEqual([false, true, false]);
+
+    const bold = parseQuestionBlock("question", `Pick\n\n- **Option:** keep it local\n- **Option:** move it to the server\n- **Other:** nothing`)!;
+    expect(bold.choices.map((c) => c.label)).toEqual([
+      "**Option:** keep it local",
+      "**Option:** move it to the server",
+      "Other",
+    ]);
+
+    // A recommendation may name a cut label's full (uncut) form.
+    const one = parseQuestionBlock("question", `Pick\n\n- ${long("alpha")}\n- Short\n\nRecommended: ${long("alpha")}`)!;
+    expect(one.choices[0].label).toBe(shared);
+    expect(one.choices[0].recommended).toBe(true);
+  });
+
+  test("only ** marks a bold name: __init__: stays one label", () => {
+    const q = parseQuestionBlock("question", `Which method?\n\n- __init__: constructor\n- __call__: invoke`)!;
+    expect(q.choices.map((c) => c.label)).toEqual(["__init__: constructor", "__call__: invoke"]);
+  });
+
+  test("an indented body (question inside a list item) still ends a bullet or a recommendation at a new block", () => {
+    const body = [
+      "  Pick one",
+      "",
+      "  - Alpha",
+      "  > a quote after Alpha",
+      "  - Beta",
+      "  | a | b |",
+      "  | --- | --- |",
+      "  | 1 | 2 |",
+      "",
+      "  Recommended: Alpha — it is",
+      "  ## Heading after",
+    ].join("\n");
+    const q = parseQuestionBlock("question", body)!;
+    expect(q.choices.map((c) => c.label)).toEqual(["Alpha", "Beta"]);
+    expect(q.choices[0].recommended).toBe(true);
+    expect(q.context).toBe("> a quote after Alpha\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n## Heading after");
+  });
+
+  test("shared indentation is removed in columns, tabs included", () => {
+    const q = parseQuestionBlock("question-text", "\tAsk\n\n\tFirst line.\n\t    indented code-ish line")!;
+    expect(q.context).toBe("First line.\n    indented code-ish line");
+  });
+
   test("task-list choices are unchanged: bold names and lazy lines are not reinterpreted", () => {
     const q = parseQuestionBlock("question", `Pick\n- [ ] **Local** — cheap\n  still cheap\n- [ ] **Remote:** costly\nTrailing prose`)!;
     expect(q.choices.map((c) => [c.label, c.description])).toEqual([
