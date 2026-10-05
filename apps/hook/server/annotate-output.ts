@@ -49,10 +49,15 @@ export function formatAnnotateOutcome(
   }
 
   if (options.json) {
+    // Additive: how many annotations the decision carried, so a host can name
+    // the count in the message it delivers (the OpenCode bridge's decision
+    // heading). Absent when the decision carried no annotations list.
+    const count = Array.isArray(result.annotations) ? { annotationCount: result.annotations.length } : {};
     if (result.approved) {
       return JSON.stringify({
         decision: "approved",
         ...(result.feedback ? { feedback: result.feedback } : {}),
+        ...count,
       });
     }
     if (result.exit) return JSON.stringify({ decision: "dismissed" });
@@ -63,6 +68,7 @@ export function formatAnnotateOutcome(
       // the zero-state sentence, and a consumer that starts agent turns (the
       // OpenCode CLI bridge) skips the turn (#1701).
       ...(result.nothingToSend === true ? { nothingToSend: true } : {}),
+      ...count,
     });
   }
 

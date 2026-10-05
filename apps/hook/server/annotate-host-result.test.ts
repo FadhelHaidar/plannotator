@@ -99,12 +99,13 @@ describe("annotate Done with nothing to send", () => {
     expect(record).toMatchObject({ surface: "annotate", decision: "annotated", noop: true, message: "", annotationCount: 0 });
   }, 30_000);
 
-  test("--json: stdout stays decision annotated with the sentence plus the additive flag, the host record is a no-op", async () => {
+  test("--json: stdout stays decision annotated with the sentence plus the additive fields, the host record is a no-op", async () => {
     const run = start(["notes.md", "--json"], note);
     await post(await run.base(), "/api/feedback", EMPTY_DONE);
     const { code, stdout, record } = await run.finish();
     expect(code).toBe(0);
-    expect(JSON.parse(stdout.trim())).toEqual({ decision: "annotated", feedback: NO_FEEDBACK, nothingToSend: true });
+    // Two additive fields: nothingToSend (#1701) and annotationCount (the OpenCode bridge's heading).
+    expect(JSON.parse(stdout.trim())).toEqual({ decision: "annotated", feedback: NO_FEEDBACK, nothingToSend: true, annotationCount: 0 });
     expect(record.noop).toBe(true);
   }, 30_000);
 

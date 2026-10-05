@@ -164,10 +164,13 @@ const serverPlugin = {
             nativeDeps,
             { launch: request.launch, ...(request.annotateArgs ? { annotateArgs: request.annotateArgs } : {}) },
           ),
-          isSubagentSession: async (sessionID) => {
-            const session: unknown = await v2.session?.get?.({ sessionID });
-            const parentID = session && typeof session === "object" ? Reflect.get(session, "parentID") : undefined;
-            return typeof parentID === "string" && parentID.length > 0;
+          resolveOwner: (sessionID) => resolveRootSession(v2, sessionID),
+          reportLateFailure: async ({ sessionID, text }) => {
+            // The person sees it in the transcript (OpenCode 2's plugin
+            // context has no toast surface), and the agent reads it as a
+            // turn, so neither keeps waiting. "queue": a late arrival.
+            console.error(`[Plannotator] ${text.split("\n").find((line) => line.startsWith("Plannotator could not start")) ?? text}`);
+            await v2.session?.prompt?.({ sessionID, text, delivery: "queue" });
           },
         });
       } catch (error) {
@@ -493,6 +496,30 @@ async function runPlanReview(input: {
     sessionBridge: input.sessionBridge,
     ...(input.launch ? { observer: input.launch.observer } : {}),
   });
+}
+
+/**
+ * The root of `sessionID`'s parent chain. A subagent runs in a child session
+ * (`parentID`); its `plannotator` reviews belong to the root session, where the
+ * person is, as on the Claude Code mod. A chain that cannot be read stops
+ * where it is.
+ */
+export async function resolveRootSession(v2: V2ContextLike, sessionID: string): Promise<{ root: string; subagent: boolean }> {
+  let current = sessionID;
+  const seen = new Set<string>([current]);
+  for (let depth = 0; depth < 16; depth++) {
+    let parentID: unknown;
+    try {
+      const session: unknown = await v2.session?.get?.({ sessionID: current });
+      parentID = session && typeof session === "object" ? Reflect.get(session, "parentID") : undefined;
+    } catch {
+      break;
+    }
+    if (typeof parentID !== "string" || !parentID || seen.has(parentID)) break;
+    seen.add(parentID);
+    current = parentID;
+  }
+  return { root: current, subagent: current !== sessionID };
 }
 
 /** The part of OpenCode 2's tool domain the `plannotator` tool needs (probed: older hosts differ). */

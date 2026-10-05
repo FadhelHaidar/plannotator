@@ -41,6 +41,7 @@ import {
   plannotatorToolCloseText,
   plannotatorToolListText,
   plannotatorToolOpenedText,
+  plannotatorDecisionHeading,
   plannotatorToolTargets,
   plannotatorUnknownSessionText,
   type PlannotatorCloseOutcome,
@@ -144,6 +145,7 @@ export class OpenCodeLaunchRegistry {
         settle({ state: "ready", url });
       },
       onFailure: (message) => settle({ state: "failed", message }),
+      isClosedByAgent: () => launch.closedByAgent,
     };
 
     return {
@@ -303,9 +305,28 @@ export function toolLaunchRequest(call: PlannotatorToolInput):
   }
 }
 
-/** What a subagent's open action answers: its session ends before any decision could land. */
-export const PLANNOTATOR_TOOL_SUBAGENT_TEXT =
-  "Plannotator did not open: a review opened from a subagent would deliver its feedback to the subagent's session after it has finished. Tell the main agent which file or changes to open in Plannotator instead.";
+/** `last` from a subagent: it reads the main session's messages, which the subagent did not write (the mod's wording). */
+export const PLANNOTATOR_TOOL_SUBAGENT_LAST_TEXT =
+  'Invalid plannotator call: action "last" annotates the main session\'s last message and is not available to a subagent.';
+
+/**
+ * The message a launch that answered "starting" sends once its CLI fails
+ * after all: the agent was told to wait for a decision that will never come.
+ */
+export function plannotatorLateFailureText(subject: string, sessionId: string, message: string): string {
+  return [
+    plannotatorDecisionHeading(subject, sessionId, "Did not open"),
+    "",
+    `Plannotator could not start: ${message}`,
+    `Nothing more arrives for ${sessionId}; do not wait for it.`,
+  ].join("\n");
+}
+
+/** The session a call's reviews belong to: the root session, and whether the caller is a subagent below it. */
+export interface ToolSessionOwner {
+  root: string;
+  subagent: boolean;
+}
 
 export interface PlannotatorToolDeps {
   registry: OpenCodeLaunchRegistry;
@@ -321,8 +342,19 @@ export interface PlannotatorToolDeps {
     annotateArgs?: ParsedAnnotateArgs;
     launch: CliLaunch;
   }) => Promise<void>;
-  /** True for a subagent's (child) session. Absent: never. */
-  isSubagentSession?: (sessionID: string) => Promise<boolean>;
+  /**
+   * The root session of `sessionID` (a subagent's session has a parent). A
+   * subagent's reviews belong to the root session: the decision is delivered
+   * there and the main agent lists and closes them, as on the Claude Code mod.
+   * Absent or failing: the caller is its own root.
+   */
+  resolveOwner?: (sessionID: string) => Promise<ToolSessionOwner>;
+  /**
+   * Tell the session that a launch the tool reported as "starting" did not
+   * open after all (`plannotatorLateFailureText`), so neither the agent nor
+   * the person waits for a decision that never comes.
+   */
+  reportLateFailure?: (input: { sessionID: string; text: string }) => Promise<void> | void;
   /** HTTP to the CLI's own server (tests replace it). */
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
   /** How long the tool waits for the page before answering "starting". */
@@ -347,27 +379,31 @@ export async function runPlannotatorTool(
   const parsed = parsePlannotatorToolInput(input);
   if (!parsed.ok) return parsed.error;
   const call = parsed.input;
-  switch (call.action) {
-    case "list":
-      return await listText(context.sessionID, deps);
-    case "close":
-      return await closeText(context.sessionID, call.session as string, deps);
-    case "reply":
-      // Reserved for live comments: no comment is ever delivered yet.
-      return PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT;
-    case "annotate":
-    case "review":
-    case "last":
-      break;
+  if (call.action === "reply") {
+    // Reserved for live comments: no comment is ever delivered yet.
+    return PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT;
   }
-
   // Several files as one review need a CLI with bundles; none has them yet.
   if (Array.isArray(call.target)) return PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT;
 
+  let owner: ToolSessionOwner = { root: context.sessionID, subagent: false };
   try {
-    if (await deps.isSubagentSession?.(context.sessionID)) return PLANNOTATOR_TOOL_SUBAGENT_TEXT;
+    owner = (await deps.resolveOwner?.(context.sessionID)) ?? owner;
   } catch {
-    // Unknown: treat as the main session, like the slash commands do.
+    // Unknown: the caller is its own root, like the slash commands.
+  }
+
+  switch (call.action) {
+    case "list":
+      return await listText(owner.root, deps);
+    case "close":
+      return await closeText(owner.root, call.session as string, deps);
+    case "last":
+      if (owner.subagent) return PLANNOTATOR_TOOL_SUBAGENT_LAST_TEXT;
+      break;
+    case "annotate":
+    case "review":
+      break;
   }
 
   const request = toolLaunchRequest(call);
@@ -375,10 +411,11 @@ export async function runPlannotatorTool(
 
   const gate = call.gate === true;
   const subject = toolSubject(call);
-  const handle = deps.registry.begin(context.sessionID, call.action, subject, { deliverApproval: gate });
+  const handle = deps.registry.begin(owner.root, call.action, subject, { deliverApproval: gate });
   void deps
     .launch({
-      sessionID: context.sessionID,
+      // The root session: a subagent's decision lands where the person is.
+      sessionID: owner.root,
       command: request.command,
       rawArgs: request.rawArgs,
       ...(request.annotateArgs ? { annotateArgs: request.annotateArgs } : {}),
@@ -398,7 +435,25 @@ export async function runPlannotatorTool(
   const start = await Promise.race([handle.started, timeout]);
   if (timer !== undefined) clearTimeout(timer);
 
-  if (start === "timeout") return plannotatorToolOpenedText(subject, undefined, gate, handle.launch.id);
+  if (start === "timeout") {
+    // The agent is told to wait. If the CLI then fails before the page opens,
+    // tell the session, or it waits for a decision that never comes.
+    // Only an explicit failure: a command that ENDS without a ready file can
+    // be a CLI too old to write one (before 0.19.24), whose decision was
+    // delivered at exit.
+    void handle.started.then(async (late) => {
+      if (late.state !== "failed") return;
+      try {
+        await deps.reportLateFailure?.({
+          sessionID: owner.root,
+          text: plannotatorLateFailureText(subject, handle.launch.id, late.message),
+        });
+      } catch {
+        // Best effort: the failure is already in the plugin's log.
+      }
+    });
+    return plannotatorToolOpenedText(subject, undefined, gate, handle.launch.id);
+  }
   switch (start.state) {
     case "ready":
       return plannotatorToolOpenedText(subject, start.url, gate, handle.launch.id);
@@ -452,7 +507,12 @@ async function closeText(sessionID: string, session: string, deps: PlannotatorTo
   const open = deps.registry.openFor(sessionID);
   if (session === "all") {
     const outcomes: PlannotatorCloseOutcome[] = [];
-    for (const launch of open) outcomes.push(await closeLaunch(launch, deps));
+    // "all" means every review that CAN be closed: plan reviews are skipped
+    // silently (only an explicit plan id gets the "not closable" line).
+    for (const launch of open) {
+      if (launch.kind === "plan") continue;
+      outcomes.push(await closeLaunch(launch, deps));
+    }
     return plannotatorToolCloseText(outcomes);
   }
   const launch = open.find((candidate) => candidate.id === session);
@@ -487,12 +547,16 @@ async function closeLaunch(launch: TrackedLaunch, deps: PlannotatorToolDeps): Pr
     case "refused":
       return { id, subject, closed: false, reason: "failed", detail: `its server refused the close (HTTP ${answer.status})` };
     case "disabled":
+      // The server answered "host control off". Its ready file says whether
+      // that is remote mode; otherwise it was started without a host token.
       return {
         id,
         subject,
         closed: false,
         reason: "failed",
-        detail: "it runs in remote mode, where Plannotator turns host close off; close it from the tab",
+        detail: launch.isRemote
+          ? "it runs in remote mode, where Plannotator turns host close off; close it from the tab"
+          : "its server has host close turned off (it was started without a host token); close it from the tab",
       };
     case "older": {
       // Proven an older Plannotator on the port of our own live child: stop

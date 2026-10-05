@@ -46,6 +46,22 @@ describe("annotate stdout", () => {
     )).toBe('{"decision":"approved"}');
   });
 
+  // The OpenCode bridge names the count in its decision heading. Failure
+  // caught: the count leaking into plaintext, hook output or the strict record
+  // (which scripts compare byte for byte), or missing from the JSON record.
+  test("the JSON record carries annotationCount; plaintext, hook and the strict record do not", () => {
+    const sent = { feedback: "Revise this.", annotations: [{}, {}] };
+    expect(JSON.parse(formatAnnotateOutcome(sent, { hook: false, json: true }) as string))
+      .toEqual({ decision: "annotated", feedback: "Revise this.", annotationCount: 2 });
+    expect(JSON.parse(formatAnnotateOutcome({ ...sent, approved: true }, { hook: false, json: true }) as string))
+      .toEqual({ decision: "approved", feedback: "Revise this.", annotationCount: 2 });
+    expect(formatAnnotateOutcome({ feedback: "", exit: true, annotations: [] }, { hook: false, json: true }))
+      .toBe('{"decision":"dismissed"}');
+    expect(formatAnnotateOutcome(sent, { hook: false, json: false })).toBe("Revise this.");
+    expect(formatAnnotateOutcome(sent, { hook: true, json: false })).toBe('{"decision":"block","reason":"Revise this."}');
+    expect(serializeStrictAnnotateResult(sent)).not.toContain("annotationCount");
+  });
+
   // #1701: a bare Done gains ONE additive JSON field; plaintext, hook and the
   // strict-gate record keep their bytes.
   test("a Done with nothing to send adds nothingToSend to the JSON record only", () => {

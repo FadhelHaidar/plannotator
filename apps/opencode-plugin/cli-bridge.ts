@@ -134,6 +134,11 @@ export interface CliLaunch extends CliLaunchObserver {
   deliverApproval?: boolean;
   /** The command could not open the review: a refused argument or the CLI's startup error. */
   onFailure?: (message: string) => void;
+  /**
+   * The agent closed this review itself. An older CLI it stopped with SIGTERM
+   * exits without a decision, which is then the close, not a failure.
+   */
+  isClosedByAgent?: () => boolean;
 }
 
 interface RunCliResult {
@@ -156,9 +161,13 @@ export interface CliAnnotateOutcome {
   /** A Done with nothing to send (#1701): `feedback` is the zero-state
    *  sentence, and no turn is started. Absent from an older CLI. */
   nothingToSend?: boolean;
+  /** How many annotations the decision carried (absent from an older CLI). */
+  annotationCount?: number;
 }
 
 export interface CliReviewOutcome {
+  /** How many annotations the decision carried (absent from an older CLI). */
+  annotationCount?: number;
   decision?: "approved" | "dismissed" | "annotated";
   approved?: boolean;
   feedback?: string;
@@ -829,18 +838,26 @@ export function withDecisionHeading(launch: CliLaunch | undefined, outcome: stri
   return message.trim() ? `${heading}\n\n${message}` : heading;
 }
 
-/** The outcome a review decision's heading names. */
-export function reviewDecisionOutcome(outcome: CliReviewOutcome): string {
-  if (outcome.approved || outcome.decision === "approved") {
-    return outcome.feedback?.trim() ? "Approved with notes" : "Approved";
-  }
-  return outcome.isPRMode ? "Feedback" : "Changes requested";
+/** ` · 3 comments`, or nothing for none or an unknown count (an older CLI). */
+function commentsSuffix(count: number | undefined): string {
+  if (typeof count !== "number" || !Number.isInteger(count) || count <= 0) return "";
+  return ` · ${count} ${count === 1 ? "comment" : "comments"}`;
 }
 
-/** The outcome an annotate decision's heading names. */
+/** The outcome a review decision's heading names (the Claude Code mod's wording). */
+export function reviewDecisionOutcome(outcome: CliReviewOutcome): string {
+  const comments = commentsSuffix(outcome.annotationCount);
+  if (outcome.approved || outcome.decision === "approved") {
+    return outcome.feedback?.trim() ? `Approved with notes${comments}` : "Approved";
+  }
+  return `Changes requested${comments}`;
+}
+
+/** The outcome an annotate decision's heading names (the Claude Code mod's wording). */
 export function annotateDecisionOutcome(outcome: CliAnnotateOutcome): string {
-  if (outcome.decision === "approved") return outcome.feedback?.trim() ? "Approved with notes" : "Approved";
-  return "Feedback";
+  const comments = commentsSuffix(outcome.annotationCount);
+  if (outcome.decision === "approved") return outcome.feedback?.trim() ? `Approved with notes${comments}` : "Approved";
+  return `Feedback${comments}`;
 }
 
 export async function handleCliCommand(input: {
@@ -889,6 +906,10 @@ export async function handleCliCommand(input: {
     }
   };
   const cliFailure = (result: RunCliResult) => {
+    if (launch?.isClosedByAgent?.()) {
+      log(input.client, "info", `[Plannotator] The agent closed ${launch.subject} (${launch.sessionId}); nothing is sent for it.`);
+      return;
+    }
     const message = result.stderr.trim() || `Plannotator CLI exited with code ${result.exitCode}`;
     log(input.client, "error", message);
     reportFailure(message);

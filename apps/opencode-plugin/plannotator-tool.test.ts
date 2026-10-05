@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -10,11 +10,11 @@ import {
   PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT,
 } from "@plannotator/shared/plannotator-tool";
 import { classifyHostCloseAnswer } from "@plannotator/shared/host-control";
-import serverPlugin, { registerPlannotatorTool } from "./server";
+import serverPlugin, { registerPlannotatorTool, resolveRootSession } from "./server";
 import { runNativeCommand, type NativeCommandDeps } from "./native-commands";
 import {
   OpenCodeLaunchRegistry,
-  PLANNOTATOR_TOOL_SUBAGENT_TEXT,
+  PLANNOTATOR_TOOL_SUBAGENT_LAST_TEXT,
   commandSubject,
   quoteReviewWord,
   runPlannotatorTool,
@@ -32,7 +32,7 @@ const isWindows = process.platform === "win32";
 // the host-control paths answer: a current CLI, an older one without them, or
 // a current one with host control turned off (remote mode).
 // ---------------------------------------------------------------------------
-type StubBehavior = "current" | "older" | "disabled" | "fail";
+type StubBehavior = "current" | "older" | "disabled" | "disabled-remote" | "fail" | "slowfail";
 
 function writeStub(root: string, behavior: StubBehavior): string {
   const binary = path.join(root, `cli-${behavior}.ts`);
@@ -42,7 +42,8 @@ import { appendFileSync } from "node:fs";
 import { handleHostControlRequest } from ${JSON.stringify(HOST_CONTROL)};
 const stdin = await Bun.stdin.text();
 appendFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), stdin, token: process.env.PLANNOTATOR_SESSION_BRIDGE_TOKEN ?? null }) + "\\n");
-if (${JSON.stringify(behavior)} === "fail") {
+if (${JSON.stringify(behavior)} === "fail" || ${JSON.stringify(behavior)} === "slowfail") {
+  if (${JSON.stringify(behavior)} === "slowfail") await Bun.sleep(600);
   console.error("File not found: missing.md");
   process.exit(1);
 }
@@ -65,7 +66,7 @@ const server = Bun.serve({
       const answer = handleHostControlRequest(
         { method: req.method, pathname: url.pathname, host: req.headers.get("host"), origin: req.headers.get("origin"), authorization: req.headers.get("authorization") },
         {
-          token: ${JSON.stringify(behavior)} === "disabled" ? undefined : token,
+          token: ${JSON.stringify(behavior)}.startsWith("disabled") ? undefined : token,
           getServerPort: () => server.port,
           control: {
             status: () => ({ kind: "annotate", documents: [], unsentAnnotations: 2, decided }),
@@ -83,7 +84,7 @@ const server = Bun.serve({
     return Response.json({ error: "Not found" }, { status: 404 });
   },
 });
-appendFileSync(process.env.PLANNOTATOR_READY_FILE, JSON.stringify({ url: "http://localhost:" + server.port, port: server.port, isRemote: false }) + "\\n");
+appendFileSync(process.env.PLANNOTATOR_READY_FILE, JSON.stringify({ url: "http://localhost:" + server.port, port: server.port, isRemote: ${JSON.stringify(behavior)} === "disabled-remote" }) + "\\n");
 const outcome = await decision;
 // Let the answer to the request that decided reach its caller first.
 await Bun.sleep(100);
@@ -111,15 +112,18 @@ async function waitFor<T>(read: () => T | undefined | null | false, ms = 8_000):
 }
 
 /** The fake OpenCode 2 context the real launch path runs against. */
-function makeHost(root: string, options: { parentID?: string } = {}) {
-  const prompts: Array<{ sessionID: string; text: string }> = [];
-  const prompt = mock(async (input: { sessionID: string; text: string }) => {
-    prompts.push({ sessionID: input.sessionID, text: input.text });
+function makeHost(root: string, options: { parents?: Record<string, string> } = {}) {
+  const prompts: Array<{ sessionID: string; text: string; delivery?: unknown }> = [];
+  const prompt = mock(async (input: { sessionID: string; text: string; delivery?: unknown }) => {
+    prompts.push({ sessionID: input.sessionID, text: input.text, delivery: input.delivery });
     return {};
   });
   const ctx: any = {
     session: {
-      get: async () => ({ location: { directory: root }, ...(options.parentID ? { parentID: options.parentID } : {}) }),
+      get: async ({ sessionID }: { sessionID: string }) => ({
+        location: { directory: root },
+        ...(options.parents?.[sessionID] ? { parentID: options.parents[sessionID] } : {}),
+      }),
       prompt,
       context: async () => [],
     },
@@ -140,9 +144,9 @@ function makeHost(root: string, options: { parentID?: string } = {}) {
       nativeDeps,
       { launch: request.launch, ...(request.annotateArgs ? { annotateArgs: request.annotateArgs } : {}) },
     ),
-    isSubagentSession: async (sessionID) => {
-      const session = await ctx.session.get({ sessionID });
-      return typeof session.parentID === "string";
+    resolveOwner: (sessionID) => resolveRootSession(ctx, sessionID),
+    reportLateFailure: async ({ sessionID, text }) => {
+      await ctx.session.prompt({ sessionID, text, delivery: "queue" });
     },
     readyWaitMs: { review: 8_000, other: 8_000 },
   };
@@ -264,8 +268,8 @@ describe("registration", () => {
 });
 
 describe("calls answered without opening anything", () => {
-  test("invalid input, a bundle, reply, and a subagent are refused and launch nothing", async () => {
-    const host = makeHost(root);
+  test("invalid input, a bundle, reply, and a subagent's last are refused and launch nothing", async () => {
+    const host = makeHost(root, { parents: { ses_child: "ses_a" } });
     const launch = mock(host.toolDeps.launch);
     const deps = { ...host.toolDeps, launch };
 
@@ -274,10 +278,8 @@ describe("calls answered without opening anything", () => {
       .toBe(PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT);
     expect(await runPlannotatorTool({ action: "reply", session: "pn-abcdef", comment: "c1", text: "done" }, { sessionID: "ses_a" }, deps))
       .toBe(PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT);
-
-    const child = makeHost(root, { parentID: "ses_parent" });
-    expect(await runPlannotatorTool({ action: "annotate", target: "notes.md" }, { sessionID: "ses_child" }, { ...child.toolDeps, launch }))
-      .toBe(PLANNOTATOR_TOOL_SUBAGENT_TEXT);
+    // `last` reads the main session's messages, which a subagent did not write.
+    expect(await runPlannotatorTool({ action: "last" }, { sessionID: "ses_child" }, deps)).toBe(PLANNOTATOR_TOOL_SUBAGENT_LAST_TEXT);
     expect(launch).not.toHaveBeenCalled();
   });
 
@@ -287,6 +289,26 @@ describe("calls answered without opening anything", () => {
       .toBe("No open Plannotator reviews from this conversation.");
     expect(await runPlannotatorTool({ action: "close", session: "pn-abcdef" }, { sessionID: "ses_a" }, host.toolDeps))
       .toContain("No open Plannotator review pn-abcdef from this conversation");
+  });
+
+  // Failure caught: `close all` reporting a plan review it can never close
+  // (noise the agent may act on); an explicit plan id still explains why.
+  test("close all skips plan reviews silently; an explicit plan id says why", async () => {
+    const host = makeHost(root);
+    const plan = host.registry.begin("ses_a", "plan", "Plan");
+    expect(await runPlannotatorTool({ action: "close", session: "all" }, { sessionID: "ses_a" }, host.toolDeps))
+      .toBe("No open Plannotator reviews from this conversation to close.");
+    expect(await runPlannotatorTool({ action: "close", session: plan.launch.id }, { sessionID: "ses_a" }, host.toolDeps))
+      .toContain(`Not closed: Plan (${plan.launch.id}) is a plan review`);
+    plan.end();
+  });
+
+  // Failure caught: a nested subagent's reviews owned by its own session
+  // (decision delivered where nobody reads it, invisible to the main agent).
+  test("a subagent's session resolves to its root session", async () => {
+    const host = makeHost(root, { parents: { ses_grandchild: "ses_child", ses_child: "ses_a" } });
+    expect(await resolveRootSession(host.ctx, "ses_grandchild")).toEqual({ root: "ses_a", subagent: true });
+    expect(await resolveRootSession(host.ctx, "ses_a")).toEqual({ root: "ses_a", subagent: false });
   });
 });
 
@@ -337,10 +359,10 @@ describe.skipIf(isWindows)("the tool through the real launch path (stub CLI)", (
     expect(await runPlannotatorTool({ action: "close", session: id }, { sessionID: "ses_b" }, host.toolDeps))
       .toContain(`No open Plannotator review ${id}`);
 
-    await decide(portOf(text), { decision: "annotated", feedback: "Tighten the intro." });
+    await decide(portOf(text), { decision: "annotated", feedback: "Tighten the intro.", annotationCount: 2 });
     const delivered = await waitFor(() => host.prompts[0]);
     expect(delivered.sessionID).toBe("ses_a");
-    expect(delivered.text.split("\n")[0]).toBe(`Plannotator: my notes.md (${id}) — Feedback.`);
+    expect(delivered.text.split("\n")[0]).toBe(`Plannotator: my notes.md (${id}) — Feedback · 2 comments.`);
     expect(delivered.text).toContain("Tighten the intro.");
     await waitFor(() => host.registry.openFor("ses_a").length === 0);
   }, 30_000);
@@ -354,6 +376,38 @@ describe.skipIf(isWindows)("the tool through the real launch path (stub CLI)", (
     await decide(portOf(text), { decision: "approved" });
     const delivered = await waitFor(() => host.prompts[0]);
     expect(delivered.text).toBe(`Plannotator: notes.md (${sessionIdOf(text)}) — Approved.`);
+  }, 30_000);
+
+  // Failure caught: a subagent's review owned by (and delivered to) the
+  // subagent's own session, where nobody reads it after it finished.
+  test("a subagent's review belongs to the root session: decision there, listed there", async () => {
+    process.env.PLANNOTATOR_BIN = writeStub(root, "current");
+    const host = makeHost(root, { parents: { ses_child: "ses_a" } });
+    const text = await runPlannotatorTool({ action: "review" }, { sessionID: "ses_child" }, host.toolDeps);
+    const id = sessionIdOf(text);
+    expect(await runPlannotatorTool({ action: "list" }, { sessionID: "ses_a" }, host.toolDeps)).toContain(`${id} · review · local changes`);
+    await decide(portOf(text), { decision: "annotated", approved: false, feedback: "Rename x.", annotationCount: 1 });
+    const delivered = await waitFor(() => host.prompts[0]);
+    expect(delivered.sessionID).toBe("ses_a");
+    expect(delivered.text.split("\n")[0]).toBe(`Plannotator: local changes (${id}) — Changes requested · 1 comment.`);
+  }, 30_000);
+
+  // Failure caught: the agent told "starting, wait" and then never told the
+  // review did not open, so it waits forever.
+  test("a failure after the starting answer is sent to the session", async () => {
+    process.env.PLANNOTATOR_BIN = writeStub(root, "slowfail");
+    const host = makeHost(root);
+    const text = await runPlannotatorTool(
+      { action: "annotate", target: "missing.md" },
+      { sessionID: "ses_a" },
+      { ...host.toolDeps, readyWaitMs: { review: 100, other: 100 } },
+    );
+    expect(text).toContain("Plannotator is starting for missing.md");
+    const id = sessionIdOf(text);
+    const delivered = await waitFor(() => host.prompts[0]);
+    expect(delivered.sessionID).toBe("ses_a");
+    expect(delivered.text.split("\n")[0]).toBe(`Plannotator: missing.md (${id}) — Did not open.`);
+    expect(delivered.text).toContain("File not found: missing.md");
   }, 30_000);
 
   // Failure caught: close that deletes nothing but leaves the review open, a
@@ -377,15 +431,25 @@ describe.skipIf(isWindows)("the tool through the real launch path (stub CLI)", (
   // Failure caught: TERM sent to a server that is not proven an older
   // Plannotator (remote mode turns host close off: the review must survive).
   test("host close turned off leaves the review running; an older CLI is stopped", async () => {
+    const errors = spyOn(console, "error");
+    try {
     process.env.PLANNOTATOR_BIN = writeStub(root, "disabled");
     const host = makeHost(root);
     const text = await runPlannotatorTool({ action: "annotate", target: "notes.md" }, { sessionID: "ses_a" }, host.toolDeps);
     const id = sessionIdOf(text);
     const refused = await runPlannotatorTool({ action: "close", session: id }, { sessionID: "ses_a" }, host.toolDeps);
-    expect(refused).toContain(`Could not close notes.md (${id}): it runs in remote mode`);
+    // Not remote mode: say what is true (a server started without a host token).
+    expect(refused).toContain(`Could not close notes.md (${id}): its server has host close turned off`);
     const port = portOf(text);
     expect((await fetch(`http://127.0.0.1:${port}/nothing`)).status).toBe(404);
     await decide(port, { decision: "dismissed" });
+
+    process.env.PLANNOTATOR_BIN = writeStub(root, "disabled-remote");
+    const remote = await runPlannotatorTool({ action: "annotate", target: "notes.md" }, { sessionID: "ses_a" }, host.toolDeps);
+    const remoteId = sessionIdOf(remote);
+    expect(await runPlannotatorTool({ action: "close", session: remoteId }, { sessionID: "ses_a" }, host.toolDeps))
+      .toContain(`Could not close notes.md (${remoteId}): it runs in remote mode`);
+    await decide(portOf(remote), { decision: "dismissed" });
 
     process.env.PLANNOTATOR_BIN = writeStub(root, "older");
     const older = await runPlannotatorTool({ action: "annotate", target: "notes.md" }, { sessionID: "ses_a" }, host.toolDeps);
@@ -396,6 +460,13 @@ describe.skipIf(isWindows)("the tool through the real launch path (stub CLI)", (
     const olderPort = portOf(older);
     await expect(fetch(`http://127.0.0.1:${olderPort}/nothing`)).rejects.toThrow();
     expect(host.prompts).toHaveLength(0);
+    // The agent's own close is not logged as a CLI failure.
+    const logged = errors.mock.calls.map((call) => String(call[0]));
+    expect(logged.some((line) => /exited with code/.test(line))).toBe(false);
+    expect(logged.some((line) => line.includes(`The agent closed notes.md (${olderId})`))).toBe(true);
+    } finally {
+      errors.mockRestore();
+    }
   }, 30_000);
 
   // Failure caught: a startup error reported as "opened", or swallowed.

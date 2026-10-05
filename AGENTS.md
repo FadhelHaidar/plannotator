@@ -756,17 +756,35 @@ path); review words are quoted for `parseReviewArgs`' string form
 (`Plannotator: notes.md (pn-…) — Approved.`), like the mod; a slash command's
 bare gated approval still sends nothing. A list of several files answers
 `PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT` and `reply` answers
-`PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT`, launching nothing. A subagent's
-(child) session is refused with `PLANNOTATOR_TOOL_SUBAGENT_TEXT`: its decision
-would land in the subagent's session after it finished. No shell take-over:
-nothing in the OpenCode 2 plugin API can answer a shell call.
+`PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT`, launching nothing. When a launch
+answered "starting" and its CLI then fails before the page opens, the session
+gets one message (`plannotatorLateFailureText`: `Plannotator: notes.md (pn-…) —
+Did not open.` plus the CLI's error), delivered with `session.prompt`
+(`queue`), so neither the agent nor the person waits for a decision that never
+comes; OpenCode 2's plugin context has no toast surface, so that transcript
+message is the visible signal. A command that merely ends without a ready file
+sends nothing (a CLI older than 0.19.24 writes none and delivers its decision
+at exit). Subagents work as on the mod: a subagent's (child) session resolves
+to its root session (`resolveRootSession` walks `parentID`), which owns the
+review, gets its decision and lists or closes it; only `last` is refused from a
+subagent (`PLANNOTATOR_TOOL_SUBAGENT_LAST_TEXT`, the mod's wording), since it
+reads the main session's messages. Ask this session for such a review asks the
+root session. Not verified live: delivery to the root while it still waits on
+the subagent relies on the same `queue` delivery the slash commands use. No
+shell take-over: nothing in the OpenCode 2 plugin API can answer a shell call.
 
 **Session ids, list and close.** `OpenCodeLaunchRegistry` (one per plugin
 instance) records every review a session opens: tool calls, its slash commands
 (`runNativeCommand` with `launches`), and its `submit_plan` review (listed,
 never closable). Every recorded launch's decision message starts with
 `plannotatorDecisionHeading` (`withDecisionHeading` in `cli-bridge.ts`), slash
-commands included, so `list` and the decision name the same id. `list` and
+commands included, so `list` and the decision name the same id. Its outcome
+uses the mod's words: `Feedback · N comments`, `Approved with notes · N
+comments`, `Approved`, and for code review (local or PR) `Changes requested ·
+N comments`. The count comes from the CLI's additive `annotationCount` on the
+`annotate --json`, `opencode-annotate-last` and `opencode-review` records (an
+older CLI omits it and the heading has no count). A PR-platform status post is
+not inferred from zero annotations here. `list` and
 `close` see only the calling OpenCode session's launches (never the global
 `sessions/` registry; another session's id is "not found"). `list` reads
 `GET /api/host/status` with the launch's token for `unsent` and `decided`
@@ -774,8 +792,12 @@ commands included, so `list` and the decision name the same id. `list` and
 `POST /api/host/close` and reads the answer with `classifyHostCloseAnswer`
 (`packages/shared/host-control.ts`, the mod's rule): closed (draft kept, the
 tab told, nothing delivered, since the CLI's record is then `dismissed`),
-decided (the reviewer's decision is on its way), refused, turned off (remote
-mode: left running), or not answering (left running). Only a server that
+decided (the reviewer's decision is on its way), refused, turned off (left
+running; the text says remote mode only when the ready file did, and otherwise
+names a server started without a host token), or not answering (left
+running). `close all` skips plan reviews silently; only an explicit plan id
+gets the "not closable" line. A close that stopped an older CLI is logged as
+the agent's close, not as a CLI failure (`isClosedByAgent`). Only a server that
 answered as an older Plannotator without the endpoint (an uncoded JSON `404`
 or its app page) is stopped instead: SIGTERM to the plugin's own child process
 (`terminate` from `runPlannotatorCli`'s observer), which never deletes a
@@ -1364,7 +1386,7 @@ Tests: `packages/server/annotate-draft.scenarios.ts` (run against both runtimes 
 
 ### Strict direct annotate results
 
-Direct `plannotator annotate` invocations may add `--require-approval` and/or `--result-file <path>` only with `--gate --json`; both reject `--hook` and are not shared with OpenCode/Pi slash-command parsing. When neither strict option is present, single-target invocations keep the legacy plaintext, JSON, hook, and exit behavior unchanged, with one additive JSON field: a non-gated Done with nothing to send prints `{"decision":"annotated","feedback":"User reviewed the document and has no feedback.","nothingToSend":true}` (the field appears only in that case and only on the non-strict `--json` record and the `opencode-annotate-last` record; decision values, the feedback text, plaintext, `--hook` output, the strict-gate record and every exit code are unchanged; the OpenCode CLI bridge, Amp and Droid read it; #1701). Multi-token invocations go through the tolerant tiers described under "Tolerant argument resolution" above.
+Direct `plannotator annotate` invocations may add `--require-approval` and/or `--result-file <path>` only with `--gate --json`; both reject `--hook` and are not shared with OpenCode/Pi slash-command parsing. When neither strict option is present, single-target invocations keep the legacy plaintext, JSON, hook, and exit behavior unchanged, with two additive JSON fields. First, a non-gated Done with nothing to send prints `{"decision":"annotated","feedback":"User reviewed the document and has no feedback.","nothingToSend":true,"annotationCount":0}` (`nothingToSend` appears only in that case and only on the non-strict `--json` record and the `opencode-annotate-last` record; decision values, the feedback text, plaintext, `--hook` output, the strict-gate record and every exit code are unchanged; the OpenCode CLI bridge, Amp and Droid read it; #1701). Second, `annotationCount` (the number of annotations the decision carried) rides every approved and annotated record of the non-strict `--json` output, `opencode-annotate-last`, and `opencode-review`; the OpenCode bridge names it in its decision heading, and the strict-gate record does not carry it. Multi-token invocations go through the tolerant tiers described under "Tolerant argument resolution" above.
 
 Strict decisions use one newline-terminated JSON record on stdout and, when requested, identical bytes in the result file. Exit codes follow the grep convention: approval exits `0`; with `--require-approval`, annotated and dismissed decisions are published before exiting `1` (negative human outcome); usage/startup/validation failures — bad flag combinations, strict flags outside `annotate --gate --json`, a missing `--result-file` parent, a pre-existing or dangling-symlink destination, and every annotate startup failure (missing path, unreachable URL, empty folder, ambiguous name, missing file, oversized file) — exit `2` (the gate itself was misconfigured or could not start). Those startup sites exit `1` as before for non-strict invocations, with one deliberate exception: the multi-token zero-resolve handoff is not a startup failure, so in plain non-strict mode it prints on stdout and exits `0` (under `--json`/`--hook` it stays stderr + exit `1`). Under a strict flag `1` is reserved for "the reviewer did not approve", so a typo'd path must never masquerade as a rejection. Post-decision publication failures (destination appears between validation and publish, hard links unavailable) also exit `2`: the result *file* was not published, so they present as environment errors — "the gate could not publish its result" — never as a reviewer outcome, and never as approval (still fail-closed, since only `0` means approved). The stdout decision record is written **before** result-file publication and is still emitted whenever the decision itself completed; only a stdout write failure leaves no record anywhere. Signal deaths keep `128+n`. Result paths resolve from the invocation working directory, require an existing parent and absent destination, and publish via a flushed/closed `0600` same-directory temporary file plus an atomic no-clobber hard link—never copy or overwrite fallback (the `0600` mode is a no-op on Windows, and the atomic link/rename is not followed by a parent-directory fsync, so publication is atomic but not crash-durable). Keep reviewed sources at stable project paths; unique result and diagnostic log files may use a narrow temporary directory. Explicit Close emits `dismissed`; missing results or process/browser failures are recovery cases, never approval.
 
