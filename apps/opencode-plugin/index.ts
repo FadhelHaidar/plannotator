@@ -50,6 +50,12 @@ import { shouldFallbackAfterEmbeddedError } from "./prompt-delivery-error";
 import { executeSubmitPlan } from "./submit-plan-executor";
 import { getPlanningPrompt } from "./planning-prompt";
 import { announceSessionUrl } from "./session-url";
+import {
+  appendCommandFeedback,
+  createCommandTurnClient,
+  retargetCommandMessage,
+  type CommandFeedback,
+} from "./command-turn";
 
 // Lazy-load HTML at first use instead of embedding in the bundle.
 // The two SPA files are ~20 MB combined — inlining them as string literals
@@ -235,6 +241,9 @@ const PlannotatorPlugin: Plugin = async (ctx, rawOptions?: PlannotatorOpenCodeOp
   preloadBundledHtml("review-editor.html", (html) => { _reviewHtml = html; });
 
   let cachedAgents: any[] | null = null;
+  // Feedback a slash command put in its own message, waiting for `chat.message`
+  // to point that message at the agent it names. Keyed by session.
+  const commandFeedback = new Map<string, CommandFeedback>();
 
   async function getSharingEnabled(): Promise<boolean> {
     try {
@@ -450,69 +459,108 @@ Do NOT proceed with implementation until your plan is approved.`;
       ) return;
 
       output.parts.length = 0;
+      commandFeedback.delete(input.sessionID);
 
-      // input.arguments is the raw tail string from OpenCode's command dispatcher —
-      // needed so --gate / --json reach the handlers' parseAnnotateArgs.
-      const event = {
-        properties: { sessionID: input.sessionID, arguments: input.arguments },
-      };
-
-      if (shouldUseEmbeddedRuntime(workflowOptions.runtime)) {
-        try {
-          const embedded = await importEmbeddedRuntime();
-          const deps = {
-            client: ctx.client,
-            htmlContent: getPlanHtml(),
-            reviewHtmlContent: getReviewHtml(),
-            getSharingEnabled,
-            getShareBaseUrl,
-            getPasteApiUrl,
-            directory: ctx.directory,
-          };
-          const result = await embedded.handleEmbeddedCommand(cmd, event, deps);
-          if (cmd === "plannotator-last" && result.feedback) {
-            await embedded.deliverEmbeddedAnnotateMessagePrompt({
-              client: ctx.client,
-              sessionId: input.sessionID,
-              approved: Boolean(result.approved),
-              feedback: result.feedback,
-              agent: result.agent,
-            });
-          }
-          return;
-        } catch (error) {
-          if (!shouldFallbackAfterEmbeddedError(workflowOptions.runtime, error)) {
-            throw error;
-          }
-          try {
-            void ctx.client.app.log({
-              level: "error",
-              message: `[Plannotator] Embedded runtime unavailable; falling back to CLI: ${error instanceof Error ? error.message : String(error)}`,
-            });
-          } catch {}
+      // Feedback rides the command's OWN message instead of a second prompt:
+      // OpenCode runs a model turn for that message no matter what, so a
+      // separate prompt meant two turns for one review. See command-turn.ts.
+      const turn = createCommandTurnClient(ctx.client, input.sessionID);
+      try {
+        await runPlannotatorCommand(cmd, input, turn.client);
+      } finally {
+        const feedback = turn.take();
+        if (feedback) {
+          appendCommandFeedback(output.parts as unknown[], feedback);
+          if (feedback.agent) commandFeedback.set(input.sessionID, feedback);
         }
       }
+    },
 
-      if (workflowOptions.runtime === "embedded" && !hasEmbeddedRuntime()) {
-        try {
-          void ctx.client.app.log({
-            level: "error",
-            message: `[Plannotator] ${getEmbeddedRuntimeError()}`,
-          });
-        } catch {}
-        return;
-      }
-
-      await handleCliCommand({
-        command: cmd,
-        client: ctx.client,
-        sessionId: input.sessionID,
-        rawArgs: input.arguments ?? "",
-        cwd: ctx.directory,
-        bridge: await getBridgeContext(),
+    // The command's message is built right after `command.execute.before`
+    // returns; this is where it can still be pointed at the agent the feedback
+    // names (the review UI's agent switch, or the writer of an annotated
+    // message, #1612). One-shot, and only for the message carrying our text.
+    "chat.message": async (input, output) => {
+      const feedback = commandFeedback.get(input.sessionID);
+      if (!feedback) return;
+      commandFeedback.delete(input.sessionID);
+      retargetCommandMessage({
+        sessionID: input.sessionID,
+        feedback,
+        hook: input,
+        message: output.message,
+        parts: output.parts,
+        agents: await getOpenCodeAgents(),
       });
     },
   };
+
+  async function runPlannotatorCommand(
+    cmd: "plannotator-last" | "plannotator-annotate" | "plannotator-review",
+    input: { sessionID: string; arguments?: string },
+    client: any,
+  ): Promise<void> {
+    // input.arguments is the raw tail string from OpenCode's command dispatcher —
+    // needed so --gate / --json reach the handlers' parseAnnotateArgs.
+    const event = {
+      properties: { sessionID: input.sessionID, arguments: input.arguments },
+    };
+
+    if (shouldUseEmbeddedRuntime(workflowOptions.runtime)) {
+      try {
+        const embedded = await importEmbeddedRuntime();
+        const deps = {
+          client,
+          htmlContent: getPlanHtml(),
+          reviewHtmlContent: getReviewHtml(),
+          getSharingEnabled,
+          getShareBaseUrl,
+          getPasteApiUrl,
+          directory: ctx.directory,
+        };
+        const result = await embedded.handleEmbeddedCommand(cmd, event, deps);
+        if (cmd === "plannotator-last" && result.feedback) {
+          await embedded.deliverEmbeddedAnnotateMessagePrompt({
+            client,
+            sessionId: input.sessionID,
+            approved: Boolean(result.approved),
+            feedback: result.feedback,
+            agent: result.agent,
+          });
+        }
+        return;
+      } catch (error) {
+        if (!shouldFallbackAfterEmbeddedError(workflowOptions.runtime, error)) {
+          throw error;
+        }
+        try {
+          void ctx.client.app.log({
+            level: "error",
+            message: `[Plannotator] Embedded runtime unavailable; falling back to CLI: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        } catch {}
+      }
+    }
+
+    if (workflowOptions.runtime === "embedded" && !hasEmbeddedRuntime()) {
+      try {
+        void ctx.client.app.log({
+          level: "error",
+          message: `[Plannotator] ${getEmbeddedRuntimeError()}`,
+        });
+      } catch {}
+      return;
+    }
+
+    await handleCliCommand({
+      command: cmd,
+      client,
+      sessionId: input.sessionID,
+      rawArgs: input.arguments ?? "",
+      cwd: ctx.directory,
+      bridge: await getBridgeContext(),
+    });
+  }
 
   if (shouldRegisterSubmitPlan(workflowOptions)) {
     plugin.tool = {
