@@ -11,6 +11,16 @@ import {
 } from "@plannotator/ai/session-bridge-pull";
 import { runPullSessionBridgeClient } from "@plannotator/ai/session-bridge-pull-client";
 import { parseAnnotateArgs, type ParsedAnnotateArgs } from "@plannotator/shared/annotate-args";
+import {
+  annotateInputNamesExistingTarget,
+  annotatePathExists,
+  buildMissingAnnotateFilesMessage,
+  probeAnnotateBundlePath,
+  probeAnnotateToken,
+  selectAnnotateTokenTarget,
+} from "@plannotator/shared/annotate-target";
+import { annotateBundleTargetText } from "@plannotator/shared/annotate-bundle";
+import { isOlderCliBundleRefusal, PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT } from "@plannotator/shared/plannotator-tool";
 import { parseReviewArgs, resolveReviewTarget } from "@plannotator/shared/review-args";
 import { plannotatorDecisionHeading } from "@plannotator/shared/plannotator-tool";
 import {
@@ -173,6 +183,8 @@ export interface CliReviewOutcome {
   feedback?: string;
   agentSwitch?: string;
   isPRMode?: boolean;
+  /** The PR-platform status post (always a boolean from a CLI that knows it; absent from an older one). */
+  platform?: boolean;
 }
 
 export interface RecentAssistantMessage {
@@ -630,8 +642,27 @@ async function runPlannotatorCli(options: RunCliOptions): Promise<RunCliResult> 
   }
 }
 
-export function buildAnnotateCliArgs(parsed: ParsedAnnotateArgs): string[] {
-  const args = ["annotate", parsed.rawFilePath, "--json"];
+/**
+ * The files of a review of several files, when the user's annotate words are
+ * several existing file paths (every word one; the shared bundle rule), as
+ * absolute paths in the typed order; null otherwise. Each becomes its own CLI
+ * argument, which is what makes the CLI open them as one review.
+ */
+export function annotateBundleCliPaths(rawFilePath: string, cwd: string): string[] | { missing: string[] } | null {
+  if (annotateInputNamesExistingTarget(rawFilePath, cwd)) return null;
+  const selection = selectAnnotateTokenTarget(
+    rawFilePath,
+    (token) => probeAnnotateToken(token, cwd, { bareDirectories: false }),
+    { bundlePath: (token) => probeAnnotateBundlePath(token, cwd), pathExists: (token) => annotatePathExists(token, cwd) },
+  );
+  // A list of file paths with one that does not exist is refused before the
+  // CLI runs, so it never opens fewer files than were named.
+  if (selection.kind === "missing") return { missing: selection.missing };
+  return selection.kind === "bundle" ? selection.files.map((file) => file.value) : null;
+}
+
+export function buildAnnotateCliArgs(parsed: ParsedAnnotateArgs, bundlePaths?: readonly string[] | null): string[] {
+  const args = ["annotate", ...(bundlePaths && bundlePaths.length > 1 ? bundlePaths : [parsed.rawFilePath]), "--json"];
   if (parsed.gate) args.push("--gate");
   if (parsed.renderHtml) args.push("--render-html");
   if (parsed.renderMarkdown) args.push("--markdown");
@@ -748,6 +779,15 @@ async function readSessionUserAgent(
   }
 }
 
+/**
+ * The review decision was the PR-platform status post (#1719): the CLI's
+ * explicit `platform` flag; a CLI older than the flag only said `isPRMode`.
+ * Never inferred from the annotation count.
+ */
+export function isPlatformPost(outcome: CliReviewOutcome): boolean {
+  return typeof outcome.platform === "boolean" ? outcome.platform : outcome.isPRMode === true;
+}
+
 export function buildReviewPromptFromBridgeOutcome(outcome: CliReviewOutcome): {
   message: string | null;
   agent?: string;
@@ -773,8 +813,13 @@ export function buildReviewPromptFromBridgeOutcome(outcome: CliReviewOutcome): {
     };
   }
 
+  // The platform status post goes through verbatim; everything else the
+  // reviewer sent gets the suffix. A CLI older than the `platform` field only
+  // said `isPRMode`, so that stays the fallback (PR-mode feedback then keeps
+  // its old suffix-less shape).
+  const platformPost = isPlatformPost(outcome);
   return {
-    message: outcome.isPRMode
+    message: platformPost
       ? outcome.feedback
       : `${outcome.feedback}${getReviewDeniedSuffix("opencode")}`,
     ...(targetAgent && { agent: targetAgent }),
@@ -797,7 +842,7 @@ function getAnnotateFileHeader(filePath: string, cwd?: string): "File" | "Folder
 export function buildAnnotatePromptFromBridgeOutcome(
   outcome: CliAnnotateOutcome,
   target:
-    | { kind: "file"; fileHeader: "File" | "Folder"; filePath: string }
+    | { kind: "file"; fileHeader: "File" | "Folder" | "Files"; filePath: string }
     | { kind: "message" },
 ): string | null {
   if (outcome.decision === "dismissed" || !outcome.feedback?.trim()) return null;
@@ -850,6 +895,8 @@ export function reviewDecisionOutcome(outcome: CliReviewOutcome): string {
   if (outcome.approved || outcome.decision === "approved") {
     return outcome.feedback?.trim() ? `Approved with notes${comments}` : "Approved";
   }
+  // The status post carries what was posted to the platform, not a request.
+  if (isPlatformPost(outcome)) return "Review posted";
   return `Changes requested${comments}`;
 }
 
@@ -878,6 +925,11 @@ export async function handleCliCommand(input: {
    * `rawArgs` for `plannotator-annotate`.
    */
   annotateArgs?: ParsedAnnotateArgs;
+  /**
+   * With `annotateArgs`: the tool's list of files (two or more), in order,
+   * opened as one review. Each is its own CLI argument.
+   */
+  annotateBundle?: readonly string[];
   /** A launch the host tracks: its observer, failure report and decision heading. */
   launch?: CliLaunch;
 }): Promise<void> {
@@ -1004,9 +1056,22 @@ export async function handleCliCommand(input: {
         return;
       }
 
+      // Several existing file paths open as one review of all of them. The
+      // tool's list arrives split (each entry one argument, never re-split,
+      // checked by the CLI); a single tool target is never read as several.
+      const bundleSelection = input.annotateArgs
+        ? (input.annotateBundle && input.annotateBundle.length > 1 ? [...input.annotateBundle] : null)
+        : annotateBundleCliPaths(parsed.rawFilePath, cwd);
+      if (bundleSelection && !Array.isArray(bundleSelection)) {
+        const missing = buildMissingAnnotateFilesMessage(bundleSelection.missing);
+        log(input.client, "error", missing);
+        reportFailure(missing);
+        return;
+      }
+      const bundlePaths = bundleSelection;
       const result = await runPlannotatorCli({
         client: input.client,
-        args: buildAnnotateCliArgs(parsed),
+        args: buildAnnotateCliArgs(parsed, bundlePaths),
         cwd,
         readyLabel: "annotation UI",
         bridge: input.bridge,
@@ -1014,17 +1079,26 @@ export async function handleCliCommand(input: {
         observer: launch,
       });
       if (result.exitCode !== 0) {
-        cliFailure(result);
+        // A CLI that predates reviews of several files answers with its
+        // ambiguity error; say to update instead.
+        if (bundlePaths && isOlderCliBundleRefusal(result.stderr.trim()) && !launch?.isClosedByAgent?.()) {
+          log(input.client, "error", PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT);
+          reportFailure(PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT);
+        } else {
+          cliFailure(result);
+        }
         return;
       }
 
       logCliWarnings(input.client, result.stderr);
       const outcome = parseLastJson<CliAnnotateOutcome>(result.stdout);
-      let prompt = buildAnnotatePromptFromBridgeOutcome(outcome, {
-        kind: "file",
-        fileHeader: getAnnotateFileHeader(parsed.filePath, input.cwd),
-        filePath: parsed.filePath,
-      });
+      let prompt = buildAnnotatePromptFromBridgeOutcome(outcome, bundlePaths
+        ? { kind: "file", fileHeader: "Files", filePath: annotateBundleTargetText(bundlePaths) }
+        : {
+            kind: "file",
+            fileHeader: getAnnotateFileHeader(parsed.filePath, input.cwd),
+            filePath: parsed.filePath,
+          });
       // A gate the agent opened itself waits for the sign-off: a bare
       // approval is still a message (its heading says "Approved").
       if (prompt === null && launch?.deliverApproval && outcome.decision === "approved") prompt = "";

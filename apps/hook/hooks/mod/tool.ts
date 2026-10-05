@@ -40,7 +40,7 @@ export interface PlannotatorToolInput {
 
 export const PLANNOTATOR_TOOL_DESCRIPTION = [
   'Open Plannotator, the browser review UI, for the user, and return at once. Also lists and closes the reviews opened in this conversation (by this tool or the user\'s /plannotator-* commands).',
-  '- action "annotate": annotate a file (markdown, text, config, HTML), a folder, or a URL; `target` is required. `gate: true` adds an Approve button for an explicit sign-off. `options.markdown: true` converts HTML or a URL to markdown first.',
+  '- action "annotate": annotate a file (markdown, text, config, HTML), a folder, or a URL; `target` is required. Pass a list as `target` to review several files together, in the order you want them read. `gate: true` adds an Approve button for an explicit sign-off. `options.markdown: true` converts HTML or a URL to markdown first.',
   '- action "review": review code changes; `target` is an optional repository directory or a GitHub/GitLab/Bitbucket pull request URL (default: the current repository). `options.base` sets the compare branch or ref (git only).',
   '- action "last": annotate your own last assistant message; no target.',
   '- action "list": the reviews opened in this conversation that are still open, one line each: session id, what it shows, url, age, state, and how many comments the reviewer has not sent yet.',
@@ -61,7 +61,7 @@ export const PLANNOTATOR_TOOL_INPUT_SCHEMA = {
         { type: 'string' },
         { type: 'array', items: { type: 'string' }, minItems: 1 },
       ],
-      description: 'annotate: the file, folder or URL (required). review: a repository directory or PR URL (optional). Other actions: not used.',
+      description: 'annotate: the file, folder or URL (required), or a list of file paths to review together in that order. review: a repository directory or PR URL (optional). Other actions: not used.',
     },
     gate: {
       type: 'boolean',
@@ -261,14 +261,21 @@ export function plannotatorToolTargets(input: PlannotatorToolInput): string[] {
 
 /**
  * The arguments the matching slash command would carry (`/plannotator-annotate
- * <these>`), one argument per element, never re-split. `last` has none, and
- * neither do the actions that open nothing (list, close, reply).
+ * <these>`), one argument per element, never re-split. A list of annotate
+ * targets passes a bare word as `./word`, so the CLI reads every entry as a
+ * path. `last` has none, and neither do the actions that open nothing (list,
+ * close, reply).
  */
 export function plannotatorToolArgs(input: PlannotatorToolInput): string[] {
   switch (input.action) {
     case 'annotate':
       return [
-        ...plannotatorToolTargets(input),
+        // A list is files named by their paths, so every entry is passed as
+        // one: a bare word becomes `./word`. The CLI then refuses a list with a
+        // missing file instead of reading the bare word as prose.
+        ...(Array.isArray(input.target)
+          ? input.target.map((target) => (looksLikeFilePath(target) || /^https?:\/\//i.test(target) ? target : `./${target}`))
+          : plannotatorToolTargets(input)),
         ...(input.gate ? ['--gate'] : []),
         ...(input.options?.markdown ? ['--markdown'] : []),
       ]
@@ -308,9 +315,56 @@ export function plannotatorDecisionHeading(subject: string, sessionId: string | 
   return `Plannotator: ${subject}${sessionId ? ` (${sessionId})` : ''} — ${outcome}.`
 }
 
-/** What a host answers a list of several files with until it can open them as one review. */
+/** What a host answers a list of several files with when its Plannotator CLI is too old to open them as one review. */
 export const PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT =
-  'Plannotator did not open: opening several files in one review needs a newer Plannotator. Open them one at a time for now, or ask the user to update Plannotator.'
+  'Plannotator did not open: the installed Plannotator is too old to open several files at once. Ask the user to update Plannotator to open several files at once, or open them one at a time for now.'
+
+/**
+ * The line a CLI that opens bundles adds to its "Ambiguous annotate
+ * arguments" error (`ANNOTATE_BUNDLE_HINT` in annotate-target.ts; copied here
+ * because this section must stay dependency-free).
+ */
+export const PLANNOTATOR_BUNDLE_HINT_LINE =
+  'To review several files together, pass only their paths: plannotator annotate a.md b.html'
+
+/**
+ * Whether a CLI's startup error for several file paths is an OLDER CLI's
+ * refusal: its ambiguity error without the bundle hint a current CLI adds. A
+ * host that sent a list of paths answers `PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT`
+ * then, instead of showing an error that tells the agent to pick one file.
+ */
+export function isOlderCliBundleRefusal(errorText: string): boolean {
+  return errorText.includes('Ambiguous annotate arguments:') && !errorText.includes(PLANNOTATOR_BUNDLE_HINT_LINE)
+}
+
+/** The file name of a path, for subjects (either separator). */
+function fileNameOf(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, '')
+  return trimmed.slice(Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\')) + 1) || trimmed
+}
+
+/**
+ * What a review of several files is called wherever one line names it: the
+ * tool's result, the decision heading, the session list. Up to three file
+ * names, then a count of the rest: "3 files: spec.md, mock.html, notes.md",
+ * "5 files: a.md, b.md, c.md +2 more".
+ */
+export function plannotatorBundleSubject(paths: readonly string[]): string {
+  const names = paths.map(fileNameOf)
+  const rest = names.length - 3
+  return `${names.length} files: ${names.slice(0, 3).join(', ')}${rest > 0 ? ` +${rest} more` : ''}`
+}
+
+/**
+ * Whether a shell word reads as a file path rather than prose: it has a path
+ * separator, starts with `~`, `.` or `@`, or ends in a file extension. A URL
+ * is not a path. Pure: nothing is looked up on disk.
+ */
+export function looksLikeFilePath(word: string): boolean {
+  if (/^https?:\/\//i.test(word)) return false
+  if (/[\\/]/.test(word) || /^[~.@]/.test(word)) return true
+  return /\.[A-Za-z0-9]{1,12}$/.test(word)
+}
 
 /** What a host answers `reply` with until it delivers single comments. */
 export const PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT =
@@ -532,15 +586,18 @@ const COMMAND_ACTIONS: Record<string, PlannotatorToolAction> = {
  * word is exactly `plannotator` (the installed binary on PATH; a path such as
  * `./plannotator` is a dev build and runs for real), with subcommand
  * `annotate`, `review`, `annotate-last` or `last`, carrying only what the tool
- * represents: annotate `<target>` plus `--gate` and `--markdown`; review
- * `[target]` plus `--base <ref>`; last with no arguments. `--json` is accepted
- * and dropped (the decision arrives as a message, not on stdout). The result
- * passes `parsePlannotatorToolInput`.
+ * represents: annotate `<target>` (or several targets that all read as file
+ * paths, `looksLikeFilePath`, which become `target: [...]`, a review of
+ * several files) plus `--gate` and `--markdown`; review `[target]` plus
+ * `--base <ref>`; last with no arguments. `--json` is accepted and dropped
+ * (the decision arrives as a message, not on stdout). The result passes
+ * `parsePlannotatorToolInput`.
  *
  * Everything else is null and runs as written: other subcommands, any other
  * flag (`--require-approval`, `--result-file`, `--hook`, `--tailscale`,
- * `--static`, `--app`, `--no-jina`, `--help`, ...), a repeated flag, more than
- * one target, an environment prefix, and any shell syntax (`cd x && ...`,
+ * `--static`, `--app`, `--no-jina`, `--help`, ...), a repeated flag, several
+ * targets that are not all file paths (or for review), an environment prefix,
+ * and any shell syntax (`cd x && ...`,
  * pipes, redirects, substitutions), so scripted strict gates keep the CLI.
  */
 export function plannotatorCommandToToolInput(command: string): PlannotatorToolInput | null {
@@ -576,8 +633,13 @@ export function plannotatorCommandToToolInput(command: string): PlannotatorToolI
     } else return null
   }
 
-  if (targets.length > 1) return null
-  if (targets.length === 1) call.target = targets[0]
+  if (targets.length > 1) {
+    // Several targets are taken over only as a review of several files:
+    // annotate, and every word a file path. Anything else (prose around a
+    // path, which the CLI's tolerant resolution reads) runs as written.
+    if (action !== 'annotate' || !targets.every(looksLikeFilePath)) return null
+    call.target = targets
+  } else if (targets.length === 1) call.target = targets[0]
   if (Object.keys(options).length > 0) call.options = options
   const parsed = parsePlannotatorToolInput(call)
   return parsed.ok ? parsed.input : null

@@ -9,6 +9,7 @@ import {
   SESSION_BRIDGE_ERROR,
   SESSION_BRIDGE_PROVIDER_NAME,
   SessionBridgeProvider,
+  formatSessionAskText,
   type SessionBridge,
   type SessionBridgeAskRequest,
   type SessionBridgeSink,
@@ -393,5 +394,18 @@ describe("Ask this session over the shared /api/ai endpoints", () => {
       body: JSON.stringify({ context: CONTEXT, providerId: SESSION_BRIDGE_PROVIDER_NAME }),
     }));
     expect(res.status).toBe(403);
+  });
+});
+
+describe("the question's surface line", () => {
+  // A review of several files: the session must know which file the reviewer
+  // is asking about and where it sits, or "this file" is ambiguous.
+  test("names the open file's place in a review of several files", () => {
+    const text = formatSessionAskText(
+      { mode: "annotate", annotate: { content: "<h1>Mock</h1>", filePath: "/repo/mock.html", bundlePosition: { index: 2, total: 3 } } },
+      "Why this layout?",
+    );
+    expect(text).toContain("Surface: annotating /repo/mock.html, file 2 of 3");
+    expect(formatSessionAskText(CONTEXT, "Q")).toContain("Surface: annotating /repo/notes.md\n");
   });
 });

@@ -18,7 +18,7 @@ import type { Origin } from "@plannotator/shared/agents";
 import { handleImage, handleUpload, handleServerReady, handleApiNotFound, handleFavicon, handleReferenceSkills, handleReferenceSkillContent, handleSaveNotes, readDraftGenerationFromBody, readDraftGenerationFromUrl } from "./shared-handlers";
 import { handleDoc, handleDocExists, handleFileBrowserFiles, handleObsidianVaults, handleObsidianFiles, handleObsidianDoc, resolveAllowedDocPath, type FolderAnnotateHistory } from "./reference-handlers";
 import { closeAllFileBrowserWatchers, handleFileBrowserFilesStream } from "./reference-watch";
-import { getExtraMarkdownExtensions, MAX_ANNOTATABLE_FILE_BYTES, resolveUserPath, warmFileListCache } from "@plannotator/shared/resolve-file";
+import { getExtraMarkdownExtensions, isAnnotatableTextPath, MAX_ANNOTATABLE_FILE_BYTES, resolveUserPath, warmFileListCache } from "@plannotator/shared/resolve-file";
 import { contentHash } from "./draft";
 import { annotateDraftFilePath, createAnnotateDraftSession } from "@plannotator/shared/annotate-draft";
 import { isPathAllowed } from "@plannotator/shared/doc-resolve";
@@ -71,6 +71,12 @@ import {
 import { randomBytes } from "node:crypto";
 import { isAgentTerminalWsRoute, supportsAnnotateAgentTerminalMode } from "@plannotator/shared/agent-terminal";
 import { annotateDiagramRenderKind } from "@plannotator/shared/annotatable";
+import {
+  annotateBundleDocumentCounts,
+  annotateBundleRoot,
+  type AnnotateBundleFile,
+} from "@plannotator/shared/annotate-bundle";
+import { readFileSync } from "fs";
 
 // Re-export utilities
 export { isRemoteSession, getServerPort } from "./remote";
@@ -97,8 +103,18 @@ export interface AnnotateServerOptions {
   /** Origin identifier for UI customization */
   origin?: Origin;
   /** UI mode: "annotate" for files, "annotate-last" for last agent message,
-   *  "annotate-folder" for folders, "annotate-app" for live local apps */
-  mode?: "annotate" | "annotate-last" | "annotate-folder" | "annotate-app";
+   *  "annotate-folder" for folders, "annotate-app" for live local apps,
+   *  "annotate-bundle" for several files reviewed as one (`bundleFiles`) */
+  mode?: "annotate" | "annotate-last" | "annotate-folder" | "annotate-app" | "annotate-bundle";
+  /**
+   * `annotate-bundle`: the files, in the order they should be read (two or
+   * more, absolute paths; resolveAnnotateBundleFiles builds this). The
+   * session is folder-like but restricted to this explicit list: /api/plan
+   * carries it as `bundle`, and `/api/doc` serves these files and what they
+   * link to under the single-file rule (each file's own directory plus the
+   * working directory). `filePath` should be the bundle root.
+   */
+  bundleFiles?: AnnotateBundleFile[];
   /**
    * Live local app annotation (mode "annotate-app"): the server starts a
    * loopback reverse proxy mirroring targetUrl and serves the composed
@@ -276,6 +292,16 @@ export async function startAnnotateServer(
     onReady,
   } = options;
 
+  // Several files reviewed as one (`annotate-bundle`): the explicit, ordered
+  // list, and the deepest directory containing them all (labels and the
+  // `base` for /api/doc). Every other mode has no bundle.
+  const bundleFiles = mode === "annotate-bundle" ? [...(options.bundleFiles ?? [])] : null;
+  if (bundleFiles && bundleFiles.length < 2) {
+    throw new Error("An annotate bundle needs at least two files");
+  }
+  const bundlePaths = bundleFiles ? bundleFiles.map((file) => file.path) : [];
+  const bundleRoot = bundleFiles ? annotateBundleRoot(bundlePaths) : null;
+
   // Effective client-lease capability. A --tailscale session forces local
   // mode, so the CLI-side supportsAnnotateClientLease predicate reads it as
   // local — but every client reaches it through the tailscale serve proxy,
@@ -369,6 +395,20 @@ export async function startAnnotateServer(
     folderAnnotateHistoryCache.set(resolvedFilePath, result);
     return result;
   }
+  // A bundle saves each file's version history when the review opens (the
+  // same per-file pipeline and memo folder sessions run on first view), so a
+  // file the reviewer never opens still gets its version. Text files only,
+  // as in folder sessions: raw HTML and converted HTML keep no history here.
+  if (bundleFiles && annotateHistoryEnabled) {
+    for (const file of bundleFiles) {
+      if (file.renderAs === "html" || !isAnnotatableTextPath(file.path)) continue;
+      try {
+        computeFolderAnnotateHistory(file.path, readFileSync(file.path, "utf-8"));
+      } catch {
+        // Unreadable now: /api/doc reports the problem when it is opened.
+      }
+    }
+  }
   // Draft identity. Content-derived for the modes that HAVE content, and
   // path-derived for the modes that do not.
   //
@@ -385,7 +425,12 @@ export async function startAnnotateServer(
       ? `annotate-app\0${liveAppDraftIdentity(liveApp.targetUrl)}`
       : mode === "annotate-folder" && folderPath
         ? `folder:${resolvePath(folderPath)}`
-        : renderHtml && rawHtml ? rawHtml : markdown;
+        : bundleFiles
+          // A bundle is its ordered list: the same files in the same order
+          // reopen the same session draft (bundle-level notes), and each
+          // file's comments also follow the file through its path copy.
+          ? `bundle:\0${bundlePaths.join("\0")}`
+          : renderHtml && rawHtml ? rawHtml : markdown;
   const draftKey = contentHash(draftSource);
   // Drafts follow the file as well as its text (annotate-draft.ts): a single
   // local file is also saved under its path, and the documents a local-file
@@ -399,7 +444,7 @@ export async function startAnnotateServer(
     contentKey: draftKey,
     filePath: draftFilePath,
     documents:
-      draftFilePath !== null || (mode === "annotate-folder" && folderPath)
+      draftFilePath !== null || (mode === "annotate-folder" && folderPath) || bundleFiles
         ? {
             isAllowed: (path) => isPathAllowed(path, getReferenceRootPaths()),
           }
@@ -451,7 +496,9 @@ export async function startAnnotateServer(
         ? "annotate-last"
         : mode === "annotate-folder"
           ? "annotate-folder"
-          : singleFileLocalAnnotate
+          : bundleFiles
+            ? "annotate-bundle"
+            : singleFileLocalAnnotate
             ? "annotate"
             : "annotate-url";
 
@@ -472,7 +519,9 @@ export async function startAnnotateServer(
         target:
           mode === "annotate-app" && liveApp
             ? { url: liveApp.targetUrl }
-            : isUrlTarget
+            : bundleFiles
+              ? { documents: annotateBundleDocumentCounts(bundlePaths, annotationList) }
+              : isUrlTarget
               ? { url: filePath }
               : mode === "annotate-last"
                 ? { filePath }
@@ -615,7 +664,8 @@ export async function startAnnotateServer(
   function isAllowedHtmlSharePath(targetPath: string): boolean {
     const roots = new Set<string>([process.cwd()]);
     if (folderPath) roots.add(folderPath);
-    if (!/^https?:\/\//i.test(filePath)) roots.add(dirname(filePath));
+    for (const path of bundlePaths) roots.add(dirname(path));
+    if (!bundleFiles && !/^https?:\/\//i.test(filePath)) roots.add(dirname(filePath));
     for (const root of roots) {
       if (isWithinDirectory(targetPath, root)) return true;
     }
@@ -637,7 +687,7 @@ export async function startAnnotateServer(
     if (mode === "annotate-last") {
       return { plan: markdown, sourceSave: disabledSourceSave("message-mode") };
     }
-    if (mode === "annotate-folder") {
+    if (mode === "annotate-folder" || bundleFiles) {
       return { plan: markdown, sourceSave: disabledSourceSave("folder-mode") };
     }
     if (renderHtml && rawHtml) {
@@ -683,6 +733,7 @@ export async function startAnnotateServer(
     filePath,
     folderPath,
     initialSingleFileSourcePath,
+    bundlePaths,
   });
 
   // Detect repo info (cached for this session)
@@ -755,7 +806,9 @@ export async function startAnnotateServer(
       ? []
       : mode === "annotate-folder" && folderPath
         ? [folderPath]
-        : mode === "annotate-app" && liveApp
+        : bundleFiles
+          ? [...bundlePaths]
+          : mode === "annotate-app" && liveApp
           ? [liveApp.targetUrl]
           : filePath ? [filePath] : [];
   const hostControl: HostControl = {
@@ -900,7 +953,9 @@ export async function startAnnotateServer(
               shareBaseUrl,
               pasteApiUrl,
               repoInfo,
-              projectRoot: folderPath || process.cwd(),
+              projectRoot: folderPath || bundleRoot || process.cwd(),
+              // The bundle's files in review order (annotate-bundle only).
+              ...(bundleFiles ? { bundle: bundleFiles } : {}),
               isWSL: wslFlag,
               // Extra extensions the user registered as markdown (#1307).
               // The renderer needs them to linkify relative/wiki links to
@@ -1059,7 +1114,10 @@ export async function startAnnotateServer(
             const docUrl = new URL(req.url);
             let changed = false;
             if (!docUrl.searchParams.has("base") && !/^https?:\/\//i.test(filePath)) {
-              docUrl.searchParams.set("base", mode === "annotate-folder" && folderPath ? folderPath : dirname(filePath));
+              docUrl.searchParams.set(
+                "base",
+                mode === "annotate-folder" && folderPath ? folderPath : bundleRoot ?? dirname(filePath),
+              );
               changed = true;
             }
             if (convertHtml && !docUrl.searchParams.has("convert")) {
@@ -1076,7 +1134,7 @@ export async function startAnnotateServer(
               onSourceDocumentServed: (path) => openedSourceFilePaths.add(path),
               rootPaths: getReferenceRootPaths(),
               annotateHistory:
-                mode === "annotate-folder" && annotateHistoryEnabled
+                (mode === "annotate-folder" || bundleFiles) && annotateHistoryEnabled
                   ? { compute: computeFolderAnnotateHistory }
                   : undefined,
               rootHtmlVersionDiff,

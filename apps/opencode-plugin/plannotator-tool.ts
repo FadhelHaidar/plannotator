@@ -42,6 +42,8 @@ import {
   plannotatorToolListText,
   plannotatorToolOpenedText,
   plannotatorDecisionHeading,
+  plannotatorBundleSubject,
+  looksLikeFilePath,
   plannotatorToolTargets,
   plannotatorUnknownSessionText,
   type PlannotatorCloseOutcome,
@@ -214,8 +216,14 @@ const LAST_SUBJECT = "your last message";
 export function commandSubject(command: string, rawArgs: string): { kind: LaunchKind; subject: string } | null {
   const words = rawArgs.trim().split(/\s+/).filter((word) => word && !word.startsWith("-"));
   switch (command) {
-    case "plannotator-annotate":
+    case "plannotator-annotate": {
+      // Several file paths open as one review: name it as a bundle (the mod's rule).
+      const distinct = [...new Set(words)];
+      if (distinct.length > 1 && distinct.every(looksLikeFilePath)) {
+        return { kind: "annotate", subject: plannotatorBundleSubject(distinct) };
+      }
       return { kind: "annotate", subject: annotateSubject(words) };
+    }
     case "plannotator-review": {
       // `--base <ref>` / `--diff-type <id>` take a value that is not a target.
       const all = rawArgs.trim().split(/\s+/).filter(Boolean);
@@ -242,7 +250,8 @@ export function toolSubject(call: PlannotatorToolInput): string {
   const targets = plannotatorToolTargets(call);
   switch (call.action) {
     case "annotate":
-      return annotateSubject(targets);
+      // A list of files is one review of all of them, named as such.
+      return Array.isArray(call.target) ? plannotatorBundleSubject(targets) : annotateSubject(targets);
     case "review":
       return reviewSubject(targets);
     default:
@@ -265,15 +274,19 @@ export function quoteReviewWord(word: string): string | null {
 
 /** The arguments one tool call's launch runs with. */
 export function toolLaunchRequest(call: PlannotatorToolInput):
-  | { ok: true; command: string; rawArgs: string; annotateArgs?: ParsedAnnotateArgs }
+  | { ok: true; command: string; rawArgs: string; annotateArgs?: ParsedAnnotateArgs; annotateBundle?: string[] }
   | { ok: false; error: string } {
   switch (call.action) {
     case "annotate": {
-      const target = plannotatorToolTargets(call)[0] as string;
+      const targets = plannotatorToolTargets(call);
+      const target = targets[0] as string;
       return {
         ok: true,
         command: "plannotator-annotate",
-        rawArgs: target,
+        rawArgs: targets.join(" "),
+        // A list (two or more, the contract drops duplicates): one review of
+        // all of them, each its own CLI argument, in the agent's order.
+        ...(targets.length > 1 ? { annotateBundle: targets } : {}),
         // One argument whatever it holds: never re-split.
         annotateArgs: {
           filePath: target.replace(/^@/, ""),
@@ -340,6 +353,8 @@ export interface PlannotatorToolDeps {
     command: string;
     rawArgs: string;
     annotateArgs?: ParsedAnnotateArgs;
+    /** A list target: the files opened as one review (a bundle), in order. */
+    annotateBundle?: readonly string[];
     launch: CliLaunch;
   }) => Promise<void>;
   /**
@@ -383,8 +398,6 @@ export async function runPlannotatorTool(
     // Reserved for live comments: no comment is ever delivered yet.
     return PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT;
   }
-  // Several files as one review need a CLI with bundles; none has them yet.
-  if (Array.isArray(call.target)) return PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT;
 
   let owner: ToolSessionOwner = { root: context.sessionID, subagent: false };
   try {
@@ -419,6 +432,7 @@ export async function runPlannotatorTool(
       command: request.command,
       rawArgs: request.rawArgs,
       ...(request.annotateArgs ? { annotateArgs: request.annotateArgs } : {}),
+      ...(request.annotateBundle ? { annotateBundle: request.annotateBundle } : {}),
       launch: handle.observer,
     })
     .catch((error) => {
@@ -458,6 +472,8 @@ export async function runPlannotatorTool(
     case "ready":
       return plannotatorToolOpenedText(subject, start.url, gate, handle.launch.id);
     case "failed":
+      // An older CLI's answer to a list of files: the update text, as is.
+      if (start.message === PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT) return start.message;
       return `Plannotator could not start: ${start.message}`;
     case "ended":
       return "Plannotator could not start: it exited before opening the page.";

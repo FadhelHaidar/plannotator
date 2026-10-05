@@ -15,6 +15,15 @@ import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallba
 import { toast, Toaster } from 'sonner';
 import { type Origin, getAgentName } from '@plannotator/shared/agents';
 import { isDiagramRenderKind, shouldStripFrontmatter } from '@plannotator/shared/annotatable';
+import {
+  annotateBundleBaseName,
+  annotateBundleIndexOf,
+  annotateBundleRelativePath,
+  annotateBundleRoot,
+  annotateBundleTargetText,
+  parseAnnotateBundle,
+  type AnnotateBundleFile,
+} from '@plannotator/shared/annotate-bundle';
 import { setExtraMarkdownExtensions } from '@plannotator/ui/utils/markdownExtensions';
 import { documentRendersHtml, htmlAssetRouteFromDocument, resolveHtmlLinkIntent } from '@plannotator/ui/utils/htmlLinkNavigation';
 import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
@@ -130,7 +139,7 @@ import { useExternalAnnotationHighlights } from '@plannotator/ui/hooks/useExtern
 import { useUndoHistory } from '@plannotator/ui/hooks/useUndoHistory';
 import { buildPlanAgentInstructions } from '@plannotator/ui/utils/planAgentInstructions';
 import { buildAnnotateAgentInstructions, resolveAnnotateInstructionsSurface } from '@plannotator/ui/utils/annotateAgentInstructions';
-import { useFileBrowser } from '@plannotator/ui/hooks/useFileBrowser';
+import { useFileBrowser, type DirState } from '@plannotator/ui/hooks/useFileBrowser';
 import { getFileEditStatus } from '@plannotator/ui/components/sidebar/FileBrowser';
 import { isVaultBrowserEnabled } from '@plannotator/ui/utils/obsidian';
 import { isFileBrowserEnabled, getFileBrowserSettings } from '@plannotator/ui/utils/fileBrowser';
@@ -273,6 +282,8 @@ import {
   buildAnnotateApprovalBody,
   buildCompleteAnnotateFeedback,
 } from './annotateSubmission';
+import { applyRestoredAnchors } from './restoredAnchors';
+import { annotationOwnsHighlight } from '@plannotator/ui/utils/annotationOwnsHighlight';
 import { blocksForDocument, collectSubmittedAnnotations, mergeExternalAnnotations, mergeExternalsIntoMessageEntries, resolveFeedbackSections } from './feedbackDocuments';
 import { buildDecisionSpec, type DecisionActionId, type DecisionMenuItem } from '@plannotator/ui/utils/decisionSpec';
 import { DecisionNoteDialog, type DecisionHandler } from '@plannotator/ui/components/DecisionControl';
@@ -428,12 +439,6 @@ type DocumentHistoryAction =
 
 const itemId = (item: { id: string }): string => item.id;
 
-function annotationOwnsHighlight(annotation: Annotation): boolean {
-  return !annotation.diffContext
-    && annotation.type !== AnnotationType.GLOBAL_COMMENT
-    && !annotation.id.startsWith('ann-checkbox-')
-    && !isQuestionAnswerRow(annotation);
-}
 
 /** Hint shown following the cursor while hovering a sidebar/panel resize handle. */
 const RESIZE_HANDLE_TOOLTIP = 'Click to close · Drag to resize';
@@ -650,6 +655,10 @@ const App: React.FC = () => {
   const [approvalNotesSupported, setApprovalNotesSupported] = useState(false);
   const [clientLease, setClientLease] = useState<AnnotateClientLeaseConfig | null>(null);
   const [annotateSource, setAnnotateSource] = useState<'file' | 'message' | 'folder' | null>(null);
+  // A review of several files (annotate-bundle): a folder-like session over
+  // this explicit, ordered list (annotateSource stays 'folder').
+  const [bundleFiles, setBundleFiles] = useState<AnnotateBundleFile[] | null>(null);
+  const bundlePaths = useMemo(() => bundleFiles?.map((file) => file.path) ?? null, [bundleFiles]);
   const [recentMessages, setRecentMessages] = useState<PickerMessage[]>([]);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const messageStateCacheRef = useRef<Map<string, MessageAnnotationState>>(new Map());
@@ -1554,7 +1563,20 @@ const App: React.FC = () => {
   // reports each restore pass, so an annotation the pass re-anchored clears its
   // own chip and one it could not adds it.
   const [markdownUnanchoredIds, setMarkdownUnanchoredIds] = useState<ReadonlySet<string>>(() => new Set());
-  const handleRestoreReport = useCallback(({ attempted, unanchored }: AnnotationRestoreReport) => {
+  const handleRestoreReport = useCallback(({ attempted, unanchored, moved }: AnnotationRestoreReport) => {
+    // A restore across a document change (a draft reopened after the file was
+    // edited, a plan revision) re-anchors comments by their text, but their
+    // stored blockId still names the old position, which the export turns into
+    // a line label. Write back where each text is now ('' when it is gone), so
+    // the label is true or absent, never wrong. An unchanged document reports
+    // no `moved` entries and this is a no-op.
+    if (moved && moved.length > 0) {
+      setAnnotations((current) => {
+        const next = applyRestoredAnchors(current, moved);
+        if (next !== current) annotationsRef.current = next;
+        return next;
+      });
+    }
     setMarkdownUnanchoredIds((prev) => {
       if (prev.size === 0 && unanchored.length === 0) return prev;
       const next = new Set(prev);
@@ -1753,12 +1775,41 @@ const App: React.FC = () => {
   });
 
   const fileBrowserDirs = useMemo(() => {
-    const projectDirs = projectRoot ? [projectRoot] : [];
+    // A bundle's root only labels its files: the Files tab lists the bundle
+    // itself (bundleDirState below), never a walk of that directory.
+    const projectDirs = projectRoot && !bundleFiles ? [projectRoot] : [];
     const userDirs = isFileBrowserEnabled()
       ? getFileBrowserSettings().directories
       : [];
     return [...new Set([...projectDirs, ...userDirs])];
-  }, [projectRoot, uiPrefs]);
+  }, [projectRoot, bundleFiles, uiPrefs]);
+
+  // The bundle as a fixed file-browser section: its files in the given order
+  // (never sorted), labelled relative to the deepest directory holding them
+  // all. It is not fetched or watched; the Files tab and the WebMCP document
+  // list see it beside any directories the user configured.
+  const bundleDirState = useMemo<DirState | null>(() => {
+    if (!bundleFiles) return null;
+    const root = annotateBundleRoot(bundleFiles.map((file) => file.path));
+    // The file browser joins `${dir.path}/${node.path}`; the filesystem root
+    // is therefore the empty string, so "/" + "a/b.md" stays absolute.
+    const dirPath = root.replace(/[\\/]+$/, '');
+    return {
+      path: dirPath,
+      name: `${bundleFiles.length} files in this review`,
+      tree: bundleFiles.map((file) => {
+        const relative = annotateBundleRelativePath(file.path, dirPath);
+        return { name: relative, path: relative, type: 'file' as const };
+      }),
+      isLoading: false,
+      error: null,
+      hasLoadedTree: true,
+    };
+  }, [bundleFiles]);
+  const navigatorFileBrowser = useMemo(
+    () => (bundleDirState ? { ...fileBrowser, dirs: [bundleDirState, ...fileBrowser.dirs] } : fileBrowser),
+    [bundleDirState, fileBrowser],
+  );
 
   // Clear active file when file browser is disabled
   useEffect(() => {
@@ -1960,6 +2011,31 @@ const App: React.FC = () => {
     });
   }, [editableDocuments, linkedDocHook, fileBrowser, convertHtml, isEditingMarkdown]);
 
+  // --- Review of several files (annotate-bundle) ---------------------------
+  // Opening a bundle file goes through the file-browser selection path, so
+  // the active file, the doc URL and the linked document stay in step exactly
+  // as in a folder session. The open document's place in the bundle drives
+  // the header switcher, the Ask AI surface line and the export order.
+  const bundleIndex = bundleFiles
+    ? annotateBundleIndexOf(bundleFiles, linkedDocHook.isActive ? linkedDocHook.filepath : null)
+    : -1;
+  const openBundleFile = React.useCallback((path: string, options?: { revealSidebar?: boolean }) => {
+    if (!bundleDirState) return Promise.resolve();
+    return handleFileBrowserSelect(path, bundleDirState.path, options);
+  }, [bundleDirState, handleFileBrowserSelect]);
+  const openBundleFileAt = React.useCallback((index: number) => {
+    const file = bundleFiles?.[index];
+    // The switcher moves through the files without popping the sidebar open.
+    if (file) void openBundleFile(file.path, { revealSidebar: false });
+  }, [bundleFiles, openBundleFile]);
+  // The first file opens as soon as the session loads.
+  const bundleOpenedRef = useRef(false);
+  useEffect(() => {
+    if (!bundleFiles || bundleOpenedRef.current || isLoading) return;
+    bundleOpenedRef.current = true;
+    openBundleFileAt(0);
+  }, [bundleFiles, isLoading, openBundleFileAt]);
+
   // Route linked doc opens through the correct endpoint based on current context
   const handleOpenLinkedDoc = React.useCallback((
     docPath: string,
@@ -2037,6 +2113,11 @@ const App: React.FC = () => {
     // "Viewing / Back to …" header is its only way back), and `--markdown`
     // sessions convert HTML to markdown, so they follow that convention too.
     const openOptions = intent.rendersHtml ? { revealSidebar: false } : undefined;
+    // A link to another file of the same review opens it as that bundle file.
+    if (bundleFiles && annotateBundleIndexOf(bundleFiles, intent.path) >= 0) {
+      void openBundleFile(intent.path, openOptions);
+      return;
+    }
     // Folder sessions route through the file-browser selection handler so the
     // active file, the sidebar and the linked doc stay in step.
     const activeDirState = fileBrowser.dirs.find(d => d.path === fileBrowser.activeDirPath);
@@ -2055,6 +2136,8 @@ const App: React.FC = () => {
     fileBrowser.activeFile,
     handleFileBrowserSelect,
     handleOpenLinkedDoc,
+    bundleFiles,
+    openBundleFile,
   ]);
 
   // The header Back control for a linked HTML document. It exists because an
@@ -2063,15 +2146,30 @@ const App: React.FC = () => {
   // way out anyone can count on. Named after the document it returns to, which
   // is always the session's root: useLinkedDoc keeps one root snapshot, not a
   // stack, so back() from any depth lands there.
+  // A review of several files has no root document: leaving a document the
+  // bundle files link to goes back to the bundle file it was opened from (the
+  // last one shown), never to the folder's empty "choose a file" state.
+  const [lastBundlePath, setLastBundlePath] = useState<string | null>(null);
+  useEffect(() => {
+    if (bundleFiles && bundleIndex >= 0) setLastBundlePath(bundleFiles[bundleIndex]!.path);
+  }, [bundleFiles, bundleIndex]);
+  const bundleBackPath = bundleFiles ? lastBundlePath ?? bundleFiles[0]?.path ?? null : null;
+
   const htmlLinkedDocBackTarget = useMemo(() => {
     if (!isHtmlSurface || !linkedDocHook.isActive) return null;
-    const root = sourceFilePath;
+    // A bundle file is not a detour: the switcher moves between the files.
+    if (bundleIndex >= 0) return null;
+    const root = bundleBackPath ?? sourceFilePath;
     if (!root) return 'Back';
     return `Back to ${root.split('/').pop() || root}`;
-  }, [isHtmlSurface, linkedDocHook.isActive, sourceFilePath]);
+  }, [isHtmlSurface, linkedDocHook.isActive, sourceFilePath, bundleIndex, bundleBackPath]);
 
   // Wrap linked doc back to also clear file browser active file
   const handleLinkedDocBack = React.useCallback(() => {
+    if (bundleBackPath) {
+      void openBundleFile(bundleBackPath, { revealSidebar: false });
+      return;
+    }
     linkedDocHook.back();
     if (isEditingMarkdown) {
       setIsEditingMarkdown(false);
@@ -2080,7 +2178,7 @@ const App: React.FC = () => {
     }
     fileBrowser.setActiveFile(null);
     archive.clearSelection();
-  }, [linkedDocHook, isEditingMarkdown, fileBrowser, archive]);
+  }, [linkedDocHook, isEditingMarkdown, fileBrowser, archive, bundleBackPath, openBundleFile]);
 
   // Derive annotation counts per file from linked doc cache (includes active doc's live state)
   const allAnnotationCounts = useMemo(() => {
@@ -2098,12 +2196,13 @@ const App: React.FC = () => {
     if (allDirPaths.length === 0) return allAnnotationCounts;
     const counts = new Map<string, number>();
     for (const [fp, count] of allAnnotationCounts) {
-      if (allDirPaths.some(dir => pathIsInsideDir(fp, dir))) {
+      // A bundle's files count wherever they live.
+      if (allDirPaths.some(dir => pathIsInsideDir(fp, dir)) || (bundleFiles && annotateBundleIndexOf(bundleFiles, fp) >= 0)) {
         counts.set(fp, count);
       }
     }
     return counts;
-  }, [allAnnotationCounts, fileBrowser.dirs]);
+  }, [allAnnotationCounts, fileBrowser.dirs, bundleFiles]);
 
   const hasFileAnnotations = fileAnnotationCounts.size > 0;
 
@@ -2144,7 +2243,8 @@ const App: React.FC = () => {
   }, [allAnnotationCounts, isCompactFilesSurfaceOpen, isCompactTouchLayout, openSidebarTab, sidebar]);
 
   // Context-aware back label for linked doc navigation
-  const backLabel = annotateSource === 'folder' ? 'file list'
+  const backLabel = bundleBackPath ? annotateBundleBaseName(bundleBackPath)
+    : annotateSource === 'folder' ? 'file list'
     : annotateSource === 'file' ? 'file'
     : annotateSource === 'message' ? 'message'
     : 'plan';
@@ -2294,6 +2394,7 @@ const App: React.FC = () => {
     sourceFilePath,
     sourceConverted,
     annotateSource,
+    bundleOrder: bundlePaths,
   }), [
     linkedDocHook.getFeedbackDocuments,
     allAnnotations,
@@ -2303,6 +2404,7 @@ const App: React.FC = () => {
     sourceFilePath,
     sourceConverted,
     annotateSource,
+    bundlePaths,
   ]);
 
   const annotationsOutput = useMemo(() => {
@@ -2323,7 +2425,7 @@ const App: React.FC = () => {
           sections.blocks,
           sections.annotations,
           sections.globalAttachments,
-          annotateSource === 'message' ? 'Message Feedback' : annotateSource === 'folder' ? 'Folder Feedback' : annotateSource === 'file' ? 'File Feedback' : 'Plan Feedback',
+          annotateSource === 'message' ? 'Message Feedback' : bundleFiles ? 'Review Feedback' : annotateSource === 'folder' ? 'Folder Feedback' : annotateSource === 'file' ? 'File Feedback' : 'Plan Feedback',
           annotateSource ?? 'plan',
           { sourceConverted: sections.sourceConverted },
         )
@@ -2346,7 +2448,7 @@ const App: React.FC = () => {
     return output.replace(/^\n+/, '');
     // skillContentGeneration re-runs this once lazily fetched human-only skill
     // contents land in the export registry (module state the exporters read).
-  }, [getFeedbackSections, editorAnnotations, codeAnnotations, annotateSource, skillContentGeneration]);
+  }, [getFeedbackSections, editorAnnotations, codeAnnotations, annotateSource, bundleFiles, skillContentGeneration]);
 
   // Code-file comments are intentionally not serialized into share URLs in v1.
   // Hide share entry points once they exist so we do not silently drop feedback.
@@ -2988,7 +3090,7 @@ const App: React.FC = () => {
       setAnnotations(restored);
       // Apply highlights to DOM after a tick
       setTimeout(() => {
-        viewerRef.current?.applySharedAnnotations(restored.filter(a => !a.diffContext));
+        viewerRef.current?.applySharedAnnotations(restored.filter(annotationOwnsHighlight));
       }, 100);
     }
     scheduleDraftSave();
@@ -3316,11 +3418,13 @@ const App: React.FC = () => {
       codeAnnotations: discard ? [] : codeAnnotations,
       title: annotateSource === 'message'
         ? 'Message Feedback'
-        : annotateSource === 'folder'
-          ? 'Folder Feedback'
-          : annotateSource === 'file'
-            ? 'File Feedback'
-            : 'Plan Feedback',
+        : bundleFiles
+          ? 'Review Feedback'
+          : annotateSource === 'folder'
+            ? 'Folder Feedback'
+            : annotateSource === 'file'
+              ? 'File Feedback'
+              : 'Plan Feedback',
       subject: annotateSource ?? 'plan',
       sourceConverted: sections.sourceConverted,
       directEditsSection: buildEditsSection(),
@@ -3332,6 +3436,7 @@ const App: React.FC = () => {
     });
   }, [
     annotateSource,
+    bundleFiles,
     buildEditsSection,
     buildFeedbackMessageEntries,
     buildSavedChangesSection,
@@ -3606,7 +3711,7 @@ const App: React.FC = () => {
         if (!res.ok) throw new Error('Not in API mode');
         return res.json();
       })
-      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'annotate-app' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; appUrl?: string; targetUrl?: string; liveToken?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; approvalNotesSupported?: boolean; clientLease?: AnnotateClientLeaseConfig; renderAs?: DocumentRenderAs; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; planRevision?: number; archivePlans?: ArchivedPlan[]; projectRoot?: string; planDir?: string; isWSL?: boolean; markdownExtensions?: string[]; documentDrafts?: boolean; serverConfig?: { displayName?: string; gitUser?: string; autoUpdate?: boolean; autoUpdateEnv?: boolean }; autoUpdateNotice?: unknown; autoUpdateSupported?: boolean; autoUpdateActive?: boolean; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; feedbackTemplates?: AnnotateFeedbackTemplates }) => {
+      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'annotate-app' | 'annotate-bundle' | 'archive' | 'goal-setup'; bundle?: unknown; goalSetup?: GoalSetupBundle; filePath?: string; appUrl?: string; targetUrl?: string; liveToken?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; approvalNotesSupported?: boolean; clientLease?: AnnotateClientLeaseConfig; renderAs?: DocumentRenderAs; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; planRevision?: number; archivePlans?: ArchivedPlan[]; projectRoot?: string; planDir?: string; isWSL?: boolean; markdownExtensions?: string[]; documentDrafts?: boolean; serverConfig?: { displayName?: string; gitUser?: string; autoUpdate?: boolean; autoUpdateEnv?: boolean }; autoUpdateNotice?: unknown; autoUpdateSupported?: boolean; autoUpdateActive?: boolean; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; feedbackTemplates?: AnnotateFeedbackTemplates }) => {
         // Initialize config store with server-provided values (config file > cookie > default)
         configStore.init(data.serverConfig);
         // Extra extensions the user registered as markdown (#1307) — the
@@ -3662,8 +3767,9 @@ const App: React.FC = () => {
           const diagramSource = data.plan.replace(/\r\n?/g, '\n');
           setMarkdown(diagramSource);
           originalMarkdownRef.current = diagramSource;
-        } else if (data.mode === 'annotate-folder') {
-          // Folder annotation mode: clear demo content, let user pick a file
+        } else if (data.mode === 'annotate-folder' || data.mode === 'annotate-bundle') {
+          // Folder annotation mode: clear demo content, let user pick a file.
+          // A bundle opens its first file once loaded (see the effect below).
           setMarkdown('');
         } else if (typeof data.plan === 'string') {
           // CM6 joins lines with \n; CRLF input would make an untouched
@@ -3677,17 +3783,21 @@ const App: React.FC = () => {
           }
         }
         setIsApiMode(true);
-        if (data.mode === 'annotate' || data.mode === 'annotate-last' || data.mode === 'annotate-folder' || data.mode === 'annotate-app') {
+        // A bundle is a folder session over an explicit, ordered list.
+        const bundle = data.mode === 'annotate-bundle' ? parseAnnotateBundle(data.bundle) : null;
+        const folderLike = data.mode === 'annotate-folder' || data.mode === 'annotate-bundle';
+        setBundleFiles(bundle);
+        if (data.mode === 'annotate' || data.mode === 'annotate-last' || folderLike || data.mode === 'annotate-app') {
           setAnnotateMode(true);
           setGate(data.gate ?? false);
           setApprovalNotesSupported(data.approvalNotesSupported ?? false);
           setClientLease(data.clientLease ?? null);
         }
-        if (data.mode === 'annotate-folder') {
+        if (folderLike) {
           sidebar.open('files');
         }
-        if (data.mode === 'annotate' || data.mode === 'annotate-last' || data.mode === 'annotate-folder' || data.mode === 'annotate-app') {
-          setAnnotateSource(data.mode === 'annotate-last' ? 'message' : data.mode === 'annotate-folder' ? 'folder' : 'file');
+        if (data.mode === 'annotate' || data.mode === 'annotate-last' || folderLike || data.mode === 'annotate-app') {
+          setAnnotateSource(data.mode === 'annotate-last' ? 'message' : folderLike ? 'folder' : 'file');
         }
         if (data.mode === 'annotate-last' && data.recentMessages && data.recentMessages.length > 0) {
           messageStateCacheRef.current = new Map();
@@ -3705,7 +3815,7 @@ const App: React.FC = () => {
         setFeedbackTemplates(data.feedbackTemplates ?? null);
         setSourceConverted(!!data.sourceConverted);
         if (data.filePath) {
-          setImageBaseDir(data.mode === 'annotate-folder' ? data.filePath : data.filePath.replace(/\/[^/]+$/, ''));
+          setImageBaseDir(folderLike ? data.filePath : data.filePath.replace(/\/[^/]+$/, ''));
           if (data.mode === 'annotate') {
             setSourceFilePath(data.filePath);
           }
@@ -3971,6 +4081,10 @@ const App: React.FC = () => {
   }, [openAgentTerminal]);
 
   const getAnnotateFeedbackTarget = useCallback((): AnnotateFeedbackTarget => {
+    // A review of several files names every one, whichever is open.
+    if (bundlePaths) {
+      return { fileHeader: 'Files', filePath: annotateBundleTargetText(bundlePaths) };
+    }
     if (linkedDocHook.isActive && linkedDocHook.filepath) {
       return { fileHeader: 'File', filePath: linkedDocHook.filepath };
     }
@@ -3986,6 +4100,7 @@ const App: React.FC = () => {
     return { fileHeader: 'File', filePath: 'current file' };
   }, [
     annotateSource,
+    bundlePaths,
     fileBrowser.activeDirPath,
     fileBrowser.activeFile,
     linkedDocHook.filepath,
@@ -4845,6 +4960,8 @@ const App: React.FC = () => {
         annotations: allAnnotations,
       },
       roots: annotationDocumentRoots,
+      // A review of several files lists them in review order.
+      order: bundlePaths,
     });
   }, [
     linkedDocHook.getDocAnnotations,
@@ -4852,6 +4969,7 @@ const App: React.FC = () => {
     currentDocumentGroupKey,
     currentDocumentGroupLabel,
     annotationDocumentRoots,
+    bundlePaths,
   ]);
 
   const otherDocumentAnnotationCount = useMemo(
@@ -4906,6 +5024,10 @@ const App: React.FC = () => {
     // convention, where the sidebar's "Viewing / Back to …" header is the
     // way out.
     const openOptions = documentRendersHtml(path, convertHtml) ? { revealSidebar: false } : undefined;
+    if (bundleFiles && annotateBundleIndexOf(bundleFiles, path) >= 0) {
+      await openBundleFile(path, openOptions);
+      return;
+    }
     const dir = fileBrowser.dirs.find((d) => !d.isVault && pathIsInsideDir(path, d.path))?.path;
     if (dir) {
       await handleFileBrowserSelect(path, dir, openOptions);
@@ -4918,7 +5040,7 @@ const App: React.FC = () => {
       return;
     }
     await linkedDocHook.open(path, undefined, undefined, openOptions);
-  }, [convertHtml, fileBrowser.dirs, handleFileBrowserSelect, handleLinkedDocBack, linkedDocHook, sourceFilePath]);
+  }, [bundleFiles, convertHtml, fileBrowser.dirs, handleFileBrowserSelect, handleLinkedDocBack, linkedDocHook, openBundleFile, sourceFilePath]);
 
   const jumpToAnnotation = useAnnotationJump({
     currentPath: currentDocumentPath,
@@ -5009,7 +5131,7 @@ const App: React.FC = () => {
       getDocAnnotations: linkedDocHook.getDocAnnotations,
       open: (path: string) => linkedDocHook.open(path),
     },
-    fileBrowserDirs: fileBrowser.dirs,
+    fileBrowserDirs: navigatorFileBrowser.dirs,
     fileBrowserActiveFile: fileBrowser.activeFile,
     openFolderFile: handleFileBrowserSelect,
     viewerRef,
@@ -5094,6 +5216,10 @@ const App: React.FC = () => {
           sourceConverted: aiSourceConverted,
           renderAs: aiRenderAs,
           annotations: aiAnnotationsContext,
+          // "annotating mock.html, file 2 of 3" in a review of several files.
+          ...(bundleFiles && bundleIndex >= 0 && linkedDocHook.isActive
+            ? { bundlePosition: { index: bundleIndex + 1, total: bundleFiles.length } }
+            : {}),
         },
       };
     }
@@ -5126,6 +5252,9 @@ const App: React.FC = () => {
     rawHtml,
     renderAs,
     versionInfo,
+    bundleFiles,
+    bundleIndex,
+    linkedDocHook.isActive,
   ]);
 
   const aiChat = useAIChat({
@@ -6005,12 +6134,30 @@ const App: React.FC = () => {
 
   const compactDocumentTitle = useMemo(() => {
     const path = linkedDocHook.filepath ?? sourceFilePath ?? fileBrowser.activeFile;
+    // A review of several files names the open file's place in it.
+    if (path && bundleFiles && bundleIndex >= 0) {
+      return `${annotateBundleBaseName(path)} (${bundleIndex + 1} of ${bundleFiles.length})`;
+    }
     if (path) return path.replace(/\\/g, '/').split('/').pop() || path;
     if (archive.currentInfo?.title) return archive.currentInfo.title;
     if (annotateSource === 'message') return 'Message';
     if (annotateSource === 'folder') return 'Choose a file';
     return 'Plan';
-  }, [annotateSource, archive.currentInfo?.title, fileBrowser.activeFile, linkedDocHook.filepath, sourceFilePath]);
+  }, [annotateSource, archive.currentInfo?.title, bundleFiles, bundleIndex, fileBrowser.activeFile, linkedDocHook.filepath, sourceFilePath]);
+
+  // The header's file switcher for a review of several files.
+  const bundleSwitcher = useMemo(() => {
+    if (!bundleFiles) return undefined;
+    const open = bundleIndex >= 0 ? bundleFiles[bundleIndex] : undefined;
+    return {
+      index: bundleIndex + 1,
+      total: bundleFiles.length,
+      name: open ? annotateBundleBaseName(open.path) : undefined,
+      title: open?.path,
+      onPrevious: () => openBundleFileAt(Math.max(0, bundleIndex - 1)),
+      onNext: () => openBundleFileAt(bundleIndex < 0 ? 0 : Math.min(bundleFiles.length - 1, bundleIndex + 1)),
+    };
+  }, [bundleFiles, bundleIndex, openBundleFileAt]);
 
   const callbackShareUrlReady = callbackConfig
     ? Boolean(shareUrl || shortShareUrl || (renderAs === 'html' && (shareHtml || rawHtml)))
@@ -6184,6 +6331,24 @@ const App: React.FC = () => {
   const compactDocumentActions: CompactPlanAction[] = !isCompactTouchLayout
     ? []
     : [
+        // The header switcher is desktop-only; a review of several files
+        // moves between them from here on the compact shell.
+        ...(bundleSwitcher && bundleSwitcher.index > 1
+          ? [{
+              id: 'bundle-previous' as const,
+              label: 'Previous file',
+              subtitle: bundleFiles?.[bundleSwitcher.index - 2] ? annotateBundleBaseName(bundleFiles[bundleSwitcher.index - 2]!.path) : undefined,
+              onSelect: bundleSwitcher.onPrevious,
+            }]
+          : []),
+        ...(bundleSwitcher && bundleSwitcher.index < bundleSwitcher.total
+          ? [{
+              id: 'bundle-next' as const,
+              label: 'Next file',
+              subtitle: bundleFiles?.[bundleSwitcher.index] ? annotateBundleBaseName(bundleFiles[bundleSwitcher.index]!.path) : undefined,
+              onSelect: bundleSwitcher.onNext,
+            }]
+          : []),
         ...(canEditMarkdown && !isEditingMarkdown && !isPlanDiffActive && !archive.archiveMode && !isHtmlSurface
           ? [{
               id: 'edit' as const,
@@ -6427,7 +6592,7 @@ const App: React.FC = () => {
           if (compact) closeCompactNavigator();
         }}
         linkedDocFilepath={linkedDocHook.filepath}
-        onLinkedDocBack={linkedDocHook.isActive
+        onLinkedDocBack={linkedDocHook.isActive && bundleIndex < 0
           ? () => {
               handleLinkedDocBack();
               if (compact) closeCompactNavigator();
@@ -6438,7 +6603,7 @@ const App: React.FC = () => {
         fileAnnotationCounts={fileAnnotationCounts}
         highlightedFiles={highlightedFiles}
         fileEditStatuses={editableDocuments.fileEditStatuses}
-        fileBrowser={fileBrowser}
+        fileBrowser={navigatorFileBrowser}
         onFilesSelectFile={handleNavigatorFileSelect}
         onFilesFetchAll={() => fileBrowser.fetchAll(fileBrowserDirs)}
         onFilesRetryVaultDir={(vaultPath) => fileBrowser.addVaultDir(vaultPath)}
@@ -6590,6 +6755,7 @@ const App: React.FC = () => {
           compactDocumentTitle={compactDocumentTitle}
           compactSessionActions={compactSessionActions}
           compactDocumentActions={compactDocumentActions}
+          bundleSwitcher={bundleSwitcher}
           isApiMode={isApiMode}
           annotateMode={annotateMode}
           archiveMode={archive.archiveMode}
@@ -7145,7 +7311,8 @@ const App: React.FC = () => {
                       linkedDocHook.isActive
                         ? {
                             filepath: linkedDocHook.filepath!,
-                            onBack: handleLinkedDocBack,
+                            // A bundle file has no Close: the switcher moves between the files.
+                            onBack: bundleIndex >= 0 ? undefined : handleLinkedDocBack,
                             label: annotateSource === 'folder'
                               ? undefined
                               : fileBrowser.dirs.find(d => d.path === fileBrowser.activeDirPath)?.isVault

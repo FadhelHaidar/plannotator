@@ -5,6 +5,7 @@ import path from "path";
 import { spawnSync } from "child_process";
 import { handleAnnotateCommand, handleAnnotateLastCommand, handleReviewCommand } from "./commands";
 import { OpenCodePromptDeliveryError } from "./prompt-delivery-error";
+import { getReviewDeniedSuffix } from "@plannotator/shared/prompts";
 
 // Inject the annotate-server stub through CommandDeps rather than
 // `mock.module`. Bun's module mocks are process-global and cannot be unset,
@@ -213,6 +214,43 @@ describe("handleReviewCommand open state (--base / --diff-type)", () => {
     expect(options.includeReviewDirectory).toBe(false);
     expect(deps.client.tui.showToast).not.toHaveBeenCalled();
   });
+
+  // Feedback made only of PR description / PR comment / editor comments has
+  // an empty `annotations` (those ride only in `feedback`). It must be
+  // delivered like any feedback; only the server-marked platform status post
+  // goes through without the suffix.
+  test("zero-annotation feedback gets the suffix; the platform status post does not", async () => {
+    const previousDataDir = process.env.PLANNOTATOR_DATA_DIR;
+    process.env.PLANNOTATOR_DATA_DIR = makeTempDir();
+    try {
+      const caller = initGitRepo("caller");
+      writeFileSync(path.join(caller, "caller.ts"), "caller-only\n");
+      const runWith = async (decision: Record<string, unknown>) => {
+        const deps = {
+          ...makeDeps(),
+          directory: caller,
+          startReviewServer: mock(async (_options: any) => ({
+            port: 0, url: "http://localhost", isRemote: false,
+            waitForDecision: async () => ({ approved: false, annotations: [], ...decision }),
+            stop: () => {},
+          })),
+        };
+        await handleReviewCommand({ properties: { arguments: "", sessionID: "s" } }, deps as any);
+        expect(deps.client.session.prompt).toHaveBeenCalledTimes(1);
+        return (deps.client.session.prompt.mock.calls[0]?.[0] as any).body.parts[0].text as string;
+      };
+
+      const descriptionOnly = await runWith({ feedback: "## PR description\n\nExplain the fallback." });
+      expect(descriptionOnly).toContain("Explain the fallback.");
+      expect(descriptionOnly).toContain(getReviewDeniedSuffix("opencode"));
+
+      const status = "Pull request reviewed on GitHub: https://github.com/o/r/pull/1";
+      expect(await runWith({ feedback: status, platform: true })).toBe(status);
+    } finally {
+      if (previousDataDir === undefined) delete process.env.PLANNOTATOR_DATA_DIR;
+      else process.env.PLANNOTATOR_DATA_DIR = previousDataDir;
+    }
+  });
 });
 
 describe("handleAnnotateCommand", () => {
@@ -237,6 +275,50 @@ describe("handleAnnotateCommand", () => {
       withoutSession,
     );
     expect(startAnnotateServerMock.mock.calls[0]?.[0].approvalNotesSupported).toBe(false);
+  });
+
+  // Several existing file paths are one review of all of them (the shared
+  // bundle rule): the failure is the old ambiguity error, or a prompt that
+  // names only one of the files.
+  test("several file paths open one bundle session, and the prompt names every file", async () => {
+    const projectRoot = makeTempDir();
+    const spec = path.join(projectRoot, "spec.md");
+    const mock_ = path.join(projectRoot, "mock.html");
+    writeFileSync(spec, "# Spec\n");
+    writeFileSync(mock_, "<h1>Mock</h1>");
+    const deps: any = makeDeps();
+    deps.directory = projectRoot;
+    deps.startAnnotateServer = mock(async (options: any) => ({
+      port: 0,
+      url: "http://localhost",
+      isRemote: false,
+      options,
+      waitForDecision: async () => ({ feedback: "Two notes.", annotations: [{ id: "a1" }] }),
+      stop: () => {},
+    }));
+
+    await handleAnnotateCommand({ properties: { arguments: "mock.html spec.md", sessionID: "session-123" } }, deps);
+
+    const options = deps.startAnnotateServer.mock.calls[0]?.[0];
+    expect(options.mode).toBe("annotate-bundle");
+    expect(options.bundleFiles).toEqual([
+      { path: mock_, renderAs: "html" },
+      { path: spec, renderAs: "markdown" },
+    ]);
+    const prompt = deps.client.session.prompt.mock.calls[0]?.[0].body.parts[0].text;
+    expect(prompt).toContain(`Files: ${mock_}, ${spec}`);
+  });
+
+  test("a list of file paths with a missing one opens nothing and names it", async () => {
+    const projectRoot = makeTempDir();
+    writeFileSync(path.join(projectRoot, "spec.md"), "# Spec\n");
+    const deps: any = makeDeps();
+    deps.directory = projectRoot;
+    deps.startAnnotateServer = mock(async () => { throw new Error("must not start"); });
+    await handleAnnotateCommand({ properties: { arguments: "spec.md typo.md", sessionID: "s" } }, deps);
+    expect(deps.startAnnotateServer).not.toHaveBeenCalled();
+    const logged = deps.client.app.log.mock.calls.map(([entry]: [{ message: string }]) => entry.message).join("\n");
+    expect(logged).toContain("File not found: typo.md");
   });
 
   test("injects approved feedback as non-blocking notes with file context", async () => {

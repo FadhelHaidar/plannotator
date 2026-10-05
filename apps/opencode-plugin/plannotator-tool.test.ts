@@ -32,7 +32,7 @@ const isWindows = process.platform === "win32";
 // the host-control paths answer: a current CLI, an older one without them, or
 // a current one with host control turned off (remote mode).
 // ---------------------------------------------------------------------------
-type StubBehavior = "current" | "older" | "disabled" | "disabled-remote" | "fail" | "slowfail";
+type StubBehavior = "current" | "older" | "disabled" | "disabled-remote" | "fail" | "slowfail" | "nobundle";
 
 function writeStub(root: string, behavior: StubBehavior): string {
   const binary = path.join(root, `cli-${behavior}.ts`);
@@ -42,6 +42,11 @@ import { appendFileSync } from "node:fs";
 import { handleHostControlRequest } from ${JSON.stringify(HOST_CONTROL)};
 const stdin = await Bun.stdin.text();
 appendFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), stdin, token: process.env.PLANNOTATOR_SESSION_BRIDGE_TOKEN ?? null }) + "\\n");
+if (${JSON.stringify(behavior)} === "nobundle") {
+  // A CLI from before bundles: several paths are its ambiguity error.
+  console.error("Ambiguous annotate arguments: several of these name something that exists.");
+  process.exit(1);
+}
 if (${JSON.stringify(behavior)} === "fail" || ${JSON.stringify(behavior)} === "slowfail") {
   if (${JSON.stringify(behavior)} === "slowfail") await Bun.sleep(600);
   console.error("File not found: missing.md");
@@ -142,7 +147,7 @@ function makeHost(root: string, options: { parents?: Record<string, string> } = 
       request.command,
       { sessionID: request.sessionID, prompt: { text: request.rawArgs } },
       nativeDeps,
-      { launch: request.launch, ...(request.annotateArgs ? { annotateArgs: request.annotateArgs } : {}) },
+      { launch: request.launch, annotateArgs: request.annotateArgs, annotateBundle: request.annotateBundle },
     ),
     resolveOwner: (sessionID) => resolveRootSession(ctx, sessionID),
     reportLateFailure: async ({ sessionID, text }) => {
@@ -268,14 +273,12 @@ describe("registration", () => {
 });
 
 describe("calls answered without opening anything", () => {
-  test("invalid input, a bundle, reply, and a subagent's last are refused and launch nothing", async () => {
+  test("invalid input, reply, and a subagent's last are refused and launch nothing", async () => {
     const host = makeHost(root, { parents: { ses_child: "ses_a" } });
     const launch = mock(host.toolDeps.launch);
     const deps = { ...host.toolDeps, launch };
 
     expect(await runPlannotatorTool({ action: "annotate" }, { sessionID: "ses_a" }, deps)).toContain("Invalid plannotator call");
-    expect(await runPlannotatorTool({ action: "annotate", target: ["a.md", "b.md"] }, { sessionID: "ses_a" }, deps))
-      .toBe(PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT);
     expect(await runPlannotatorTool({ action: "reply", session: "pn-abcdef", comment: "c1", text: "done" }, { sessionID: "ses_a" }, deps))
       .toBe(PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT);
     // `last` reads the main session's messages, which a subagent did not write.
@@ -376,6 +379,51 @@ describe.skipIf(isWindows)("the tool through the real launch path (stub CLI)", (
     await decide(portOf(text), { decision: "approved" });
     const delivered = await waitFor(() => host.prompts[0]);
     expect(delivered.text).toBe(`Plannotator: notes.md (${sessionIdOf(text)}) — Approved.`);
+  }, 30_000);
+
+  // Failure caught: a list of files opened as one file, split again, reordered,
+  // unnamed in the result/list/heading, or an older CLI's ambiguity error
+  // shown raw instead of the update text.
+  test("a list target opens one bundle review, named, listed, and headed", async () => {
+    process.env.PLANNOTATOR_BIN = writeStub(root, "current");
+    const host = makeHost(root);
+    const text = await runPlannotatorTool({ action: "annotate", target: ["notes.md", "my notes.md"] }, { sessionID: "ses_a" }, host.toolDeps);
+    const id = sessionIdOf(text);
+    expect(text).toContain("Opened 2 files: notes.md, my notes.md in Plannotator: http://localhost:");
+    expect(readArgv(root, "current")[0]!.argv).toEqual(["annotate", "notes.md", "my notes.md", "--json"]);
+    expect(await runPlannotatorTool({ action: "list" }, { sessionID: "ses_a" }, host.toolDeps))
+      .toContain(`${id} · annotate · 2 files: notes.md, my notes.md · http://localhost:`);
+
+    await decide(portOf(text), { decision: "annotated", feedback: "Both need work.", annotationCount: 3 });
+    const delivered = await waitFor(() => host.prompts[0]);
+    expect(delivered.text.split("\n")[0]).toBe(`Plannotator: 2 files: notes.md, my notes.md (${id}) — Feedback · 3 comments.`);
+    expect(delivered.text).toContain("notes.md, my notes.md");
+    expect(delivered.text).toContain("Both need work.");
+
+    process.env.PLANNOTATOR_BIN = writeStub(root, "nobundle");
+    expect(await runPlannotatorTool({ action: "annotate", target: ["notes.md", "my notes.md"] }, { sessionID: "ses_a" }, host.toolDeps))
+      .toBe(PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT);
+  }, 30_000);
+
+  // Failure caught (#1719): feedback on a PR that is not a platform post (only
+  // description notes, so zero line annotations) headed or framed as a posted
+  // review; or a real platform post framed as a change request.
+  test("review headings follow the platform flag, never the annotation count", async () => {
+    process.env.PLANNOTATOR_BIN = writeStub(root, "current");
+    const host = makeHost(root);
+    const pr = "https://github.com/o/r/pull/12";
+    const text = await runPlannotatorTool({ action: "review", target: pr }, { sessionID: "ses_a" }, host.toolDeps);
+    const id = sessionIdOf(text);
+    await decide(portOf(text), { decision: "annotated", approved: false, isPRMode: true, platform: false, feedback: "Clarify the description.", annotationCount: 0 });
+    const delivered = await waitFor(() => host.prompts[0]);
+    expect(delivered.text.split("\n")[0]).toBe(`Plannotator: PR #12 (${id}) — Changes requested.`);
+    expect(delivered.text).toContain("Clarify the description.");
+    expect(delivered.text.trim().endsWith("Clarify the description.")).toBe(false); // the change-request suffix follows
+
+    const posted = await runPlannotatorTool({ action: "review", target: pr }, { sessionID: "ses_a" }, host.toolDeps);
+    await decide(portOf(posted), { decision: "annotated", approved: false, isPRMode: true, platform: true, feedback: "Review posted to GitHub.", annotationCount: 2 });
+    const second = await waitFor(() => host.prompts[1]);
+    expect(second.text).toBe(`Plannotator: PR #12 (${sessionIdOf(posted)}) — Review posted.\n\nReview posted to GitHub.`);
   }, 30_000);
 
   // Failure caught: a subagent's review owned by (and delivered to) the

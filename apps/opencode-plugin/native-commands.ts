@@ -78,6 +78,8 @@ export interface CliCommandRequest {
   createSessionBridge?: () => DisposableSessionBridge | undefined;
   /** The `plannotator` tool's pre-split annotate arguments. */
   annotateArgs?: ParsedAnnotateArgs;
+  /** The tool's list of files, opened as one review. */
+  annotateBundle?: readonly string[];
   /** The tracked launch (the tool's list/close, the decision heading). */
   launch?: CliLaunch;
 }
@@ -131,7 +133,7 @@ export async function runNativeCommand(
   invocation: V2CommandInvocation,
   deps: NativeCommandDeps,
   /** The `plannotator` tool's launch: its own record and pre-split arguments. */
-  tool?: { launch: CliLaunch; annotateArgs?: ParsedAnnotateArgs },
+  tool?: { launch: CliLaunch; annotateArgs?: ParsedAnnotateArgs; annotateBundle?: readonly string[] },
 ): Promise<void> {
   const sessionID = invocation.sessionID;
   // The raw argument tail, exactly as OpenCode 1 forwards it. The CLI's own
@@ -169,6 +171,7 @@ export async function runNativeCommand(
       bridge: await deps.getBridgeContext(),
       createSessionBridge: () => createNativeCommandSessionBridge(deps.ctx, sessionID),
       ...(tool?.annotateArgs ? { annotateArgs: tool.annotateArgs } : {}),
+      ...(tool?.annotateBundle ? { annotateBundle: tool.annotateBundle } : {}),
       ...(launch ? { launch } : {}),
     });
   } finally {

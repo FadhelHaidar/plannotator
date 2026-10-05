@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  isOlderCliBundleRefusal,
   normalizePlannotatorSessionId,
+  plannotatorBundleSubject,
   parsePlannotatorToolInput,
   plannotatorDecisionHeading,
   plannotatorToolArgs,
@@ -74,6 +76,14 @@ describe('plannotator tool v2: several targets', () => {
     expect(args({ action: 'annotate', target: ['b.md', 'a.md', 'b.md'], gate: true })).toEqual(['b.md', 'a.md', '--gate'])
   })
 
+  // The failure: a bare list entry ("README") reaches the CLI as a word, the
+  // CLI reads the list as prose, and a missing file silently narrows the
+  // review to the files that exist.
+  test('a bare list entry is passed as a path, so a missing one fails instead of being read as prose', () => {
+    expect(args({ action: 'annotate', target: ['README', 'docs/a.md'] })).toEqual(['./README', 'docs/a.md'])
+    expect(args({ action: 'annotate', target: 'README' })).toEqual(['README'])
+  })
+
   test('a one-file list is the plain single-target call', () => {
     const parsed = parsePlannotatorToolInput({ action: 'annotate', target: ['notes.md', ' notes.md '] })
     expect(parsed.ok && parsed.input.target).toBe('notes.md')
@@ -84,6 +94,24 @@ describe('plannotator tool v2: several targets', () => {
     expect(error({ action: 'annotate', target: ['a.md', '--hook'] })).toContain('target[1]')
     expect(error({ action: 'annotate', target: ['a.md', 3] })).toContain('target[1]')
     expect(error({ action: 'review', target: ['a', 'b'] })).toContain('annotate')
+  })
+})
+
+describe('plannotator tool: reviews of several files', () => {
+  // The failure: a host cannot tell an older CLI's refusal of several paths
+  // from the current CLI's own ambiguity error (a URL among the files), and
+  // either tells the agent to update when it should fix its call, or the
+  // reverse.
+  test('an older CLI refusal is the ambiguity error without the bundle hint', () => {
+    const older = 'Ambiguous annotate arguments: 2 of them each resolve to an existing target.\n  a.md -> /r/a.md\n  b.md -> /r/b.md\nRe-run with exactly one target: plannotator annotate <...>'
+    expect(isOlderCliBundleRefusal(older)).toBe(true)
+    expect(isOlderCliBundleRefusal(`${older}\nTo review several files together, pass only their paths: plannotator annotate a.md b.html`)).toBe(false)
+    expect(isOlderCliBundleRefusal('File not found: a.md')).toBe(false)
+  })
+
+  test('a bundle is named by its count and first file names', () => {
+    expect(plannotatorBundleSubject(['/r/spec.md', '/r/mock.html'])).toBe('2 files: spec.md, mock.html')
+    expect(plannotatorBundleSubject(['a.md', 'docs/b.md', 'c\\d.md', 'e.md', 'f.md'])).toBe('5 files: a.md, b.md, d.md +2 more')
   })
 })
 

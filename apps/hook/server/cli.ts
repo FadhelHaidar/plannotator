@@ -234,6 +234,8 @@ export const SUBCOMMAND_HELP: Record<string, string> = {
     "  plannotator annotate <file.md | file.txt | file.html | https://... | folder/> [--markdown] [--no-jina] [--tailscale] [--gate] [--json] [--hook] [--require-approval] [--result-file <path>]",
     "",
     "Open a markdown/text/HTML file, a URL, or a folder of documents in the annotation UI.",
+    "Several existing file paths (plannotator annotate spec.md mock.html notes.md) open",
+    "as one review, in that order, with one decision for all of them.",
     "",
     "Options:",
     "  --markdown    Convert HTML input to markdown instead of rendering it raw",

@@ -67,7 +67,8 @@ import {
 	type FolderAnnotateHistory,
 } from "./reference.ts";
 import { closeAllFileBrowserWatchers, handleFileBrowserStreamRequest } from "./file-browser-watch.ts";
-import { getExtraMarkdownExtensions, MAX_ANNOTATABLE_FILE_BYTES, resolveUserPath, warmFileListCache } from "../generated/resolve-file.ts";
+import { getExtraMarkdownExtensions, isAnnotatableTextPath, MAX_ANNOTATABLE_FILE_BYTES, resolveUserPath, warmFileListCache } from "../generated/resolve-file.ts";
+import { annotateBundleDocumentCounts, annotateBundleRoot, type AnnotateBundleFile } from "../generated/annotate-bundle.ts";
 import { createExternalAnnotationHandler } from "./external-annotations.ts";
 import { createNodeAgentTerminalBridge } from "./agent-terminal.ts";
 import {
@@ -253,6 +254,8 @@ export async function startAnnotateServer(options: {
 	origin?: string;
 	mode?: string;
 	folderPath?: string;
+	/** `annotate-bundle`: the files in review order (mirrors packages/server/annotate.ts). */
+	bundleFiles?: AnnotateBundleFile[];
 	recentMessages?: { messageId: string; text: string; timestamp?: string }[];
 	sharingEnabled?: boolean;
 	shareBaseUrl?: string;
@@ -291,6 +294,14 @@ export async function startAnnotateServer(options: {
 	if (options.liveApp && isRemoteSession()) {
 		throw new Error("Live app annotation is unavailable in remote mode");
 	}
+
+	// Several files reviewed as one: mirror of packages/server/annotate.ts.
+	const bundleFiles = options.mode === "annotate-bundle" ? [...(options.bundleFiles ?? [])] : null;
+	if (bundleFiles && bundleFiles.length < 2) {
+		throw new Error("An annotate bundle needs at least two files");
+	}
+	const bundlePaths = bundleFiles ? bundleFiles.map((file) => file.path) : [];
+	const bundleRoot = bundleFiles ? annotateBundleRoot(bundlePaths) : null;
 
 	const gitUser = detectGitUser();
 	const sharingEnabled =
@@ -377,7 +388,9 @@ export async function startAnnotateServer(options: {
 			? `annotate-app\0${liveAppDraftIdentity(options.liveApp.targetUrl)}`
 			: options.mode === "annotate-folder" && options.folderPath
 				? `folder:${resolvePath(options.folderPath)}`
-				: options.renderHtml && options.rawHtml ? options.rawHtml : options.markdown;
+				: bundleFiles
+					? `bundle:\0${bundlePaths.join("\0")}`
+					: options.renderHtml && options.rawHtml ? options.rawHtml : options.markdown;
 	const draftKey = contentHash(draftSource);
 	// Drafts follow the file as well as its text: mirror of the Bun server
 	// (packages/server/annotate.ts), logic in annotate-draft.ts. Not governed
@@ -390,7 +403,7 @@ export async function startAnnotateServer(options: {
 		contentKey: draftKey,
 		filePath: draftFilePath,
 		documents:
-			draftFilePath !== null || (options.mode === "annotate-folder" && options.folderPath)
+			draftFilePath !== null || (options.mode === "annotate-folder" && options.folderPath) || bundleFiles
 				? {
 						isAllowed: (path) => isPathAllowed(path, getReferenceRootPaths()),
 					}
@@ -406,7 +419,9 @@ export async function startAnnotateServer(options: {
 			? []
 			: options.mode === "annotate-folder" && options.folderPath
 				? [options.folderPath]
-				: options.mode === "annotate-app" && options.liveApp
+				: bundleFiles
+					? [...bundlePaths]
+					: options.mode === "annotate-app" && options.liveApp
 					? [options.liveApp.targetUrl]
 					: options.filePath ? [options.filePath] : [];
 	const hostControl: HostControl = {
@@ -481,6 +496,18 @@ export async function startAnnotateServer(options: {
 		folderAnnotateHistoryCache.set(resolvedFilePath, result);
 		return result;
 	}
+	// A bundle saves each text file's version history when it opens (mirrors
+	// packages/server/annotate.ts).
+	if (bundleFiles && annotateHistoryEnabled) {
+		for (const file of bundleFiles) {
+			if (file.renderAs === "html" || !isAnnotatableTextPath(file.path)) continue;
+			try {
+				computeFolderAnnotateHistory(file.path, readFileSync(file.path, "utf-8"));
+			} catch {
+				// Unreadable now: /api/doc reports the problem when it is opened.
+			}
+		}
+	}
 
 	// Durable submit records (#678): the caller consuming waitForDecision() may
 	// be gone (agent-side timeout) by the time the reviewer clicks submit —
@@ -522,7 +549,9 @@ export async function startAnnotateServer(options: {
 				? "annotate-last"
 				: options.mode === "annotate-folder"
 					? "annotate-folder"
-					: singleFileLocalAnnotate
+					: bundleFiles
+						? "annotate-bundle"
+						: singleFileLocalAnnotate
 						? "annotate"
 						: "annotate-url";
 
@@ -543,7 +572,9 @@ export async function startAnnotateServer(options: {
 				target:
 					options.mode === "annotate-app" && options.liveApp
 						? { url: options.liveApp.targetUrl }
-						: isUrlTarget
+						: bundleFiles
+							? { documents: annotateBundleDocumentCounts(bundlePaths, annotationList) }
+							: isUrlTarget
 							? { url: options.filePath }
 							: options.mode === "annotate-last"
 								? { filePath: options.filePath }
@@ -602,7 +633,8 @@ export async function startAnnotateServer(options: {
 	function isAllowedHtmlSharePath(targetPath: string): boolean {
 		const roots = new Set<string>([process.cwd()]);
 		if (options.folderPath) roots.add(options.folderPath);
-		if (!/^https?:\/\//i.test(options.filePath)) roots.add(dirname(options.filePath));
+		for (const path of bundlePaths) roots.add(dirname(path));
+		if (!bundleFiles && !/^https?:\/\//i.test(options.filePath)) roots.add(dirname(options.filePath));
 		for (const root of roots) {
 			if (isWithinDirectory(targetPath, root)) return true;
 		}
@@ -727,7 +759,7 @@ export async function startAnnotateServer(options: {
 		if (mode === "annotate-last") {
 			return { plan: options.markdown, sourceSave: disabledSourceSave("message-mode") };
 		}
-		if (mode === "annotate-folder") {
+		if (mode === "annotate-folder" || bundleFiles) {
 			return { plan: options.markdown, sourceSave: disabledSourceSave("folder-mode") };
 		}
 		if (options.renderHtml && options.rawHtml) {
@@ -773,6 +805,7 @@ export async function startAnnotateServer(options: {
 		filePath: options.filePath,
 		folderPath: options.folderPath,
 		initialSingleFileSourcePath,
+		bundlePaths,
 	});
 
 	// Live app session state, populated after the annotate port is known (the
@@ -914,7 +947,9 @@ export async function startAnnotateServer(options: {
 				shareBaseUrl,
 				pasteApiUrl,
 				repoInfo,
-				projectRoot: options.folderPath || process.cwd(),
+				projectRoot: options.folderPath || bundleRoot || process.cwd(),
+				// The bundle's files in review order (annotate-bundle only).
+				...(bundleFiles ? { bundle: bundleFiles } : {}),
 				// Extra extensions the user registered as markdown (#1307).
 				// The renderer needs them to linkify relative/wiki links to
 				// sibling docs the same way it linkifies .md ones.
@@ -1113,7 +1148,12 @@ export async function startAnnotateServer(options: {
 			// Inject source file's directory as base for relative path resolution.
 			// Skip for URL annotations — there's no local directory to resolve against.
 			if (!url.searchParams.has("base") && options.filePath && !/^https?:\/\//i.test(options.filePath)) {
-				url.searchParams.set("base", options.mode === "annotate-folder" && options.folderPath ? options.folderPath : dirname(resolvePath(options.filePath)));
+				url.searchParams.set(
+					"base",
+					options.mode === "annotate-folder" && options.folderPath
+						? options.folderPath
+						: bundleRoot ?? dirname(resolvePath(options.filePath)),
+				);
 			}
 			if (options.convertHtml && !url.searchParams.has("convert")) {
 				url.searchParams.set("convert", "1");
@@ -1127,7 +1167,7 @@ export async function startAnnotateServer(options: {
 				onSourceDocumentServed: (path) => openedSourceFilePaths.add(path),
 				rootPaths: getReferenceRootPaths(),
 				annotateHistory:
-					options.mode === "annotate-folder" && annotateHistoryEnabled
+					(options.mode === "annotate-folder" || bundleFiles) && annotateHistoryEnabled
 						? { compute: computeFolderAnnotateHistory }
 						: undefined,
 				rootHtmlVersionDiff,

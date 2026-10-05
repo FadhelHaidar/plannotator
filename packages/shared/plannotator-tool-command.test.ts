@@ -42,6 +42,13 @@ describe('plannotatorCommandToToolInput: taken over', () => {
     expect(take('plannotator annotate-last --json')).toEqual({ action: 'last' })
   })
 
+  test('several file paths become one review of several files, in order', () => {
+    expect(take('plannotator annotate spec.md mock.html notes.md')).toEqual({ action: 'annotate', target: ['spec.md', 'mock.html', 'notes.md'] })
+    expect(take('plannotator annotate docs/a ~/b.md @c.md --gate --json')).toEqual({ action: 'annotate', target: ['docs/a', '~/b.md', '@c.md'], gate: true })
+    // An exact duplicate collapses; one path left is a plain target.
+    expect(take('plannotator annotate a.md a.md')).toEqual({ action: 'annotate', target: 'a.md' })
+  })
+
   test('surrounding whitespace is ignored', () => {
     expect(take('  plannotator   annotate\ta.md  \n')).toEqual({ action: 'annotate', target: 'a.md' })
   })
@@ -101,8 +108,11 @@ describe('plannotatorCommandToToolInput: passed through', () => {
       'plannotator claude-mod-plan',
       'plannotator --version',
       'plannotator annotate',
-      'plannotator annotate a.md b.md',
+      // Several targets that are not all file paths: the CLI's tolerant
+      // resolution reads the prose, so the command runs as written.
       'plannotator annotate look at notes.md please',
+      'plannotator annotate notes.md https://example.com',
+      'plannotator review a.md b.md',
       'plannotator review ../a ../b',
       'plannotator last extra',
       'plannotatorx annotate a.md',

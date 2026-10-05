@@ -14,6 +14,7 @@ import type { ViewerHandle } from "../components/Viewer";
 import type { SidebarTab } from "./useSidebar";
 import type { SourceSaveCapability } from "@plannotator/core/source-save";
 import type { VersionInfo } from "./usePlanDiff";
+import { annotationOwnsHighlight } from "../utils/annotationOwnsHighlight";
 
 export interface LinkedDocLoadData {
   markdown?: string;
@@ -312,7 +313,7 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
     if (saved.annotations.length) {
       setTimeout(() => {
         viewerRef.current?.clearAllHighlights();
-        viewerRef.current?.applySharedAnnotations(saved.annotations);
+        viewerRef.current?.applySharedAnnotations(saved.annotations.filter(annotationOwnsHighlight));
       }, HIGHLIGHT_REAPPLY_DELAY);
     }
   }, [
@@ -442,7 +443,7 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
     if (cached?.annotations.length) {
       setTimeout(() => {
         viewerRef.current?.clearAllHighlights();
-        viewerRef.current?.applySharedAnnotations(cached.annotations);
+        viewerRef.current?.applySharedAnnotations(cached.annotations.filter(annotationOwnsHighlight));
       }, HIGHLIGHT_REAPPLY_DELAY);
     }
   }, [
@@ -589,7 +590,7 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
     if (state.root.annotations.length) {
       setTimeout(() => {
         viewerRef.current?.clearAllHighlights();
-        viewerRef.current?.applySharedAnnotations(state.root.annotations);
+        viewerRef.current?.applySharedAnnotations(state.root.annotations.filter(annotationOwnsHighlight));
       }, HIGHLIGHT_REAPPLY_DELAY);
     }
   }, [

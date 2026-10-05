@@ -162,7 +162,7 @@ const serverPlugin = {
             request.command,
             { sessionID: request.sessionID, prompt: { text: request.rawArgs } },
             nativeDeps,
-            { launch: request.launch, ...(request.annotateArgs ? { annotateArgs: request.annotateArgs } : {}) },
+            { launch: request.launch, annotateArgs: request.annotateArgs, annotateBundle: request.annotateBundle },
           ),
           resolveOwner: (sessionID) => resolveRootSession(v2, sessionID),
           reportLateFailure: async ({ sessionID, text }) => {

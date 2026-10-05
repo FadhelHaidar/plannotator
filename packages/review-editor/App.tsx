@@ -4324,6 +4324,13 @@ const ReviewApp: React.FC = () => {
           approved: false,
           feedback: statusMessage,
           annotations: [],
+          // Marks this as the platform status post: the Claude Code mod logs
+          // it instead of starting a turn, and OpenCode, Pi and the CLI output
+          // deliver the status line verbatim, without the request-changes
+          // suffix. Never inferred from the empty annotations: agent-path
+          // feedback can be all PR description / PR comment / editor
+          // comments, which ride only in `feedback`.
+          platform: true,
           ...(effectiveAgent && { agentSwitch: effectiveAgent }),
         }),
       }).catch(() => {});

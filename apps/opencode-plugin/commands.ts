@@ -30,11 +30,20 @@ import { htmlToMarkdown } from "@plannotator/shared/html-to-markdown";
 import { parseAnnotateArgs } from "@plannotator/shared/annotate-args";
 import {
   annotateInputNamesExistingTarget,
+  annotatePathExists,
   buildAmbiguousAnnotateArgsMessage,
+  buildMissingAnnotateFilesMessage,
   buildUnresolvedAnnotateArgsMessage,
+  probeAnnotateBundlePath,
   probeAnnotateToken,
+  resolveAnnotateBundleFiles,
   selectAnnotateTokenTarget,
 } from "@plannotator/shared/annotate-target";
+import {
+  annotateBundleRoot,
+  annotateBundleTargetText,
+  type AnnotateBundleFile,
+} from "@plannotator/shared/annotate-bundle";
 import { formatIgnoredReviewWords, parseReviewArgs, resolveReviewTarget, withReviewDirectory } from "@plannotator/shared/review-args";
 import { urlToMarkdown, isConvertedSource } from "@plannotator/shared/url-to-markdown";
 import { buildLocalWorkspaceReview, type WorkspaceDiffType } from "@plannotator/server/review-workspace";
@@ -312,15 +321,17 @@ export async function handleReviewCommand(
         directory,
       });
 
-      // Append the verification-only suffix when the reviewer sent annotations to
-      // act on (PR mode included). Platform PR actions post a status message
-      // with no annotations — those go through verbatim, no suffix.
+      // Append the verification-only suffix to everything the reviewer sent
+      // (PR mode included, and feedback with no code annotations: PR
+      // description, PR comment and editor comments ride only in `feedback`).
+      // The platform path's status post, which the review server marks
+      // `platform: true`, goes through verbatim, no suffix.
       // Approvals carry the reviewer's approve-time notes after the prompt.
       const message = result.approved
         ? composeReviewApprovedMessage("opencode", result.feedback)
-        : result.annotations.length > 0
-          ? `${result.feedback}${getReviewDeniedSuffix("opencode")}`
-          : result.feedback;
+        : result.platform === true
+          ? result.feedback
+          : `${result.feedback}${getReviewDeniedSuffix("opencode")}`;
 
       try {
         await client.session.prompt({
@@ -366,15 +377,34 @@ export async function handleAnnotateCommand(
   // pre-pass, and unrecognized dash-prefixed tokens disable tolerance so a
   // typo'd flag errors the way it always did.
   const tolerantRoot = directory || process.cwd();
+  // Several existing file paths (every word one) open as one review, in the
+  // typed order: the shared bundle rule, same as the CLI.
+  let bundleFiles: AnnotateBundleFile[] | undefined;
   if (!annotateInputNamesExistingTarget(rawFilePath, tolerantRoot)) {
-    const selection = selectAnnotateTokenTarget(rawFilePath, (token) =>
-      probeAnnotateToken(token, tolerantRoot, { bareDirectories: false }),
+    const selection = selectAnnotateTokenTarget(
+      rawFilePath,
+      (token) => probeAnnotateToken(token, tolerantRoot, { bareDirectories: false }),
+      { bundlePath: (token) => probeAnnotateBundlePath(token, tolerantRoot), pathExists: (token) => annotatePathExists(token, tolerantRoot) },
     );
-    if (selection.kind === "single") {
+    if (selection.kind === "missing") {
+      // A list of files with a typo: never review fewer than were named.
+      client.app.log({ level: "error", message: buildMissingAnnotateFilesMessage(selection.missing) });
+      return;
+    } else if (selection.kind === "bundle") {
+      const checked = resolveAnnotateBundleFiles(
+        selection.files.map((file) => file.value),
+        { convertHtml: renderMarkdownFlag },
+      );
+      if (!checked.ok) {
+        client.app.log({ level: "error", message: checked.message });
+        return;
+      }
+      bundleFiles = checked.files;
+    } else if (selection.kind === "single") {
       filePath = selection.candidate.value;
       rawFilePath = selection.candidate.value;
     } else if (selection.kind === "multiple") {
-      client.app.log({ level: "error", message: buildAmbiguousAnnotateArgsMessage(selection.candidates) });
+      client.app.log({ level: "error", message: buildAmbiguousAnnotateArgsMessage(selection.candidates, { bundleHint: true }) });
       return;
     } else if (selection.kind === "none" && selection.words.length > 1) {
       // Content flags only; --gate is transport for this invocation, not a
@@ -396,16 +426,23 @@ export async function handleAnnotateCommand(
   let rawHtml: string | undefined;
   let absolutePath: string;
   let folderPath: string | undefined;
-  let annotateMode: "annotate" | "annotate-folder" = "annotate";
+  let annotateMode: "annotate" | "annotate-folder" | "annotate-bundle" = "annotate";
   let isFolder = false;
   let sourceInfo: string | undefined;
   let sourceConverted = false;
   const agentCwd = directory || process.cwd();
 
   // --- URL annotation ---
-  const isUrl = /^https?:\/\//i.test(filePath);
+  const isUrl = !bundleFiles && /^https?:\/\//i.test(filePath);
 
-  if (isUrl) {
+  if (bundleFiles) {
+    // The deepest directory holding every file stands in for the session's
+    // path; the files ride the server's `bundleFiles`.
+    markdown = "";
+    absolutePath = annotateBundleRoot(bundleFiles.map((file) => file.path));
+    annotateMode = "annotate-bundle";
+    client.app.log({ level: "info", message: `Opening annotation UI for ${bundleFiles.length} files...` });
+  } else if (isUrl) {
     const useJina = resolveUseJina(noJina, loadConfig());
     client.app.log({ level: "info", message: `Fetching: ${filePath}${useJina ? " (via Jina Reader)" : " (via fetch+Turndown)"}...` });
     try {
@@ -499,6 +536,7 @@ export async function handleAnnotateCommand(
     mode: annotateMode,
     project: annotateProject,
     folderPath,
+    bundleFiles,
     sourceInfo,
     sourceConverted,
     rawHtml,
@@ -539,14 +577,19 @@ export async function handleAnnotateCommand(
         sessionAgent = undefined;
       }
       const agent = await resolveAddressableAgent({ client, agent: sessionAgent, directory });
+      // A bundle names every file of the review, in order.
+      const fileHeader = bundleFiles ? "Files" : isFolder ? "Folder" : "File";
+      const targetText = bundleFiles
+        ? annotateBundleTargetText(bundleFiles.map((file) => file.path))
+        : absolutePath;
       const text = result.approved
         ? getAnnotateApprovedWithNotesPrompt("opencode", undefined, {
-            context: `${isFolder ? "Folder" : "File"}: ${absolutePath}`,
+            context: `${fileHeader}: ${targetText}`,
             feedback: result.feedback,
           })
         : getAnnotateFileFeedbackPrompt("opencode", undefined, {
-            fileHeader: isFolder ? "Folder" : "File",
-            filePath: absolutePath,
+            fileHeader,
+            filePath: targetText,
             feedback: result.feedback,
           });
       await deliverOpenCodePrompt({
