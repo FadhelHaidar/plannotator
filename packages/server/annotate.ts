@@ -15,11 +15,13 @@ import { appHtmlResponse, likelyAppHtmlEncoding, prewarmAppHtml } from "@plannot
 import { isRemoteSession, getServerHostname, startBunServerOnAvailablePort, buildAdvertisedUrl } from "./remote";
 import { getRepoInfo } from "./repo";
 import type { Origin } from "@plannotator/shared/agents";
-import { handleImage, handleUpload, handleServerReady, handleDraftSave, handleDraftLoad, handleDraftDelete, handleApiNotFound, handleFavicon, handleReferenceSkills, handleReferenceSkillContent, handleSaveNotes, readDraftGenerationFromBody, readDraftGenerationFromUrl } from "./shared-handlers";
+import { handleImage, handleUpload, handleServerReady, handleApiNotFound, handleFavicon, handleReferenceSkills, handleReferenceSkillContent, handleSaveNotes, readDraftGenerationFromBody, readDraftGenerationFromUrl } from "./shared-handlers";
 import { handleDoc, handleDocExists, handleFileBrowserFiles, handleObsidianVaults, handleObsidianFiles, handleObsidianDoc, resolveAllowedDocPath, type FolderAnnotateHistory } from "./reference-handlers";
 import { closeAllFileBrowserWatchers, handleFileBrowserFilesStream } from "./reference-watch";
 import { getExtraMarkdownExtensions, MAX_ANNOTATABLE_FILE_BYTES, resolveUserPath, warmFileListCache } from "@plannotator/shared/resolve-file";
-import { contentHash, deleteDraft } from "./draft";
+import { contentHash } from "./draft";
+import { annotateDraftFilePath, createAnnotateDraftSession } from "@plannotator/shared/annotate-draft";
+import { isPathAllowed } from "@plannotator/shared/doc-resolve";
 import { getPlanVersion, getVersionCount, listVersions } from "@plannotator/shared/storage";
 import { computeAnnotateHistory, deriveAnnotateHistorySlug, persistAnnotateSubmission, type AnnotateHistoryResult } from "@plannotator/shared/annotate-history";
 import { htmlDiff } from "@plannotator/shared/html-diff";
@@ -49,7 +51,7 @@ import { getAutoUpdateAdvert } from "./auto-update";
 import { appendFeedbackRecord, type FeedbackDecision, type FeedbackSurface } from "@plannotator/shared/feedback-archive";
 import { isFaviconStyle, type FaviconStyle } from "@plannotator/shared/favicon";
 import { existsSync } from "fs";
-import { dirname, resolve as resolvePath } from "path";
+import { dirname, isAbsolute, resolve as resolvePath } from "path";
 import { isWithinDirectory } from "@plannotator/shared/html-assets-node";
 import { isWSL } from "./browser";
 import { handleOpenInApps, handleOpenIn } from "./open-in";
@@ -371,6 +373,25 @@ export async function startAnnotateServer(
         ? `folder:${resolvePath(folderPath)}`
         : renderHtml && rawHtml ? rawHtml : markdown;
   const draftKey = contentHash(draftSource);
+  // Drafts follow the file as well as its text (annotate-draft.ts): a single
+  // local file is also saved under its path, and the documents a local-file
+  // or folder session holds comments on are each saved under their own path,
+  // so the comments come back after an agent edits the file and the review
+  // is reopened. URL, live-app and agent-message sessions have no file path.
+  // Drafts are crash recovery, not history, so PLANNOTATOR_ANNOTATE_HISTORY
+  // does not govern them (it never governed the content-keyed draft either).
+  const draftFilePath = annotateDraftFilePath({ mode, filePath, resolve: resolvePath });
+  const annotateDrafts = createAnnotateDraftSession({
+    contentKey: draftKey,
+    filePath: draftFilePath,
+    documents:
+      draftFilePath !== null || (mode === "annotate-folder" && folderPath)
+        ? {
+            resolve: (path) => (isAbsolute(path) ? resolvePath(path) : null),
+            isAllowed: (path) => isPathAllowed(path, getReferenceRootPaths()),
+          }
+        : null,
+  });
 
   // Durable submit records (#678): the caller consuming waitForDecision() may
   // be gone (agent-side timeout) by the time the reviewer clicks submit —
@@ -823,6 +844,9 @@ export async function startAnnotateServer(
               // The renderer needs them to linkify relative/wiki links to
               // sibling docs the same way it linkifies .md ones.
               markdownExtensions: getExtraMarkdownExtensions(),
+              // Per-document draft copies (/api/draft/document): absent means
+              // the client keeps every comment in the session draft only.
+              ...(annotateDrafts.documentsEnabled ? { documentDrafts: true } : {}),
               serverConfig: getServerConfig(gitUser),
               ...getAutoUpdateAdvert(),
               agentTerminal: agentTerminal.capability,
@@ -1106,9 +1130,55 @@ export async function startAnnotateServer(
 
           // API: Annotation draft persistence
           if (url.pathname === "/api/draft") {
-            if (req.method === "POST") return handleDraftSave(req, draftKey);
-            if (req.method === "DELETE") return handleDraftDelete(draftKey, req);
-            return handleDraftLoad(draftKey);
+            if (req.method === "POST") {
+              try {
+                const saved = annotateDrafts.save(await req.json());
+                // With a path copy in use a rejected (stale-generation) save
+                // is reported, as PR review drafts do (#1590); every other
+                // session keeps the historical always-ok answer.
+                if (!saved && annotateDrafts.reportsRejectedSaves) {
+                  return Response.json(
+                    { ok: false, error: "stale draft generation", ...annotateDrafts.state() },
+                    { status: 409 },
+                  );
+                }
+                return Response.json({ ok: true });
+              } catch (err) {
+                const message = err instanceof Error ? err.message : "Failed to save draft";
+                console.error(`[draft] save failed: ${message}`);
+                return Response.json({ error: message }, { status: 500 });
+              }
+            }
+            if (req.method === "DELETE") {
+              annotateDrafts.remove(readDraftGenerationFromUrl(req));
+              return Response.json({ ok: true });
+            }
+            const loaded = annotateDrafts.load();
+            if (loaded.found) return Response.json(loaded.draft);
+            return Response.json(
+              { found: false, ...(loaded.draftGeneration !== null ? { draftGeneration: loaded.draftGeneration } : {}) },
+              { status: 404 },
+            );
+          }
+
+          // API: per-document draft copies (annotate-draft.ts). GET one
+          // document's saved comments; POST the session's documents.
+          if (url.pathname === "/api/draft/document") {
+            if (req.method === "GET") {
+              const result = annotateDrafts.loadDocument(url.searchParams.get("path"));
+              return Response.json(result.body, { status: result.status });
+            }
+            if (req.method === "POST") {
+              let body: unknown;
+              try {
+                body = await req.json();
+              } catch {
+                return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
+              }
+              const result = annotateDrafts.saveDocuments(body);
+              return Response.json(result.body, { status: result.status });
+            }
+            return Response.json({ error: "Method not allowed" }, { status: 405 });
           }
 
           // API: Client-lease SSE — see packages/shared/annotate-client-lease.ts.
@@ -1180,7 +1250,7 @@ export async function startAnnotateServer(
             // Decision-only line — a dismissal has no content, so a failed
             // write must not change the legacy draft behavior.
             archiveAnnotateDecision("", [], "dismissed");
-            deleteDraft(draftKey, readDraftGenerationFromUrl(req));
+            annotateDrafts.settle(readDraftGenerationFromUrl(req));
             clientLease.cancel();
             return Response.json({ ok: true });
           }
@@ -1237,7 +1307,7 @@ export async function startAnnotateServer(
               (body.annotations as unknown[] | undefined) || [],
               true,
             );
-            if (approvalDurable) deleteDraft(draftKey, readDraftGenerationFromBody(body));
+            if (approvalDurable) annotateDrafts.settle(readDraftGenerationFromBody(body));
             clientLease.cancel();
             return Response.json({ ok: true });
           }
@@ -1269,7 +1339,7 @@ export async function startAnnotateServer(
                 body.annotations || [],
                 false,
               );
-              if (feedbackDurable) deleteDraft(draftKey, readDraftGenerationFromBody(body));
+              if (feedbackDurable) annotateDrafts.settle(readDraftGenerationFromBody(body));
               clientLease.cancel();
 
               return Response.json({ ok: true });

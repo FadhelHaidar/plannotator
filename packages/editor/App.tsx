@@ -120,6 +120,7 @@ import { usePlanDiff, type VersionInfo, type VersionEntry, type PlanDiffFetchers
 import { useLinkedDoc, type LinkedDocSessionState } from '@plannotator/ui/hooks/useLinkedDoc';
 import { useCodeFilePopout } from '@plannotator/ui/hooks/useCodeFilePopout';
 import { useAnnotationDraft, type DraftEditedDocument, type DraftSavedFileChange } from '@plannotator/ui/hooks/useAnnotationDraft';
+import { useDocumentDrafts } from './hooks/useDocumentDrafts';
 import { useArchive } from '@plannotator/ui/hooks/useArchive';
 import { useEditorAnnotations } from '@plannotator/ui/hooks/useEditorAnnotations';
 import { useExternalAnnotations } from '@plannotator/ui/hooks/useExternalAnnotations';
@@ -460,6 +461,9 @@ const App: React.FC = () => {
   // an empty note. Always true in plan review.
   const notesSaveAvailable = displayedMarkdown.trim().length > 0;
   const [sourceFilePath, setSourceFilePath] = useState<string | undefined>();
+  // Per-document draft copies (/api/draft/document), advertised by local-file
+  // and folder annotate servers. See hooks/useDocumentDrafts.ts.
+  const [documentDraftsEnabled, setDocumentDraftsEnabled] = useState(false);
   // Mirrors linkedDocHook.filepath (declared later) so the parse memos below
   // can key frontmatter behavior off the ACTIVE document's path. Kept in sync
   // by an effect after the hook is created.
@@ -2550,11 +2554,28 @@ const App: React.FC = () => {
     return getEditedMarkdown();
   }, [editableDocuments, getEditedMarkdown]);
 
+  // What the session draft carries. With per-document copies the session
+  // draft is the ROOT document's (the file under review, or the folder's own
+  // comments) even while another document is open: that document's comments
+  // are saved under its own path by useDocumentDrafts. Without them it is the
+  // open document's, as it always was.
+  const { draftAnnotations, draftGlobalAttachments } = useMemo(() => {
+    const root = documentDraftsEnabled && linkedDocHook.isActive
+      ? linkedDocHook.getFeedbackDocuments().root
+      : null;
+    return root
+      ? {
+          draftAnnotations: mergeExternalAnnotations(root.annotations, externalAnnotations),
+          draftGlobalAttachments: root.globalAttachments,
+        }
+      : { draftAnnotations: allAnnotations, draftGlobalAttachments: globalAttachments };
+  }, [documentDraftsEnabled, linkedDocHook.isActive, linkedDocHook.getFeedbackDocuments, externalAnnotations, allAnnotations, globalAttachments]);
+
   // Auto-save annotation drafts
   const { draftBanner, restoreDraft, scheduleDraftSave, scheduleDraftSaveAfterSubmitFailure, getDraftGeneration, dismissDraft } = useAnnotationDraft({
-    annotations: allAnnotations,
+    annotations: draftAnnotations,
     codeAnnotations,
-    globalAttachments,
+    globalAttachments: draftGlobalAttachments,
     getEditedMarkdown: getDraftEditedMarkdown,
     getEditedDocuments: editableDocuments.getDraftDocuments,
     getSavedFileChanges: editableDocuments.getDraftSavedFileChanges,
@@ -2564,6 +2585,26 @@ const App: React.FC = () => {
     // land after the server's draft delete and ghost a "Draft Recovered"
     // banner into the next session for this plan. Saving resumes if it fails.
     submitted: !!submitted || isSubmitting,
+  });
+
+  // Every other document's comments, saved under that document's own path.
+  useDocumentDrafts({
+    enabled: documentDraftsEnabled && isApiMode && !isSharedSession && !goalSetupMode && !documentReadOnly,
+    submitted: !!submitted || isSubmitting,
+    activePath: linkedDocHook.filepath,
+    rootPath: sourceFilePath ?? null,
+    getFeedbackDocuments: linkedDocHook.getFeedbackDocuments,
+    annotations,
+    globalAttachments,
+    setAnnotations,
+    setGlobalAttachments,
+    updateStoredAnnotations: linkedDocHook.updateStoredAnnotations,
+    viewerRef,
+    onBeforeMerge: annotationHistory.clear,
+    onRestored: (path, count) => {
+      const name = path.split(/[\\/]/).pop() || path;
+      toast(`Restored ${count} saved ${count === 1 ? 'comment' : 'comments'} on ${name}`, { duration: 4000 });
+    },
   });
 
   // Fetch available agents for OpenCode (for validation on approve)
@@ -3543,7 +3584,7 @@ const App: React.FC = () => {
         if (!res.ok) throw new Error('Not in API mode');
         return res.json();
       })
-      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'annotate-app' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; appUrl?: string; targetUrl?: string; liveToken?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; approvalNotesSupported?: boolean; clientLease?: AnnotateClientLeaseConfig; renderAs?: DocumentRenderAs; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; planRevision?: number; archivePlans?: ArchivedPlan[]; projectRoot?: string; planDir?: string; isWSL?: boolean; markdownExtensions?: string[]; serverConfig?: { displayName?: string; gitUser?: string; autoUpdate?: boolean; autoUpdateEnv?: boolean }; autoUpdateNotice?: unknown; autoUpdateSupported?: boolean; autoUpdateActive?: boolean; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; feedbackTemplates?: AnnotateFeedbackTemplates }) => {
+      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'annotate-app' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; appUrl?: string; targetUrl?: string; liveToken?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; approvalNotesSupported?: boolean; clientLease?: AnnotateClientLeaseConfig; renderAs?: DocumentRenderAs; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; planRevision?: number; archivePlans?: ArchivedPlan[]; projectRoot?: string; planDir?: string; isWSL?: boolean; markdownExtensions?: string[]; documentDrafts?: boolean; serverConfig?: { displayName?: string; gitUser?: string; autoUpdate?: boolean; autoUpdateEnv?: boolean }; autoUpdateNotice?: unknown; autoUpdateSupported?: boolean; autoUpdateActive?: boolean; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; feedbackTemplates?: AnnotateFeedbackTemplates }) => {
         // Initialize config store with server-provided values (config file > cookie > default)
         configStore.init(data.serverConfig);
         // Extra extensions the user registered as markdown (#1307) — the
@@ -3638,6 +3679,7 @@ const App: React.FC = () => {
           setSelectedMessageId(null);
         }
         setSourceInfo(data.sourceInfo ?? undefined);
+        setDocumentDraftsEnabled(data.documentDrafts === true);
         setFeedbackTemplates(data.feedbackTemplates ?? null);
         setSourceConverted(!!data.sourceConverted);
         if (data.filePath) {

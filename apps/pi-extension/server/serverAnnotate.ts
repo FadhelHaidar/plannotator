@@ -2,7 +2,7 @@ import { annotateDiagramRenderKind } from "../generated/annotatable.ts";
 import { likelyAppHtmlEncoding, prewarmAppHtml } from "../generated/app-html.ts";
 import { createServer } from "node:http";
 import type { IncomingMessage } from "node:http";
-import { dirname, resolve as resolvePath } from "node:path";
+import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 
@@ -15,7 +15,9 @@ import {
 import { startLiveAppProxyNode } from "../generated/live-proxy-node.ts";
 import type { LiveAppProxy } from "../generated/live-proxy-core.ts";
 
-import { contentHash, deleteDraft } from "../generated/draft.ts";
+import { contentHash } from "../generated/draft.ts";
+import { annotateDraftFilePath, createAnnotateDraftSession } from "../generated/annotate-draft.ts";
+import { isPathAllowed } from "../generated/doc-resolve.ts";
 import { getPlanVersion, getVersionCount, listVersions } from "../generated/storage.ts";
 import { computeAnnotateHistory, deriveAnnotateHistorySlug, persistAnnotateSubmission, type AnnotateHistoryResult } from "../generated/annotate-history.ts";
 import { htmlDiff } from "../generated/html-diff.ts";
@@ -35,7 +37,6 @@ import {
 } from "../generated/source-save-node.ts";
 
 import {
-	handleDraftRequest,
 	handleFavicon,
 	handleImageRequest,
 	handleReferenceSkillsRequest,
@@ -364,6 +365,25 @@ export async function startAnnotateServer(options: {
 				? `folder:${resolvePath(options.folderPath)}`
 				: options.renderHtml && options.rawHtml ? options.rawHtml : options.markdown;
 	const draftKey = contentHash(draftSource);
+	// Drafts follow the file as well as its text: mirror of the Bun server
+	// (packages/server/annotate.ts), logic in annotate-draft.ts. Not governed
+	// by PLANNOTATOR_ANNOTATE_HISTORY: drafts are crash recovery.
+	const draftFilePath = annotateDraftFilePath({
+		mode: options.mode || "annotate",
+		filePath: options.filePath,
+		resolve: resolvePath,
+	});
+	const annotateDrafts = createAnnotateDraftSession({
+		contentKey: draftKey,
+		filePath: draftFilePath,
+		documents:
+			draftFilePath !== null || (options.mode === "annotate-folder" && options.folderPath)
+				? {
+						resolve: (path) => (isAbsolute(path) ? resolvePath(path) : null),
+						isAllowed: (path) => isPathAllowed(path, getReferenceRootPaths()),
+					}
+				: null,
+	});
 
 	// Per-file version history → powers the native version diff in annotate mode.
 	// Unlike the plan flow (slug = first-heading + date), annotate keys history by
@@ -853,6 +873,7 @@ export async function startAnnotateServer(options: {
 				// The renderer needs them to linkify relative/wiki links to
 				// sibling docs the same way it linkifies .md ones.
 				markdownExtensions: getExtraMarkdownExtensions(),
+				...(annotateDrafts.documentsEnabled ? { documentDrafts: true } : {}),
 				serverConfig: getServerConfig(gitUser),
 				agentTerminal: agentTerminalCapability,
 				...(options.recentMessages ? { recentMessages: options.recentMessages } : {}),
@@ -1008,7 +1029,44 @@ export async function startAnnotateServer(options: {
 				);
 			}
 		} else if (url.pathname === "/api/draft") {
-			await handleDraftRequest(req, res, draftKey);
+			if (req.method === "POST") {
+				try {
+					const saved = annotateDrafts.save(await parseBody(req));
+					if (!saved && annotateDrafts.reportsRejectedSaves) {
+						json(res, { ok: false, error: "stale draft generation", ...annotateDrafts.state() }, 409);
+						return;
+					}
+					json(res, { ok: true });
+				} catch (err) {
+					const message = err instanceof Error ? err.message : "Failed to save draft";
+					console.error(`[draft] save failed: ${message}`);
+					json(res, { error: message }, 500);
+				}
+			} else if (req.method === "DELETE") {
+				annotateDrafts.remove(readDraftGenerationFromUrl(req));
+				json(res, { ok: true });
+			} else {
+				const loaded = annotateDrafts.load();
+				if (loaded.found) json(res, loaded.draft);
+				else json(res, { found: false, ...(loaded.draftGeneration !== null ? { draftGeneration: loaded.draftGeneration } : {}) }, 404);
+			}
+		} else if (url.pathname === "/api/draft/document") {
+			if (req.method === "GET") {
+				const result = annotateDrafts.loadDocument(url.searchParams.get("path"));
+				json(res, result.body, result.status);
+			} else if (req.method === "POST") {
+				let body: unknown;
+				try {
+					body = await parseBody(req);
+				} catch {
+					json(res, { ok: false, error: "Invalid JSON" }, 400);
+					return;
+				}
+				const result = annotateDrafts.saveDocuments(body);
+				json(res, result.body, result.status);
+			} else {
+				json(res, { error: "Method not allowed" }, 405);
+			}
 		} else if (url.pathname === "/api/doc" && req.method === "GET") {
 			// Inject source file's directory as base for relative path resolution.
 			// Skip for URL annotations — there's no local directory to resolve against.
@@ -1111,7 +1169,7 @@ export async function startAnnotateServer(options: {
 			// Decision-only line — a dismissal has no content, so a failed
 			// write must not change the legacy draft behavior.
 			archiveAnnotateDecision("", [], "dismissed");
-			deleteDraft(draftKey, readDraftGenerationFromUrl(req));
+			annotateDrafts.settle(readDraftGenerationFromUrl(req));
 			clientLease.cancel();
 			json(res, { ok: true });
 		} else if (url.pathname === "/api/approve" && req.method === "POST") {
@@ -1149,7 +1207,7 @@ export async function startAnnotateServer(options: {
 					(body.annotations as unknown[] | undefined) || [],
 					true,
 				);
-				if (approvalDurable) deleteDraft(draftKey, readDraftGenerationFromBody(body));
+				if (approvalDurable) annotateDrafts.settle(readDraftGenerationFromBody(body));
 				clientLease.cancel();
 				json(res, { ok: true });
 			} catch (err) {
@@ -1177,7 +1235,7 @@ export async function startAnnotateServer(options: {
 					(body.annotations as unknown[]) || [],
 					false,
 				);
-				if (feedbackDurable) deleteDraft(draftKey, readDraftGenerationFromBody(body));
+				if (feedbackDurable) annotateDrafts.settle(readDraftGenerationFromBody(body));
 				clientLease.cancel();
 				json(res, { ok: true });
 			} catch (err) {
