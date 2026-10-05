@@ -85,6 +85,15 @@ describe("OpenCode V2 server plugin", () => {
     expect(serverPlugin.setup).toBeInstanceOf(Function);
   });
 
+  // OpenCode 1.18.34 also runs this V2 setup, with a context that has no
+  // `session` or `tool` domain (seen live). Failure caught: setup throwing on
+  // an unguarded `ctx.session.hook` / `ctx.tool.transform` there.
+  for (const workflow of ["plan-agent", "all-agents", "manual"] as const) {
+    test(`${workflow}: setup completes on a context without session or tool domains`, async () => {
+      await expect(serverPlugin.setup({ options: { workflow } } as never)).resolves.toBeUndefined();
+    });
+  }
+
   test("registers submit_plan with the V2 JSON Schema tool contract", async () => {
     const testContext = createContext();
     await serverPlugin.setup(testContext.context as never);
