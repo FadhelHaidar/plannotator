@@ -106,6 +106,7 @@ import {
 import {
   ANNOTATE_BUNDLE_HINT,
   buildAmbiguousAnnotateArgsMessage,
+  annotatePathExists,
   buildMissingAnnotateFilesMessage,
   buildUnresolvedAnnotateArgsMessage,
   probeAnnotateBundlePath,
@@ -1414,7 +1415,10 @@ if (args[0] === "sessions") {
   let resolution: Awaited<ReturnType<typeof resolveAnnotateTarget>> | null = null;
   if (targetTokens.length > 1) {
     const bundlePath = (token: string) => probeAnnotateBundlePath(token, projectRoot);
-    const selection = selectAnnotateTokenTarget(targetTokens, annotateProbe, { bundlePath });
+    const selection = selectAnnotateTokenTarget(targetTokens, annotateProbe, {
+      bundlePath,
+      pathExists: (token) => annotatePathExists(token, projectRoot),
+    });
     if (selection.kind === "bundle") {
       // --app needs a URL, exactly as for a single file.
       if (appFlag) exitAnnotateStartupFailure(LIVE_APP_REQUIRES_URL_MESSAGE);

@@ -70,7 +70,7 @@ export type AnnotateTokenSelection =
    * some of them name nothing at all: an explicit list of files with a typo in
    * it. Never narrowed to the files that do exist (that would review fewer
    * files than were named); the host fails naming `missing`. Only returned
-   * with a `bundlePath` probe.
+   * with `bundlePath` and `pathExists`; an existing path is never missing.
    */
   | { kind: "missing"; missing: string[] }
   | { kind: "multiple"; candidates: AnnotateTokenCandidate[] }
@@ -216,6 +216,18 @@ export interface SelectAnnotateTokenTargetOptions {
    * that cannot open bundles leave it out and keep the #1182 tiers exactly.
    */
   bundlePath?: (token: string) => string | null;
+  /**
+   * Whether anything (file or directory) exists at the token's path
+   * (normally `annotatePathExists`). The `missing` selection needs it: only a
+   * token with nothing at its path is missing, so an existing directory such
+   * as a stray `.` keeps the #1182 behavior. Without it there is no `missing`.
+   */
+  pathExists?: (token: string) => boolean;
+}
+
+/** Whether anything (file or directory) exists at the path `token` names. */
+export function annotatePathExists(token: string, projectRoot: string): boolean {
+  return resolveAtReference(token, (value) => existsSync(resolveUserPath(value, projectRoot))) !== null;
 }
 
 /** Identity of a file for dropping duplicates: its real path when it has one. */
@@ -277,11 +289,15 @@ export function selectAnnotateTokenTarget(
         ? { kind: "single", candidate: files[0] as AnnotateTokenCandidate }
         : { kind: "bundle", files };
     }
-    // Every word reads as a file path, yet some name nothing (not even by
-    // search): a list of files with a typo. Opening the rest would review
-    // fewer files than were named, so it fails naming the missing ones.
-    if (uniqueTokens.every((token) => looksLikeFilePath(stripAtPrefix(token)))) {
-      const missing = uniqueTokens.filter((token) => probe(token) === null);
+    // Every word reads as a file path, yet some name nothing at all (nothing
+    // at the path, and nothing found by search): a list of files with a typo.
+    // Opening the rest would review fewer files than were named, so it fails
+    // naming the missing ones. An existing path (a directory such as a stray
+    // `.`) is never "missing". Known edge: a dotted word such as `Node.js`
+    // or `v2.0` reads as a file path too.
+    const pathExists = options.pathExists;
+    if (pathExists && uniqueTokens.every((token) => looksLikeFilePath(stripAtPrefix(token)))) {
+      const missing = uniqueTokens.filter((token) => !pathExists(token) && probe(token) === null);
       if (missing.length > 0) return { kind: "missing", missing };
     }
   }

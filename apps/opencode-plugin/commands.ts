@@ -30,6 +30,7 @@ import { htmlToMarkdown } from "@plannotator/shared/html-to-markdown";
 import { parseAnnotateArgs } from "@plannotator/shared/annotate-args";
 import {
   annotateInputNamesExistingTarget,
+  annotatePathExists,
   buildAmbiguousAnnotateArgsMessage,
   buildMissingAnnotateFilesMessage,
   buildUnresolvedAnnotateArgsMessage,
@@ -381,7 +382,7 @@ export async function handleAnnotateCommand(
     const selection = selectAnnotateTokenTarget(
       rawFilePath,
       (token) => probeAnnotateToken(token, tolerantRoot, { bareDirectories: false }),
-      { bundlePath: (token) => probeAnnotateBundlePath(token, tolerantRoot) },
+      { bundlePath: (token) => probeAnnotateBundlePath(token, tolerantRoot), pathExists: (token) => annotatePathExists(token, tolerantRoot) },
     );
     if (selection.kind === "missing") {
       // A list of files with a typo: never review fewer than were named.

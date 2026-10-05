@@ -40,7 +40,8 @@ export function getAnnotateReferenceRootPaths(options: AnnotateReferenceRootOpti
 		for (const path of options.bundlePaths) {
 			addRoot(dirname(path));
 			// A bundle file that is a symlink is served from where it really
-			// lives, so that directory is a root for exactly that file.
+			// lives, so the directory of its target becomes a root too (the
+			// whole directory, as for a single-file session on that path).
 			try {
 				addRoot(dirname(realpathSync(path)));
 			} catch {

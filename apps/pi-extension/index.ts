@@ -115,6 +115,7 @@ async function loadAnnotateCommandModules() {
 		buildMissingAnnotateFilesMessage: annotateTarget.buildMissingAnnotateFilesMessage,
 		probeAnnotateToken: annotateTarget.probeAnnotateToken,
 		probeAnnotateBundlePath: annotateTarget.probeAnnotateBundlePath,
+		annotatePathExists: annotateTarget.annotatePathExists,
 		resolveAnnotateBundleFiles: annotateTarget.resolveAnnotateBundleFiles,
 		annotateBundleRoot: annotateBundle.annotateBundleRoot,
 		annotateBundleTargetText: annotateBundle.annotateBundleTargetText,
@@ -899,6 +900,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				probeAnnotateToken,
 				buildMissingAnnotateFilesMessage,
 				probeAnnotateBundlePath,
+				annotatePathExists,
 				resolveAnnotateBundleFiles,
 				annotateBundleRoot,
 				annotateBundleTargetText,
@@ -940,7 +942,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				const selection = selectAnnotateTokenTarget(
 					rawFilePath,
 					(token: string) => probeAnnotateToken(token, ctx.cwd, { bareDirectories: false }),
-					{ bundlePath: (token: string) => probeAnnotateBundlePath(token, ctx.cwd) },
+					{ bundlePath: (token: string) => probeAnnotateBundlePath(token, ctx.cwd), pathExists: (token: string) => annotatePathExists(token, ctx.cwd) },
 				);
 				if (selection.kind === "missing") {
 					// A list of files with a typo: never review fewer than named.

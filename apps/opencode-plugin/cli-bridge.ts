@@ -13,6 +13,7 @@ import { runPullSessionBridgeClient } from "@plannotator/ai/session-bridge-pull-
 import { parseAnnotateArgs, type ParsedAnnotateArgs } from "@plannotator/shared/annotate-args";
 import {
   annotateInputNamesExistingTarget,
+  annotatePathExists,
   buildMissingAnnotateFilesMessage,
   probeAnnotateBundlePath,
   probeAnnotateToken,
@@ -580,7 +581,7 @@ export function annotateBundleCliPaths(rawFilePath: string, cwd: string): string
   const selection = selectAnnotateTokenTarget(
     rawFilePath,
     (token) => probeAnnotateToken(token, cwd, { bareDirectories: false }),
-    { bundlePath: (token) => probeAnnotateBundlePath(token, cwd) },
+    { bundlePath: (token) => probeAnnotateBundlePath(token, cwd), pathExists: (token) => annotatePathExists(token, cwd) },
   );
   // A list of file paths with one that does not exist is refused before the
   // CLI runs, so it never opens fewer files than were named.

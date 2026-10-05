@@ -5,6 +5,7 @@ import { join } from "path";
 import {
   ANNOTATE_BUNDLE_HINT,
   annotateInputNamesExistingTarget,
+  annotatePathExists,
   buildAmbiguousAnnotateArgsMessage,
   buildUnresolvedAnnotateArgsMessage,
   probeAnnotateBundlePath,
@@ -268,6 +269,7 @@ describe("bundle rule", () => {
   const select = (input: string | string[]) =>
     selectAnnotateTokenTarget(input, (token) => probeAnnotateToken(token, root, { bareDirectories: false }), {
       bundlePath: (token) => probeAnnotateBundlePath(token, root),
+      pathExists: (token) => annotatePathExists(token, root),
     });
 
   test("several existing paths open as a bundle, in the typed order", () => {
@@ -321,6 +323,23 @@ describe("bundle rule", () => {
     expect(select("look at notes.md please").kind).toBe("single");
     expect(select(["notes.md", "docs/"]).kind).toBe("multiple");
     expect(select(["plan.md", "nested.md"]).kind).toBe("multiple");
+  });
+
+  // The failure (#1718 re-review): `annotate . a.md` said "File not found: ."
+  // for a directory that exists. An existing path is never missing: a stray
+  // `.` / `..` keeps the #1182 fast path, an existing folder the ambiguity.
+  test("an existing directory among file paths is never reported missing", () => {
+    for (const input of [[".", "notes.md"], ["notes.md", ".."], ["docs", "notes.md"]]) {
+      const selection = select(input);
+      expect(selection.kind).not.toBe("missing");
+    }
+    const dot = select([".", "notes.md"]);
+    expect(dot.kind === "single" && dot.candidate.value).toBe(join(root, "notes.md"));
+    const parent = select(["notes.md", ".."]);
+    expect(parent.kind === "single" && parent.candidate.value).toBe(join(root, "notes.md"));
+    expect(select(["docs/", "notes.md"]).kind).toBe("multiple");
+    // With a real typo beside the directory, only the typo is named.
+    expect(select([".", "notes.md", "typo.md"])).toEqual({ kind: "missing", missing: ["typo.md"] });
   });
 
   test("an existing unsupported file still makes a bundle, so it fails naming itself", () => {

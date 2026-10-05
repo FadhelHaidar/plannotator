@@ -189,6 +189,21 @@ describe("annotate with several file paths", () => {
     expect(runSync(["spec.md", "typo.md", "--gate", "--json", "--require-approval"]).exitCode).toBe(2);
   });
 
+  // The failure (#1718 re-review): an existing directory beside a file read
+  // as "File not found: ."; a stray `.` / `..` must keep opening the file.
+  test("a stray . or .. beside a file opens the file, never 'not found'", async () => {
+    for (const [args, launch] of [[[".", "spec.md"], "dot"], [["spec.md", ".."], "dotdot"]] as const) {
+      const { proc, base } = start([...args], `bundle-${launch}`);
+      const url = await base();
+      const plan = await (await fetch(`${url}/api/plan`)).json();
+      expect(plan.mode).toBe("annotate");
+      expect(plan.filePath).toBe(join(root, "spec.md"));
+      await fetch(`${url}/api/exit`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      await proc.exited;
+      expect(await new Response(proc.stderr).text()).not.toContain("not found");
+    }
+  }, 60_000);
+
   test("the same file named twice opens that one file, as on the other hosts", async () => {
     const { proc, base } = start(["spec.md", "./spec.md"], "bundle-3");
     const url = await base();
