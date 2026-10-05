@@ -153,20 +153,53 @@ function modelRef(value: unknown): CommandModelRef | undefined {
 }
 
 /**
+ * The order OpenCode registers its built-in agents in (`Agent.state`), which is
+ * the order `Agent.defaultInfo()` / `defaultAgent()` walk with
+ * `Object.values(agents).find(...)`. Config agents come after them; a config
+ * entry for a built-in name edits it in place and keeps its position.
+ */
+const BUILT_IN_AGENT_ORDER = ["build", "plan", "general", "explore"] as const;
+
+/**
+ * How `createUserMessage` picked the variant of a prompt that named none,
+ * by OpenCode version (scanned over every v1.x tag of anomalyco/opencode):
+ *  - before 1.1.54: never (`variant: input.variant`);
+ *  - 1.1.54 to 1.3.13: the agent's variant when the message's model offers it;
+ *  - 1.3.14 on: the same, but only when that model is the agent's own
+ *    configured one (`&& same`).
+ * An unknown or unparsable version takes the current rule.
+ */
+export type AgentVariantRule = "none" | "offered" | "agent-model";
+
+export function agentVariantRule(hostVersion: string | undefined): AgentVariantRule {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(hostVersion ?? "");
+  if (!match) return "agent-model";
+  const [major, minor, patch] = match.slice(1).map(Number);
+  const before = (a: number, b: number, c: number) =>
+    major < a || (major === a && (minor < b || (minor === b && patch < c)));
+  if (major !== 1) return "agent-model";
+  if (before(1, 1, 54)) return "none";
+  if (before(1, 3, 14)) return "offered";
+  return "agent-model";
+}
+
+/**
  * Resolve what OpenCode 1 would have used for a prompt naming `namedAgent`
  * (or no agent) with no model and no variant: the shape of every feedback
  * prompt this plugin used to send. Mirrors `createUserMessage`
- * (`packages/opencode/src/session/prompt.ts` @ v1.18.32):
+ * (`packages/opencode/src/session/prompt.ts`):
  *
- *  - agent: the named one, else `Agent.defaultInfo()`: `default_agent` from
- *    config, else the first primary, non-hidden agent (the host's `GET /agent`
- *    lists that one first: it sorts `default_agent`, else `build`, to the top);
- *  - model: `agent.model ?? currentModel(session)`, where `currentModel` is
+ *  - agent: the named one, else `default_agent` from config, else the first
+ *    primary, non-hidden agent in OpenCode's own order: the built-ins first
+ *    (`BUILT_IN_AGENT_ORDER`), then the listing's order. `GET /agent` sorts
+ *    differently (default/`build` first, then by name), which matters when
+ *    `build` is disabled or hidden;
+ *  - model: `agent.model ?? currentModel(session)` (`lastModel` before 1.18),
  *    the session's stored model, else the last user message's;
- *  - variant: the agent's `variant`, only when the agent configures a model
- *    and that model offers the variant (`full?.variants?.[agent.variant]`).
- *    `modelVariants` answers that; undefined there means the host could not
- *    list models, and the agent's own configured variant is kept.
+ *  - variant: per `agentVariantRule(hostVersion)`, and only when the model
+ *    offers it (`full?.variants?.[agent.variant]`). `modelVariants` answers
+ *    that; undefined there means the host could not list models, and the
+ *    agent's own configured variant is kept.
  *
  * Returns undefined when the agent cannot be resolved, in which case the
  * command's message is left exactly as OpenCode built it.
@@ -179,21 +212,32 @@ export function resolveFeedbackTarget(input: {
   /** The session's current model before the command's message was created. */
   sessionModel?: CommandModelRef;
   modelVariants?: (model: CommandModelRef) => readonly string[] | undefined;
+  /** The running OpenCode's version (`GET /global/health`). */
+  hostVersion?: string;
 }): FeedbackTarget | undefined {
-  const agent = input.namedAgent
-    ? input.agents.find((entry) => entry.name === input.namedAgent)
-    : input.defaultAgent
-      ? input.agents.find((entry) => entry.name === input.defaultAgent)
-      : input.agents.find((entry) => entry.mode !== "subagent" && entry.hidden !== true);
+  let agent: CommandAgentInfo | undefined;
+  if (input.namedAgent) {
+    agent = input.agents.find((entry) => entry.name === input.namedAgent);
+  } else if (input.defaultAgent) {
+    agent = input.agents.find((entry) => entry.name === input.defaultAgent);
+  } else {
+    const visible = input.agents.filter((entry) => entry.mode !== "subagent" && entry.hidden !== true);
+    agent = BUILT_IN_AGENT_ORDER.map((name) => visible.find((entry) => entry.name === name)).find(Boolean)
+      ?? visible[0];
+  }
   if (!agent?.name) return undefined;
 
   const agentModel = modelRef(agent.model);
+  const model = agentModel ?? input.sessionModel;
+  const rule = agentVariantRule(input.hostVersion);
+  // The model the variant is checked against: the agent's own under the
+  // current rule, whichever model the message gets under the older one.
+  const variantModel = rule === "agent-model" ? agentModel : rule === "offered" ? model : undefined;
   let variant: string | undefined;
-  if (agentModel && agent.variant) {
-    const offered = input.modelVariants?.(agentModel);
+  if (variantModel && agent.variant) {
+    const offered = input.modelVariants?.(variantModel);
     variant = offered === undefined || offered.includes(agent.variant) ? agent.variant : undefined;
   }
-  const model = agentModel ?? input.sessionModel;
   return {
     agent: agent.name,
     ...(model && { model }),
@@ -212,6 +256,12 @@ export interface PendingCommandFeedback {
  * would have had (`resolveFeedbackTarget`), so moving the feedback into the
  * command's own turn changes nothing but the number of turns.
  *
+ * Where the variant lives depends on the OpenCode version: up to 1.3.x a user
+ * message carries it top-level (`info.variant`, set from the command's
+ * `input.variant`, i.e. the TUI pick, and read from there by the request);
+ * 1.18 moved it into `info.model.variant`. A message that has its own
+ * `variant` key is the older shape, and that key is what gets replaced.
+ *
  * Applies only to the message that carries `pending.text` in `sessionID`, so
  * an unrelated prompt can never be retargeted. Returns whether it applied.
  */
@@ -228,14 +278,20 @@ export function retargetCommandMessage(input: {
     isRecord(part) && part.type === "text" && part.text === input.pending.text)) return false;
 
   const { target } = input.pending;
-  const model = target.model ?? modelRef(input.message.model);
-  input.message.agent = target.agent;
+  const message = input.message;
+  const topLevelVariant = Object.prototype.hasOwnProperty.call(message, "variant");
+  const model = target.model ?? modelRef(message.model);
+  message.agent = target.agent;
   if (model) {
-    input.message.model = {
+    message.model = {
       providerID: model.providerID,
       modelID: model.modelID,
-      ...(target.variant && { variant: target.variant }),
+      ...(!topLevelVariant && target.variant && { variant: target.variant }),
     };
+  }
+  if (topLevelVariant) {
+    if (target.variant) message.variant = target.variant;
+    else delete message.variant;
   }
   return true;
 }

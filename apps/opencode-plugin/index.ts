@@ -262,11 +262,15 @@ const PlannotatorPlugin: Plugin = async (ctx, rawOptions?: PlannotatorOpenCodeOp
   ): Promise<FeedbackTarget | undefined> {
     const query = { query: { directory: ctx.directory } };
     const client = ctx.client as any;
-    const [agents, config, session, providers] = await Promise.allSettled([
+    const [agents, config, session, providers, health] = await Promise.allSettled([
       client.app.agents(query),
       namedAgent ? Promise.resolve(undefined) : client.config.get(query),
       client.session.get({ path: { id: sessionID }, ...query }),
       client.config.providers(query),
+      // The RUNNING host's version: how the old prompt picked its variant
+      // changed across 1.x (see `agentVariantRule`). A session's own
+      // `version` is the one that created it, so it is only the fallback.
+      client.global?.health ? client.global.health() : Promise.resolve(undefined),
     ]);
     const agentList = agents.status === "fulfilled" && Array.isArray(agents.value?.data) ? agents.value.data : [];
     const defaultAgent = config.status === "fulfilled" && typeof config.value?.data?.default_agent === "string"
@@ -295,11 +299,17 @@ const PlannotatorPlugin: Plugin = async (ctx, rawOptions?: PlannotatorOpenCodeOp
     const providerList = providers.status === "fulfilled" && Array.isArray(providers.value?.data?.providers)
       ? providers.value.data.providers
       : undefined;
+    const healthVersion = health.status === "fulfilled" ? health.value?.data?.version : undefined;
+    const sessionVersion = session.status === "fulfilled" ? session.value?.data?.version : undefined;
+    const hostVersion = typeof healthVersion === "string"
+      ? healthVersion
+      : typeof sessionVersion === "string" ? sessionVersion : undefined;
     return resolveFeedbackTarget({
       namedAgent,
       agents: agentList,
       defaultAgent,
       sessionModel,
+      hostVersion,
       // `provider.getModel` in createUserMessage: an unknown model offers no
       // variants. Undefined only when the listing itself failed.
       modelVariants: (model) => {

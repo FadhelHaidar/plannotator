@@ -96,6 +96,7 @@ interface Host {
   defaultAgent?: string;
   sessionModel?: { providerID: string; modelID: string };
   variants: Record<string, string[]>; // "provider/model" -> offered variants
+  hostVersion?: string;
 }
 function oldPromptMessage(host: Host, agentName: string | undefined) {
   const ag = agentName
@@ -113,7 +114,7 @@ function oldPromptMessage(host: Host, agentName: string | undefined) {
 function newCommandMessage(
   host: Host,
   namedAgent: string | undefined,
-  commandMessage: { agent: string; model: { providerID: string; modelID: string; variant?: string } },
+  commandMessage: Record<string, unknown>,
 ) {
   const target = resolveFeedbackTarget({
     namedAgent,
@@ -121,6 +122,7 @@ function newCommandMessage(
     defaultAgent: host.defaultAgent,
     sessionModel: host.sessionModel,
     modelVariants: (model) => host.variants[`${model.providerID}/${model.modelID}`] ?? [],
+    hostVersion: host.hostVersion,
   });
   expect(target).toBeDefined();
   const message = structuredClone(commandMessage) as Record<string, unknown>;
@@ -211,5 +213,81 @@ describe("retargetCommandMessage", () => {
       parts: [{ type: "text", text: "Feedback body" }],
     });
     expect(message).toEqual({ agent: "build", model: { providerID: "acme", modelID: "tui-pick" } });
+  });
+});
+
+// OpenCode 1.1.31 to 1.3.17: the user message keeps its variant TOP-LEVEL
+// (`info.variant`, from the command's `input.variant`: the TUI pick), and the
+// request reads it from there. Transcribed from `createUserMessage` @ v1.1.31
+// (`variant: input.variant`), v1.2.0 (agent variant when the message's model
+// offers it) and v1.3.14+ (only on the agent's own model, `&& same`); the
+// version boundaries come from scanning every v1.x tag.
+function olderEraPromptMessage(host: Host & { hostVersion: string }, agentName: string | undefined) {
+  const [, minor, patch] = host.hostVersion.split(".").map(Number);
+  const ag = agentName
+    ? host.agents.find((a) => a.name === agentName)!
+    : host.agents.find((a) => a.mode !== "subagent" && a.hidden !== true)!;
+  const model = ag.model ?? host.sessionModel!;
+  const offered = host.variants[`${model.providerID}/${model.modelID}`];
+  const same = !!ag.model;
+  const usesAgentVariant = minor > 1 || (minor === 1 && patch >= 54);
+  const needsSame = minor > 3 || (minor === 3 && patch >= 14);
+  const variant = usesAgentVariant && ag.variant && (!needsSame || same) && offered?.includes(ag.variant)
+    ? ag.variant
+    : undefined;
+  return { agent: ag.name, model: { providerID: model.providerID, modelID: model.modelID }, variant };
+}
+
+describe("older OpenCode 1 versions keep the variant top-level", () => {
+  const TUI_OLD = { agent: "build", model: { providerID: "acme", modelID: "tui-pick" }, variant: "high" };
+  const cases: Array<[string, string | undefined]> = [
+    ["review agent switch (agent model + offered variant)", "plan"],
+    ["named agent without a model", "writer"],
+    ["no agent named", undefined],
+  ];
+  for (const hostVersion of ["1.1.31", "1.1.53", "1.1.54", "1.2.10", "1.3.13", "1.3.14", "1.3.17"]) {
+    for (const [name, named] of cases) {
+      test(`${hostVersion}: ${name}`, () => {
+        const host = {
+          ...HOST,
+          hostVersion,
+          // `writer` has a variant and no model: 1.1.54-1.3.13 applied it when
+          // the session's model offered it, 1.3.14+ never did.
+          variants: { ...HOST.variants, "acme/everyday-1": ["high"] },
+        };
+        const message = newCommandMessage(host, named, TUI_OLD);
+        expect(message).toEqual(olderEraPromptMessage(host, named));
+        // Never the TUI's pick, and never a second copy inside the model.
+        expect((message.model as Record<string, unknown>).variant).toBeUndefined();
+      });
+    }
+  }
+
+  test("a top-level variant the old prompt would not have had is removed, not left as the TUI pick", () => {
+    const message = newCommandMessage({ ...HOST, hostVersion: "1.1.31" }, "plan", TUI_OLD);
+    expect("variant" in message).toBe(false);
+  });
+});
+
+describe("default agent when no default_agent is set", () => {
+  // OpenCode walks its own registration order (build, plan, general, explore,
+  // then config agents); `GET /agent` sorts by name after default/build. They
+  // differ once `build` is disabled or hidden.
+  test("prefers the built-in order over the listing's name order", () => {
+    const agents = [
+      { name: "alpha", mode: "primary" }, // a custom agent, sorted first by name
+      { name: "build", mode: "primary", hidden: true },
+      { name: "plan", mode: "primary" },
+    ];
+    expect(resolveFeedbackTarget({ agents, sessionModel: HOST.sessionModel })?.agent).toBe("plan");
+  });
+
+  test("falls back to the listing's order when no built-in is a visible primary", () => {
+    const agents = [
+      { name: "alpha", mode: "primary" },
+      { name: "plan", mode: "subagent" },
+      { name: "zeta", mode: "primary" },
+    ];
+    expect(resolveFeedbackTarget({ agents, sessionModel: HOST.sessionModel })?.agent).toBe("alpha");
   });
 });
