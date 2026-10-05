@@ -122,3 +122,15 @@ describe('linked-document export fidelity', () => {
     );
   });
 });
+
+describe('main-document order for block ids missing from the document', () => {
+  // Failure caught: two comments whose (different) block ids are both absent
+  // from `blocks` tied at position -1 and kept insertion order, reordering the
+  // root export that main sorted by offset.
+  test('ties on block position fall through to the offset', () => {
+    const stale = comment('s1', 'block-stale', 'LATER-OFFSET', { startOffset: 40 });
+    const general = comment('g1', '', 'EARLIER-OFFSET', { startOffset: 0 });
+    const out = exportAnnotations(BLOCKS, [stale, general]);
+    expect(out.indexOf('EARLIER-OFFSET')).toBeLessThan(out.indexOf('LATER-OFFSET'));
+  });
+});

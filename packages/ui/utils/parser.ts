@@ -1059,8 +1059,12 @@ const sortAnnotationsInDocumentOrder = (annotations: any[], blocks: Block[] | un
   blocks?.forEach((blk, index) => order.set(blk.id, index));
   return [...annotations].sort((a, b) => {
     if (a.blockId !== b.blockId) {
-      if (blocks) return (order.get(a.blockId) ?? -1) - (order.get(b.blockId) ?? -1);
-      return String(a.blockId ?? '').localeCompare(String(b.blockId ?? ''), undefined, { numeric: true });
+      // Two ids missing from `blocks` share position -1; fall through to the
+      // offset so the main document keeps its pre-#1696 order.
+      const byBlock = blocks
+        ? (order.get(a.blockId) ?? -1) - (order.get(b.blockId) ?? -1)
+        : String(a.blockId ?? '').localeCompare(String(b.blockId ?? ''), undefined, { numeric: true });
+      if (byBlock) return byBlock;
     }
     return a.startOffset - b.startOffset;
   });
