@@ -56,8 +56,10 @@ const comment = (id: string): Annotation => ({
   createdA: 1,
 });
 
+let flushPendingSave: () => void = () => {};
+
 function Harness({ annotations }: { annotations: Annotation[] }) {
-  useAnnotationDraft({ annotations, globalAttachments: [], isApiMode: true, isSharedSession: false, submitted: false });
+  ({ flushPendingSave } = useAnnotationDraft({ annotations, globalAttachments: [], isApiMode: true, isSharedSession: false, submitted: false }));
   return null;
 }
 
@@ -141,5 +143,24 @@ describe.if(hasDom)('session draft saves the server refuses', () => {
     expect(posted).toHaveLength(1);
     const after = createAnnotateDraftSession({ contentKey: contentHash('v2'), filePath }).load();
     expect(after.found).toBe(false);
+  });
+
+  test('an agent close: the comment typed just before it is flushed and kept', async () => {
+    const filePath = sandboxFile();
+    const session = createAnnotateDraftSession({ contentKey: contentHash('v2'), filePath });
+    const posted = serve(session);
+    await mountHarness();
+
+    // The reviewer types; the debounced save has not fired yet when the
+    // agent closes the session (App flushes on the session-closed event).
+    await act(async () => { root?.render(<Harness annotations={[comment('typed-at-close')]} />); });
+    session.closeKeepingDraft();
+    await act(async () => { flushPendingSave(); });
+    await tick(50);
+
+    expect(posted).toHaveLength(1);
+    const kept = createAnnotateDraftSession({ contentKey: contentHash('v2'), filePath }).load();
+    expect(kept.found).toBe(true);
+    if (kept.found) expect((kept.draft.annotations as Annotation[]).map((a) => a.id)).toEqual(['typed-at-close']);
   });
 });

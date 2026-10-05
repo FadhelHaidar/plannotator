@@ -52,6 +52,9 @@ export interface UseDocumentDraftsResult {
    * draft instead, so they stay crash-recoverable.
    */
   unbackedPaths: ReadonlySet<string>;
+  /** Send a pending (debounced) write now, if there is one (see
+      useAnnotationDraft's flushPendingSave). */
+  flushPendingWrite: () => void;
 }
 
 export function useDocumentDrafts(options: UseDocumentDraftsOptions): UseDocumentDraftsResult {
@@ -225,5 +228,12 @@ export function useDocumentDrafts(options: UseDocumentDraftsOptions): UseDocumen
     };
   }, [writeNow]);
 
-  return { unbackedPaths };
+  const flushPendingWrite = useCallback(() => {
+    if (timerRef.current === null) return;
+    clearTimeout(timerRef.current);
+    timerRef.current = null;
+    writeNow(false);
+  }, [writeNow]);
+
+  return { unbackedPaths, flushPendingWrite };
 }

@@ -716,6 +716,8 @@ const App: React.FC = () => {
   // The agent that opened this review closed it (POST /api/host/close); the
   // reviewer's unsent comments stay in the draft for a reopen.
   const [agentClosed, setAgentClosed] = useState<{ unsentAnnotations: number } | null>(null);
+  // Set below once the draft hooks exist; read by the session-closed handler.
+  const flushPendingDraftsRef = useRef<() => void>(() => {});
   const [pendingPasteImage, setPendingPasteImage] = useState<{ file: File; blobUrl: string; initialName: string } | null>(null);
   const [showPermissionModeSetup, setShowPermissionModeSetup] = useState(false);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('bypassPermissions');
@@ -2165,6 +2167,9 @@ const App: React.FC = () => {
   const { externalAnnotations, updateExternalAnnotation, deleteExternalAnnotation } = useExternalAnnotations<Annotation>({
     enabled: isApiMode && !goalSetupMode && !documentReadOnly,
     onSessionClosed: (event) => {
+      // The agent close keeps the draft, so a comment typed in the last
+      // debounce window is sent before the session reads as closed.
+      flushPendingDraftsRef.current();
       setAgentClosed(event);
       setSubmitted((current) => current ?? 'exited');
     },
@@ -2564,7 +2569,7 @@ const App: React.FC = () => {
   }, [editableDocuments, getEditedMarkdown]);
 
   // Every other document's comments, saved under that document's own path.
-  const { unbackedPaths: unbackedDraftDocuments } = useDocumentDrafts({
+  const { unbackedPaths: unbackedDraftDocuments, flushPendingWrite: flushDocumentDrafts } = useDocumentDrafts({
     enabled: documentDraftsEnabled && isApiMode && !isSharedSession && !goalSetupMode && !documentReadOnly,
     submitted: !!submitted || isSubmitting,
     activePath: linkedDocHook.filepath,
@@ -2605,7 +2610,7 @@ const App: React.FC = () => {
   );
 
   // Auto-save annotation drafts
-  const { draftBanner, restoreDraft, scheduleDraftSave, scheduleDraftSaveAfterSubmitFailure, getDraftGeneration, dismissDraft } = useAnnotationDraft({
+  const { draftBanner, restoreDraft, scheduleDraftSave, scheduleDraftSaveAfterSubmitFailure, getDraftGeneration, dismissDraft, flushPendingSave: flushSessionDraft } = useAnnotationDraft({
     annotations: draftAnnotations,
     codeAnnotations,
     globalAttachments: draftGlobalAttachments,
@@ -2619,6 +2624,10 @@ const App: React.FC = () => {
     // banner into the next session for this plan. Saving resumes if it fails.
     submitted: !!submitted || isSubmitting,
   });
+  flushPendingDraftsRef.current = () => {
+    flushSessionDraft();
+    flushDocumentDrafts();
+  };
 
   // Fetch available agents for OpenCode (for validation on approve)
   const { agents: availableAgents, validateAgent, getAgentWarning } = useAgents(origin);
@@ -7503,7 +7512,14 @@ const App: React.FC = () => {
           }
           subtitle={
             submitted === 'exited' && agentClosed
-              ? agentClosedSubtitle(agentClosed.unsentAnnotations, 'document')
+              ? agentClosedSubtitle(
+                  agentClosed.unsentAnnotations,
+                  // Path-keyed drafts (documentDrafts) follow a local file
+                  // through edits; URL and agent-message drafts do not.
+                  liveApp ? 'app'
+                    : documentDraftsEnabled ? (annotateSource === 'folder' ? 'folder' : 'file')
+                    : 'document',
+                )
             : submitted === 'exited'
               ? 'Annotation session closed without feedback.'
               : archive.archiveMode

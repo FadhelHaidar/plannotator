@@ -302,6 +302,10 @@ interface UseAnnotationDraftResult {
   scheduleDraftSaveAfterSubmitFailure: () => void;
   getDraftGeneration: () => number;
   dismissDraft: () => void;
+  /** Send a pending (debounced) save now, if there is one. For a session
+      that ends WITHOUT a decision body (the agent closed it): the comment
+      typed just before must still reach the kept draft. */
+  flushPendingSave: () => void;
 }
 
 export function useAnnotationDraft({
@@ -492,6 +496,13 @@ export function useAnnotationDraft({
 
   const getDraftGeneration = useCallback(() => draftGenerationRef.current + 1, []);
 
+  const flushPendingSave = useCallback(() => {
+    if (timerRef.current === null) return;
+    clearTimeout(timerRef.current);
+    timerRef.current = null;
+    persistNow(false);
+  }, [persistNow]);
+
   // Flush a pending save when the page is backgrounded or closed — otherwise
   // the last debounce window of typing is lost on tab close, and reopening
   // the (still-running) session would restore a draft missing those
@@ -554,5 +565,5 @@ export function useAnnotationDraft({
     getDraftTransport().remove(deletedGeneration, { keepalive: false }).catch(() => {});
   }, []);
 
-  return { draftBanner, restoreDraft, scheduleDraftSave, scheduleDraftSaveAfterSubmitFailure, getDraftGeneration, dismissDraft };
+  return { draftBanner, restoreDraft, scheduleDraftSave, scheduleDraftSaveAfterSubmitFailure, getDraftGeneration, dismissDraft, flushPendingSave };
 }

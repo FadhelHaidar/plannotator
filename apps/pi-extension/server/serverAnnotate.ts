@@ -421,8 +421,8 @@ export async function startAnnotateServer(options: {
 			if (!decision.settle({ feedback: "", annotations: [], exit: true, closedBy: "agent", unsentAnnotations })) {
 				return { closed: false, reason: "decided" };
 			}
-			// The review is over (later saves are refused as decided), but the
-			// reviewer's draft, its path copy and the document copies are kept.
+			// Nothing is deleted, and a save still in flight from the tab lands:
+			// the draft, its path copy and the document copies are all kept.
 			annotateDrafts.closeKeepingDraft();
 			clientLease.cancel();
 			externalAnnotations.broadcast(hostSessionClosedEvent(unsentAnnotations));

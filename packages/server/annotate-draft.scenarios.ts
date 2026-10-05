@@ -199,7 +199,7 @@ export function defineAnnotateDraftScenarios(runtime: string, start: StartDraftS
       expect((await fetch(`${edited.url}/api/draft`)).status).toBe(404);
     });
 
-    test("an agent close keeps the draft, its path copy and document copies, and refuses later saves", async () => {
+    test("an agent close keeps the draft, its path copy and document copies, and a late save completes it", async () => {
       const linked = join(docDir, "linked.md");
       writeFileSync(linked, "# Linked\n");
       const session = await openFile("kept.md", "# Kept\n\nv1\n", HOST_TOKEN);
@@ -214,20 +214,20 @@ export function defineAnnotateDraftScenarios(runtime: string, start: StartDraftS
       // The session draft and the linked document's copy both count.
       expect(await closed.json()).toEqual({ unsentAnnotations: 2 });
 
-      // The closed tab: a save (even above any tombstone) is refused as
-      // decided, and its "everything removed" DELETE deletes nothing.
-      const late = await post(session, "/api/draft", draftBody(10, ["late"]));
-      expect(late.status).toBe(409);
-      expect((await late.json()).decided).toBe(true);
-      expect((await saveDocuments(session, [{ path: linked, annotations: [] }])).status).toBe(409);
+      // The tab's debounced save for a comment typed just before the close
+      // arrives after it, and lands: an agent close deletes nothing, so the
+      // kept draft must be complete. Same for a document copy.
+      expect((await post(session, "/api/draft", draftBody(4, ["kept", "typed-at-close"]))).ok).toBe(true);
+      expect((await saveDocuments(session, [{ path: linked, annotations: [comment("kept-linked"), comment("linked-at-close")] }])).ok).toBe(true);
+      // The closed tab's "everything removed" DELETE deletes nothing.
       await fetch(`${session.url}/api/draft?generation=11`, { method: "DELETE" });
       close(session);
 
       // The next session, after the agent edited the file, gets the comments back.
       const reopened = await openFile("kept.md", "# Kept\n\nv2, edited\n");
-      expect(idsOf(await (await fetch(`${reopened.url}/api/draft`)).json())).toEqual(["kept"]);
+      expect(idsOf(await (await fetch(`${reopened.url}/api/draft`)).json())).toEqual(["kept", "typed-at-close"]);
       const linkedCopy = await fetch(`${reopened.url}/api/draft/document?path=${encodeURIComponent(linked)}`);
-      expect(idsOf(await linkedCopy.json())).toEqual(["kept-linked"]);
+      expect(idsOf(await linkedCopy.json())).toEqual(["kept-linked", "linked-at-close"]);
     });
 
     test("the reviewer's Close clears the path copy too", async () => {

@@ -122,7 +122,10 @@ export function createAnnotateDraftSession(options: AnnotateDraftSessionOptions)
   const documents = options.documents ?? null;
   /** Absolute paths whose document copy this session wrote or restored from. */
   const coveredDocuments = new Set<string>();
+  /** The reviewer decided (feedback, approve, Close): saves are refused. */
   let settled = false;
+  /** The agent closed the session: the draft is kept and may still grow. */
+  let agentClosed = false;
 
   const resolveDocumentPath = (raw: unknown): { path: string } | { status: 400 | 403; error: string } => {
     if (typeof raw !== "string" || raw.length === 0) return { status: 400, error: "Missing path" };
@@ -190,7 +193,7 @@ export function createAnnotateDraftSession(options: AnnotateDraftSessionOptions)
      * a closed tab must not delete the draft the agent close kept.
      */
     remove(draftGeneration?: number): void {
-      if (settled) return;
+      if (settled || agentClosed) return;
       deleteReviewDraft(keys, draftGeneration);
     },
 
@@ -208,13 +211,15 @@ export function createAnnotateDraftSession(options: AnnotateDraftSessionOptions)
 
     /**
      * The agent closed the session (`POST /api/host/close`, closedBy
-     * "agent"): the review is over, so further saves and document writes are
-     * refused exactly as after a decision, but NOTHING is deleted. The
-     * reviewer's unsent comments stay in the session draft, its path copy
-     * and the document copies, and come back when the file is reopened.
+     * "agent"): NOTHING is deleted. The reviewer's unsent comments stay in
+     * the session draft, its path copy and the document copies, and come back
+     * when the file is reopened. Saves and document writes are still
+     * accepted, so a comment typed just before the close (its debounced save
+     * arriving after it) completes the kept draft; only a DELETE from the
+     * closed tab is ignored, so it cannot discard what the close kept.
      */
     closeKeepingDraft(): void {
-      settled = true;
+      agentClosed = true;
     },
 
     /**
