@@ -238,6 +238,7 @@ jobs:
           packages/editor/App.editModeShortcut.test.tsx
           packages/editor/App.editModeCrossBlockHighlights.test.tsx
           packages/editor/App.markdownUnanchored.test.tsx
+          packages/editor/App.restoreAcrossEdit.test.tsx
           packages/editor/App.documentDrafts.test.tsx
           packages/editor/annotationDraftStaleRetry.test.tsx
           packages/ui/components/blocks/AlertBlock.title.test.tsx
@@ -246,6 +247,7 @@ jobs:
           packages/ui/components/blocks/AlertBlock.annotation.test.tsx
           packages/ui/components/Viewer.driftedRestore.test.tsx
           packages/ui/components/Viewer.crossBlockRestore.test.tsx
+          packages/ui/components/Viewer.restoreMovedAnchors.test.tsx
           packages/ui/components/Viewer.alertDraftRestore.test.tsx
           packages/ui/components/AnnotationPanel.allFiles.test.tsx
           packages/ui/hooks/useLinkedDoc.crossFile.test.tsx

@@ -273,6 +273,7 @@ import {
   buildAnnotateApprovalBody,
   buildCompleteAnnotateFeedback,
 } from './annotateSubmission';
+import { applyRestoredAnchors } from './restoredAnchors';
 import { blocksForDocument, collectSubmittedAnnotations, mergeExternalAnnotations, mergeExternalsIntoMessageEntries, resolveFeedbackSections } from './feedbackDocuments';
 import { buildDecisionSpec, type DecisionActionId, type DecisionMenuItem } from '@plannotator/ui/utils/decisionSpec';
 import { DecisionNoteDialog, type DecisionHandler } from '@plannotator/ui/components/DecisionControl';
@@ -1554,7 +1555,20 @@ const App: React.FC = () => {
   // reports each restore pass, so an annotation the pass re-anchored clears its
   // own chip and one it could not adds it.
   const [markdownUnanchoredIds, setMarkdownUnanchoredIds] = useState<ReadonlySet<string>>(() => new Set());
-  const handleRestoreReport = useCallback(({ attempted, unanchored }: AnnotationRestoreReport) => {
+  const handleRestoreReport = useCallback(({ attempted, unanchored, moved }: AnnotationRestoreReport) => {
+    // A restore across a document change (a draft reopened after the file was
+    // edited, a plan revision) re-anchors comments by their text, but their
+    // stored blockId still names the old position, which the export turns into
+    // a line label. Write back where each text is now ('' when it is gone), so
+    // the label is true or absent, never wrong. An unchanged document reports
+    // no `moved` entries and this is a no-op.
+    if (moved && moved.length > 0) {
+      setAnnotations((current) => {
+        const next = applyRestoredAnchors(current, moved);
+        if (next !== current) annotationsRef.current = next;
+        return next;
+      });
+    }
     setMarkdownUnanchoredIds((prev) => {
       if (prev.size === 0 && unanchored.length === 0) return prev;
       const next = new Set(prev);
