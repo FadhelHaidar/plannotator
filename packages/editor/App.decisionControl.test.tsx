@@ -104,6 +104,7 @@ interface SubmittedBody {
   feedback?: string;
   annotations?: Array<{ type?: string; text?: string; originalText?: string }>;
   codeAnnotations?: unknown[];
+  nothingToSend?: boolean;
 }
 
 let submissions: SubmittedBody[] = [];
@@ -264,6 +265,8 @@ describe.if(hasDom)("annotate decision control", () => {
     expect(body.feedback).toBe(ANNOTATE_NO_FEEDBACK_SENTENCE);
     expect(body.annotations).toEqual([]);
     expect(body.codeAnnotations).toEqual([]);
+    // #1700: marked so a host can skip the agent turn without reading the sentence.
+    expect(body.nothingToSend).toBe(true);
   });
 
   test("Mod+Enter fires the same primary the header shows", async () => {
@@ -298,6 +301,7 @@ describe.if(hasDom)("annotate decision control", () => {
     expect(notes[0]!.text).toBe("tighten the intro");
     expect(body.feedback).toContain("tighten the intro");
     expect(body.feedback!.startsWith(ANNOTATE_NO_FEEDBACK_SENTENCE)).toBe(false);
+    expect(body.nothingToSend).toBeUndefined();
   });
 
   // Maintainer ruling (empty-menu collapse): the non-gate empty menu is ONE

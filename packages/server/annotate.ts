@@ -43,7 +43,7 @@ import {
   createAnnotateClientLeaseTracker,
   type AnnotateClientLeaseStreamSession,
 } from "@plannotator/shared/annotate-client-lease";
-import { createAnnotateDecisionSettler } from "@plannotator/shared/annotate-decision";
+import { createAnnotateDecisionSettler, isNothingToSendFeedbackBody } from "@plannotator/shared/annotate-decision";
 import { saveConfig, detectGitUser, getServerConfig, isAgentTerminalSide, loadConfig, resolveAIEnabled, resolveAnnotateHistory, resolveFeedbackHistory } from "./config";
 import { getAutoUpdateAdvert } from "./auto-update";
 import { appendFeedbackRecord, type FeedbackDecision, type FeedbackSurface } from "@plannotator/shared/feedback-archive";
@@ -181,6 +181,9 @@ export interface AnnotateServerResult {
     approved?: boolean;
     selectedMessageId?: string;
     feedbackScope?: "message" | "messages";
+    /** A Done with nothing to send (see isNothingToSendFeedbackBody): the
+     *  feedback is still the legacy zero-state sentence. */
+    nothingToSend?: boolean;
   }>;
   /** Stop the server */
   stop: () => void;
@@ -659,6 +662,9 @@ export async function startAnnotateServer(
     approved?: boolean;
     selectedMessageId?: string;
     feedbackScope?: "message" | "messages";
+    /** A Done with nothing to send (see isNothingToSendFeedbackBody): the
+     *  feedback is still the legacy zero-state sentence. */
+    nothingToSend?: boolean;
   }) => void;
   const decisionPromise = new Promise<{
     feedback: string;
@@ -667,6 +673,9 @@ export async function startAnnotateServer(
     approved?: boolean;
     selectedMessageId?: string;
     feedbackScope?: "message" | "messages";
+    /** A Done with nothing to send (see isNothingToSendFeedbackBody): the
+     *  feedback is still the legacy zero-state sentence. */
+    nothingToSend?: boolean;
   }>((resolve) => {
     resolveDecision = resolve;
   });
@@ -1249,6 +1258,7 @@ export async function startAnnotateServer(
                 annotations: body.annotations || [],
                 selectedMessageId: body.selectedMessageId,
                 feedbackScope: body.feedbackScope,
+                ...(isNothingToSendFeedbackBody(body) && { nothingToSend: true }),
               });
               if (!feedbackWon) return alreadyDecided();
               // Make the submitted feedback durable BEFORE deleting the draft:

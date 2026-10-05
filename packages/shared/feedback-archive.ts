@@ -116,8 +116,8 @@ export interface FeedbackTarget {
    * The annotate session's own target: the resolved file for a single-file
    * session, and the session's FOLDER for a folder session (not the document
    * that happened to be open when the reviewer submitted — a folder session
-   * submits one body of feedback for the whole session, and the per-document
-   * path is not part of it).
+   * submits one body of feedback for the whole session; each annotation names
+   * its own document in `documentPath`).
    */
   filePath?: string;
   /**
@@ -183,6 +183,12 @@ export interface FeedbackAnnotationRecord {
   elementName?: string;
   /** Live-app sessions: the route the annotation was made on. */
   pageUrl?: string;
+  /** Multi-document annotate sessions (a folder, or linked documents opened
+   *  from the annotated file): the path of the document this comment was made
+   *  on. Absent means the session's own target (`target.filePath`/`url`), or
+   *  the message on annotate-last. Distinct from `file`, which is a code
+   *  annotation's file. Additive per the field contract above. */
+  documentPath?: string;
   /** A comment on a rendered diagram part (a Mermaid or Graphviz fence):
    *  the part's own id, label and document source line, validated by the
    *  same parser the ui codec runs. Additive per the field contract above;
@@ -341,6 +347,8 @@ function normalizeAnnotation(raw: unknown): FeedbackAnnotationRecord {
   if (elementName) record.elementName = elementName;
   const pageUrl = asString(a.pageUrl);
   if (pageUrl) record.pageUrl = pageUrl;
+  const documentPath = asString(a.documentPath);
+  if (documentPath) record.documentPath = documentPath;
   const diagramAnchor = a.diagramAnchor === undefined ? null : parseDiagramAnchor(a.diagramAnchor);
   if (diagramAnchor !== null) record.diagramAnchor = diagramAnchor;
   const questionAnswer = a.questionAnswer === undefined ? null : parseQuestionAnswer(a.questionAnswer);

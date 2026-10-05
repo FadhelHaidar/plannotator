@@ -143,6 +143,18 @@ export const LEGACY_REVIEW_APPROVED_TEXT = '# Code Review\n\nCode review complet
 export const LEGACY_REVIEW_APPROVED_WITH_NOTES_HEADING = '# Code Review — Approved with Notes'
 
 /**
+ * What the editor posts, and an annotate CLI prints, for a Done with nothing
+ * to send (`ANNOTATE_NO_FEEDBACK_SENTENCE` in packages/editor/annotateSubmission.ts
+ * and the multi-message variant in packages/ui/utils/parser.ts; delivery.test.ts
+ * keeps them equal). A newer CLI marks that decision `noop` in its result
+ * record; an older one only prints the sentence.
+ */
+export const LEGACY_ANNOTATE_NO_FEEDBACK_TEXTS: readonly string[] = [
+  'User reviewed the document and has no feedback.',
+  'User reviewed the messages and has no feedback.',
+]
+
+/**
  * A CLI that predates the host result file (the plugin and the binary update
  * separately): what it printed on stdout, the text the skill would have shown
  * Claude. Empty output, or the legacy close/approve lines, carry nothing; a
@@ -157,6 +169,9 @@ export function legacyResult(kind: SessionKind, printed: string): HostResultReco
     return { v: 1, surface, decision: 'dismissed', message: '', noop: true }
   }
   if (text === 'The user approved.') return { v: 1, surface, decision: 'approved', message: '', noop: true }
+  if (surface !== 'review' && LEGACY_ANNOTATE_NO_FEEDBACK_TEXTS.includes(text)) {
+    return { v: 1, surface, decision: 'annotated', message: '', noop: true }
+  }
   if (surface === 'review' && text === LEGACY_REVIEW_APPROVED_TEXT) {
     return { v: 1, surface, decision: 'approved', message: '', noop: true }
   }

@@ -16,7 +16,7 @@ import { AnnotationType, type Annotation, type ImageAttachment } from '@plannota
 import type { CachedDocState, FeedbackDocuments } from '@plannotator/ui/hooks/useLinkedDoc';
 import { parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 import { buildCompleteAnnotateFeedback } from './annotateSubmission';
-import { resolveFeedbackSections } from './feedbackDocuments';
+import { collectSubmittedAnnotations, resolveFeedbackSections } from './feedbackDocuments';
 
 const A_PATH = '/repo/docs/a.md';
 const B_PATH = '/repo/docs/b.md';
@@ -243,5 +243,50 @@ describe('plain session with a linked document', () => {
     expect(count(out, 'EXTERNAL-NOTE')).toBe(1);
     expect(out.indexOf('EXTERNAL-NOTE')).toBeLessThan(out.indexOf('# Linked Document Feedback'));
     expect(out).toContain('have 2 pieces of feedback');
+  });
+});
+
+// #1700: the submit body's `annotations` drives the host's "N comments" and the
+// feedback archive's counts; it used to be the open document's comments only.
+describe('collectSubmittedAnnotations', () => {
+  test("a folder session submits every document's comments, each tagged with its document", () => {
+    const a = inline('a1', A_TEXT, 'Alpha paragraph', 'ON-A');
+    const b = inline('b1', B_TEXT, 'Bravo paragraph', 'ON-B');
+    const sections = resolveFeedbackSections({
+      // b.md is open; a.md was visited earlier.
+      feedbackDocuments: { root: FOLDER_ROOT, documents: new Map([[A_PATH, doc(A_TEXT, [a])], [B_PATH, doc(B_TEXT, [b])]]) },
+      live: { annotations: [b], globalAttachments: [], blocks: parseMarkdownToBlocks(B_TEXT) },
+      externalAnnotations: [],
+      sourceConverted: false,
+      annotateSource: 'folder',
+    });
+    const submitted = collectSubmittedAnnotations(sections);
+    expect(submitted.map((x) => [x.id, x.documentPath])).toEqual([['a1', A_PATH], ['b1', B_PATH]]);
+  });
+
+  test("the session's own document stays untagged; a linked document is tagged", () => {
+    const plan = inline('p1', PLAN_TEXT, 'Plan paragraph', 'ON-PLAN');
+    const a = inline('a1', A_TEXT, 'Alpha paragraph', 'ON-A');
+    const sections = resolveFeedbackSections({
+      feedbackDocuments: { root: null, documents: new Map([[A_PATH, doc(A_TEXT, [a])]]) },
+      live: { annotations: [plan], globalAttachments: [], blocks: parseMarkdownToBlocks(PLAN_TEXT) },
+      externalAnnotations: [],
+      sourceConverted: false,
+      annotateSource: 'file',
+    });
+    const submitted = collectSubmittedAnnotations(sections);
+    expect(submitted.map((x) => [x.id, x.documentPath])).toEqual([['p1', undefined], ['a1', A_PATH]]);
+  });
+
+  test("multi-message annotate-last submits every message's comments", () => {
+    const m1 = inline('m1', A_TEXT, 'Alpha paragraph', 'ON-MSG-1');
+    const m2 = inline('m2', B_TEXT, 'Bravo paragraph', 'ON-MSG-2');
+    const entry = (messageId: string, text: string, annotations: Annotation[]) =>
+      ({ messageId, text, annotations, globalAttachments: [] });
+    const submitted = collectSubmittedAnnotations(
+      { annotations: [], linkedDocuments: new Map() },
+      [entry('x', A_TEXT, [m1]), entry('y', B_TEXT, [m2])],
+    );
+    expect(submitted.map((x) => x.id)).toEqual(['m1', 'm2']);
   });
 });

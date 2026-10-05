@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { DEFAULT_REVIEW_APPROVED_PROMPT, DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT } from '@plannotator/shared/prompts'
 import {
   deliveryFor,
+  LEGACY_ANNOTATE_NO_FEEDBACK_TEXTS,
   LEGACY_REVIEW_APPROVED_TEXT,
   LEGACY_REVIEW_APPROVED_WITH_NOTES_HEADING,
   legacyResult,
@@ -10,6 +11,8 @@ import {
   type HostResultRecord,
 } from './delivery'
 import { splitShellWords } from './shell-words'
+import { ANNOTATE_NO_FEEDBACK_SENTENCE } from '../../../../packages/editor/annotateSubmission'
+import { exportMessageAnnotations } from '@plannotator/ui/utils/parser'
 
 const CONTEXT = { subject: 'notes.md', overflowPath: '/data/x/feedback.md' }
 
@@ -79,6 +82,20 @@ describe('legacyResult (a CLI that predates the host result file)', () => {
     expect(deliveryFor(legacyResult('review', 'Review session closed without feedback.'), CONTEXT).action).toBe('log')
     expect(deliveryFor(legacyResult('annotate', 'The user approved.'), CONTEXT).action).toBe('log')
     expect(deliveryFor(legacyResult('annotate', ''), CONTEXT).action).toBe('log')
+  })
+
+  test('an annotate Done with nothing to send starts no turn', () => {
+    for (const text of LEGACY_ANNOTATE_NO_FEEDBACK_TEXTS) {
+      expect(deliveryFor(legacyResult('annotate', `${text}\n`), CONTEXT).action).toBe('log')
+      expect(deliveryFor(legacyResult('last', text), CONTEXT).action).toBe('log')
+    }
+    // Only an annotate sentence: a review's stdout never carries it.
+    expect(deliveryFor(legacyResult('review', LEGACY_ANNOTATE_NO_FEEDBACK_TEXTS[0]!), CONTEXT).action).toBe('submit')
+  })
+
+  // The mod cannot import the editor: its copies must follow the editor's payloads.
+  test('the recognized no-feedback texts are what the editor posts', () => {
+    expect([...LEGACY_ANNOTATE_NO_FEEDBACK_TEXTS]).toEqual([ANNOTATE_NO_FEEDBACK_SENTENCE, exportMessageAnnotations([])])
   })
 
   // The mod cannot import packages/shared: its copies must follow the CLI's defaults.

@@ -143,6 +143,10 @@ interface AnnotateOutcomeLike {
   feedback?: string;
   exit?: boolean;
   annotations?: readonly unknown[];
+  /** The editor's Done with nothing to send: `feedback` still carries the
+   *  legacy zero-state sentence (stdout and `--json` keep it), but there is
+   *  nothing for the agent. */
+  nothingToSend?: boolean;
 }
 
 export interface AnnotateHostContext {
@@ -182,8 +186,9 @@ export function annotateHostResult(result: AnnotateOutcomeLike, context: Annotat
       ...(annotationCount !== undefined && { annotationCount }),
     };
   }
-  if (!feedback) {
-    // Done with nothing to send.
+  if (!feedback || result.nothingToSend === true) {
+    // Done with nothing to send. The editor still posts the zero-state
+    // sentence as feedback (stdout keeps it), and marks the body instead.
     return { v: 1, surface, decision: "annotated", message: "", noop: true, annotationCount: annotationCount ?? 0 };
   }
   const message = context.kind === "last"

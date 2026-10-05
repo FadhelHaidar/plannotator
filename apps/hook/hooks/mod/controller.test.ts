@@ -526,6 +526,45 @@ describe('a CLI older than the host result file', () => {
     expect(host.submits[0]).toContain('Line 3: wrong date')
     expect(host.logs.some((line) => line.includes('b.md closed with no annotations'))).toBe(true)
   })
+
+  // #1700: what such a CLI prints for an annotate Done with nothing to send.
+  test('its printed zero-feedback sentence starts no turn', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.runCommand('annotate', 'notes.md')
+    const [launch] = launches(host)
+    host.files.set(`${launchDirOf(launch!)}/stdout`, 'User reviewed the document and has no feedback.\n')
+    host.files.set(`${launchDirOf(launch!)}/exit`, '0')
+
+    await host.tick()
+
+    expect(host.submits).toEqual([])
+    expect(host.logs.some((line) => line.includes('notes.md closed with no annotations'))).toBe(true)
+  })
+})
+
+// #1700, end to end over the record the CLI builds: the editor's Done posts the
+// zero-state sentence as feedback, marked nothingToSend; the session must not
+// receive a "please address the annotation feedback" turn.
+describe('annotate Done with nothing to send (CLI record → mod)', () => {
+  test('logs, never submits', async () => {
+    const { annotateHostResult } = await import('../../server/host-result')
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.runCommand('annotate', 'notes.md')
+    const record = annotateHostResult(
+      { feedback: 'User reviewed the document and has no feedback.', annotations: [], nothingToSend: true },
+      { kind: 'file', target: '/repo/notes.md' },
+    )
+    decide(host, launches(host)[0]!, record as unknown as Record<string, unknown>)
+
+    await host.tick()
+
+    expect(host.submits).toEqual([])
+    expect(host.logs.some((line) => line.includes('notes.md closed with no annotations'))).toBe(true)
+  })
 })
 
 describe('restore', () => {

@@ -263,13 +263,14 @@ import {
   buildSavedFileChangePanelItems,
   buildSavedFileChangesSection,
   computeEditStats,
+  isEmptyFeedbackSentinel,
   normalizeEditedMarkdown,
 } from './directEdits';
 import {
   buildAnnotateApprovalBody,
   buildCompleteAnnotateFeedback,
 } from './annotateSubmission';
-import { blocksForDocument, mergeExternalAnnotations, resolveFeedbackSections } from './feedbackDocuments';
+import { blocksForDocument, collectSubmittedAnnotations, mergeExternalAnnotations, resolveFeedbackSections } from './feedbackDocuments';
 import { buildDecisionSpec, type DecisionActionId, type DecisionMenuItem } from '@plannotator/ui/utils/decisionSpec';
 import { DecisionNoteDialog, type DecisionHandler } from '@plannotator/ui/components/DecisionControl';
 import {
@@ -3269,6 +3270,14 @@ const App: React.FC = () => {
     savedFileChanges,
   ]);
 
+  // The submit body's `annotations`: every document's (and, in multi-message
+  // annotate-last, every message's) comments — the same set the feedback text
+  // exports, so host counts and the feedback archive match it.
+  const getSubmittedAnnotations = useCallback(() => collectSubmittedAnnotations(
+    getFeedbackSections(),
+    messageMultiSelectMode ? buildMessageAnnotationEntries() : undefined,
+  ), [getFeedbackSections, messageMultiSelectMode, buildMessageAnnotationEntries]);
+
   const withDraftGeneration = useCallback((path: string): string => {
     const separator = path.includes('?') ? '&' : '?';
     return `${path}${separator}draftGeneration=${getDraftGeneration()}`;
@@ -4235,9 +4244,13 @@ const App: React.FC = () => {
         body: JSON.stringify({
           draftGeneration: getDraftGeneration(),
           feedback,
-          annotations: discard ? [] : allAnnotations,
+          annotations: discard ? [] : getSubmittedAnnotations(),
           codeAnnotations: discard ? [] : codeAnnotations,
           ...getFeedbackMessageScope(),
+          // Done with nothing to send: `feedback` stays the legacy zero-state
+          // sentence (CLI stdout and --json print it), and this marks it so a
+          // host that must not start an agent turn for it can tell (#1700).
+          ...(isEmptyFeedbackSentinel(feedback) ? { nothingToSend: true } : {}),
         }),
       });
       if (!res.ok) throw new Error('Failed to send feedback');
@@ -4279,7 +4292,7 @@ const App: React.FC = () => {
           supported: approvalNotesSupported,
           draftGeneration: getDraftGeneration(),
           feedback,
-          annotations: discard ? [] : allAnnotations,
+          annotations: discard ? [] : getSubmittedAnnotations(),
           codeAnnotations: discard ? [] : codeAnnotations,
           ...getFeedbackMessageScope(),
         })),

@@ -91,7 +91,7 @@ import {
 	createAnnotateClientLeaseStreamSession,
 	createAnnotateClientLeaseTracker,
 } from "../generated/annotate-client-lease.ts";
-import { createAnnotateDecisionSettler } from "../generated/annotate-decision.ts";
+import { createAnnotateDecisionSettler, isNothingToSendFeedbackBody } from "../generated/annotate-decision.ts";
 
 export interface AnnotateServerResult {
 	port: number;
@@ -300,6 +300,8 @@ export async function startAnnotateServer(options: {
 		approved?: boolean;
 		selectedMessageId?: string;
 		feedbackScope?: "message" | "messages";
+		/** A Done with nothing to send (see isNothingToSendFeedbackBody). */
+		nothingToSend?: boolean;
 	}) => void;
 	const decisionPromise = new Promise<{
 		feedback: string;
@@ -308,6 +310,8 @@ export async function startAnnotateServer(options: {
 		approved?: boolean;
 		selectedMessageId?: string;
 		feedbackScope?: "message" | "messages";
+		/** A Done with nothing to send (see isNothingToSendFeedbackBody). */
+		nothingToSend?: boolean;
 	}>((r) => {
 		resolveDecision = r;
 	});
@@ -1159,6 +1163,7 @@ export async function startAnnotateServer(options: {
 					annotations: (body.annotations as unknown[]) || [],
 					selectedMessageId: typeof body.selectedMessageId === "string" ? body.selectedMessageId : undefined,
 					feedbackScope: body.feedbackScope === "messages" ? "messages" : body.feedbackScope === "message" ? "message" : undefined,
+					...(isNothingToSendFeedbackBody(body) && { nothingToSend: true }),
 				});
 				if (!feedbackWon) {
 					sendAlreadyDecided(res);

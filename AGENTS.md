@@ -367,7 +367,19 @@ approved-with-notes prompts OpenCode and Pi use; plan: `composePlanDeniedMessage
 unchanged for every caller. `noop` marks what never starts a turn: Done with
 nothing to send, review LGTM, Close, and a review posted straight to the PR
 platform (`platform: true`, logged plus a `$.prompt.suggest` to address the
-comments).
+comments). An annotate Done with nothing to send still posts the legacy
+zero-state sentence ("User reviewed the document and has no feedback.") as
+`feedback`, because plain stdout, `--json` and the OpenCode/Pi consumers print
+or deliver those bytes; the editor additionally marks that body
+`nothingToSend: true`, which both annotate servers carry onto the decision only
+alongside empty `annotations`/`codeAnnotations` (`isNothingToSendFeedbackBody`,
+`packages/shared/annotate-decision.ts`), and `annotateHostResult` turns it into
+a `noop` record. The mod's `legacyResult` recognizes the two zero-state
+sentences printed by a CLI older than the result file (#1700). The submit
+body's `annotations` carries every document's comments (folder sessions,
+linked documents, every message in multi-message annotate-last;
+`collectSubmittedAnnotations` in `packages/editor/feedbackDocuments.ts`), so
+`annotationCount` matches the feedback text.
 
 **Version skew.** The plugin installs from the repo's main branch and the
 binary updates separately, so with the mod on by default it routinely runs
@@ -1456,8 +1468,11 @@ Details that surprise people:
   would signal a real shape change rather than the arrival of new keys.
 - **Folder-session records name the folder, not the open document.** A folder
   annotate session submits one body of feedback for the session, so
-  `target.filePath` is the session's folder; the per-document path is not part
-  of the record.
+  `target.filePath` is the session's folder. The record's `annotations` hold
+  every document's comments (not only the open one's), and each comment made
+  on a document other than the session's own target carries the additive
+  `documentPath` field naming that document (absent means the session's own
+  target or message; distinct from `file`, a code annotation's file).
 - **URL-session records store the full URL, query string included**, because
   that is the page that was reviewed. A URL carrying a token in its query is
   therefore written to disk; the opt-out is the control for that.
