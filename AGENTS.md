@@ -388,7 +388,8 @@ The mod's `legacyResult` (an older CLI's stdout) never inferred the platform
 post; there a status line arrives as a feedback turn, as before. The feedback
 archive does not classify the platform post either: its decision comes from
 `approved` and whether the body has content. Introduced in 0.28.0, where zero
-annotations read as the platform post and the mod sent nothing (fixed 0.28.4).
+annotations read as the platform post and the mod sent nothing (fixed 0.28.4;
+the mod also guards records from those CLIs, see "Version skew").
 An annotate Done with nothing to send still posts the legacy
 zero-state sentence ("User reviewed the document and has no feedback.") as
 `feedback`, because plain stdout, `--json` and the OpenCode/Pi consumers print
@@ -446,6 +447,19 @@ released 0.27.25 and 0.27.10 binaries as processes:
   approved-with-notes prompt as "Approved with notes" (a user-customized
   approved prompt cannot be told apart and arrives as feedback). Close and an
   empty Done log only.
+- Review platform flag (0.28.0 to 0.28.3 CLIs): those CLIs wrote `platform:
+  true, noop: true` for ANY request-changes review with zero code annotations,
+  so feedback made only of PR description, PR comment or editor comments would
+  be logged and never delivered. The mod carries a narrow old-CLI guard
+  (`misreadAsPlatformPost` in `delivery.ts`): a review record is treated as the
+  real platform post only when its message is one of the editor's status lines
+  (`isPlatformStatusLine`: `Pull request|Merge request approved|reviewed on …`
+  or `Changes requested on …`, the shapes `statusMessage` in
+  `packages/review-editor/App.tsx` builds); any other non-empty `platform`
+  record is delivered as review feedback (without the request-changes suffix,
+  which those CLIs never added to it). A fixed CLI sets `platform` only on the
+  real status post, which always matches, so it never takes this path. If the
+  editor's status-line wording changes, update the pattern and its test.
 - `last`: the old CLI ignores `PLANNOTATOR_HOST_MESSAGES_FILE` and opens the
   newest message from stdin (no picker), though the command line still says
   "N messages, newest first".
@@ -1419,7 +1433,7 @@ During normal plan review, an Archive sidebar tab provides the same browsing via
 | `/api/review-image`   | GET    | One side of a changed image as raw bytes for the Before/After preview (`?path=&side=old\|new&snapshot=`; #1598). Serves only a file in the current patch whose chunk has no hunks and whose path is `png jpg jpeg gif webp svg avif bmp ico apng`; the old path is taken from the chunk, never the client. `Content-Type` is sniffed from magic bytes; every image response carries `nosniff`, `Content-Security-Policy: sandbox; …` and `Cross-Origin-Resource-Policy: same-origin`, plus `ETag` (304 on `If-None-Match`) and `X-Image-Width`/`X-Image-Height` when the header parses. Errors are JSON `{ reason, error }`: `400 unavailable\|bad-request`, `404 not-in-diff\|absent\|missing`, `409 stale`, `413 too-large` (10 MB per side or 50 megapixels), `415 not-image\|lfs-pointer`, `502 fetch-failed`. Advertised by `imagePreviewSupported` on every diff payload (false for static-patch and P4 sessions). |
 | `/api/git-add`        | POST   | Stage/unstage a file (body: `{ filePath, undo? }`) |
 | `/api/review-progress?snapshot=<snapshotId>` | GET/POST | Load or save durable viewed-file progress. GET returns `{ available, key?, fingerprints?, viewedFiles?, suppressedFiles? }`; POST takes `{ key, changes: [{ path, fingerprint, viewed }] }`. Stale snapshots return 409. |
-| `/api/feedback`       | POST   | Submit review (body: feedback, annotations, agentSwitch, platform?). `platform: true` (boolean only) marks the status post the PR-platform path sends after `/api/pr-action`; it rides onto the decision so hosts log it instead of delivering it. Never infer it from empty `annotations` (see "Host result file") |
+| `/api/feedback`       | POST   | Submit review (body: feedback, annotations, agentSwitch, platform?). `platform: true` (boolean only) marks the status post the PR-platform path sends after `/api/pr-action`; it rides onto the decision, where the Claude Code mod logs it instead of starting a turn and OpenCode, Pi, CLI stdout and Amp deliver the status line verbatim without the request-changes suffix. Never infer it from empty `annotations` (see "Host result file") |
 | `/api/image`          | GET    | Serve image by path query param            |
 | `/api/upload`         | POST   | Upload image, returns `{ path, originalName }` |
 | `/api/draft`          | GET/POST/DELETE | Auto-save annotation drafts to survive server crashes |
