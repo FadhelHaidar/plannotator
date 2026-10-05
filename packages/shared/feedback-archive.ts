@@ -72,7 +72,9 @@ export type FeedbackSurface =
   | "annotate-url"
   | "annotate-app"
   | "annotate-last"
-  | "annotate-folder";
+  | "annotate-folder"
+  /** Several files reviewed as one (0.29 bundles); `target.documents` lists them. */
+  | "annotate-bundle";
 
 export type FeedbackDecision =
   | "approved"
@@ -127,6 +129,13 @@ export interface FeedbackTarget {
    * to disk; the archive opt-out is the control for that.
    */
   url?: string;
+  /**
+   * The files of a review of several files (`annotate-bundle`), in the order
+   * they were opened for review, each with how many submitted comments were
+   * made on it. A bundle has no single `filePath`. Additive per the field
+   * contract above.
+   */
+  documents?: { path: string; annotationCount: number }[];
   /**
    * Provenance for surfaces whose subject is an AGENT SESSION rather than a
    * file or a diff: annotate-last and the other message-shaped surfaces, where
@@ -364,6 +373,7 @@ const SURFACE_TITLES: Record<FeedbackSurface, string> = {
   "annotate-app": "Annotate feedback (live app)",
   "annotate-last": "Annotate feedback (agent message)",
   "annotate-folder": "Annotate feedback (folder)",
+  "annotate-bundle": "Annotate feedback (several files)",
 };
 
 /**
@@ -380,6 +390,9 @@ export function renderFeedbackRecordMarkdown(record: FeedbackRecord): string {
   const target = record.target;
   if (target?.filePath) lines.push(`- File: ${target.filePath}`);
   if (target?.url) lines.push(`- URL: ${target.url}`);
+  for (const document of target?.documents ?? []) {
+    lines.push(`- File: ${document.path} (${document.annotationCount} ${document.annotationCount === 1 ? "comment" : "comments"})`);
+  }
   if (target?.slug) {
     lines.push(
       `- Plan: ${target.slug}${target.planVersion ? ` (version ${target.planVersion})` : ""}`,

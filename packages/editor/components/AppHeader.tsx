@@ -14,6 +14,7 @@ import type { UIPreferences } from '@plannotator/ui/utils/uiPreferences';
 import { SparklesIcon } from '@plannotator/ui/components/SparklesIcon';
 import type { CompactPlanAction } from '@plannotator/ui/components/PlanHeaderMenu';
 import { HtmlSurfaceControls } from '@plannotator/ui/components/HtmlSurfaceControls';
+import { BundleSwitcher, type BundleSwitcherProps } from './BundleSwitcher';
 
 /** Plannotator's refresh strings for the published control: the document
  * is a file on disk, so the refresh says so. */
@@ -54,6 +55,10 @@ interface AppHeaderProps {
   compactDocumentTitle?: string;
   compactSessionActions?: CompactPlanAction[];
   compactDocumentActions?: CompactPlanAction[];
+  /** A review of several files: the "2 of 3 · mock.html ‹ ›" switcher beside
+   *  the logo. Desktop only; the compact shell names the position in its
+   *  title and offers previous/next in its Options menu. */
+  bundleSwitcher?: BundleSwitcherProps;
   // Mode flags (stable after mount)
   isApiMode: boolean;
   annotateMode: boolean;
@@ -169,6 +174,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   compactDocumentTitle,
   compactSessionActions,
   compactDocumentActions,
+  bundleSwitcher,
   isApiMode,
   annotateMode,
   archiveMode,
@@ -250,7 +256,10 @@ export const AppHeader = React.memo<AppHeaderProps>(({
             <span className="block h-11 w-11" aria-hidden="true" />
           )
         ) : (
-          <AppHeaderLogo />
+          <>
+            <AppHeaderLogo />
+            {bundleSwitcher && <BundleSwitcher {...bundleSwitcher} />}
+          </>
         )}
       </div>
 

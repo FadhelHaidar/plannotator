@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -85,6 +85,55 @@ process.exit(1);
       rmSync(root, { recursive: true, force: true });
     }
   }, 20_000); // spawns the stub CLI several times; the 5s default flakes
+
+  // Several file paths are one review: each path its own CLI argument (one
+  // joined argument would be "File not found"), the agent's prompt names
+  // every file, and an older CLI's "pick one" error reads as "update".
+  test.skipIf(process.platform === "win32")("several file paths reach the CLI as one review; an older CLI reads as update", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "plannotator-annotate-bundle-bridge-"));
+    writeFileSync(path.join(root, "spec.md"), "# Spec\n");
+    writeFileSync(path.join(root, "mock.html"), "<h1>Mock</h1>");
+    const argvFile = path.join(root, "argv.json");
+    const current = path.join(root, "cli.ts");
+    writeFileSync(current, `#!/usr/bin/env bun
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));
+console.log(JSON.stringify({ decision: "annotated", feedback: "two notes" }));
+`, { mode: 0o755 });
+    const older = path.join(root, "older-cli.ts");
+    writeFileSync(older, `#!/usr/bin/env bun
+console.error("Ambiguous annotate arguments: 2 of them each resolve to an existing target.\\nRe-run with exactly one target: plannotator annotate <file>");
+process.exit(1);
+`, { mode: 0o755 });
+    const client = {
+      app: { log: mock((_entry: { message: string }) => {}) },
+      session: { prompt: mock(async (_input: unknown) => ({})) },
+      tui: { showToast: mock((_input: any) => {}) },
+    };
+    const previous = process.env.PLANNOTATOR_BIN;
+    try {
+      process.env.PLANNOTATOR_BIN = current;
+      await handleCliCommand({ command: "plannotator-annotate", client, sessionId: "s1", cwd: root, rawArgs: "spec.md mock.html" });
+      expect(JSON.parse(readFileSync(argvFile, "utf8"))).toEqual([
+        "annotate",
+        path.join(root, "spec.md"),
+        path.join(root, "mock.html"),
+        "--json",
+      ]);
+      const delivered = JSON.stringify(client.session.prompt.mock.calls[0]?.[0]);
+      expect(delivered).toContain(path.join(root, "spec.md"));
+      expect(delivered).toContain(path.join(root, "mock.html"));
+
+      process.env.PLANNOTATOR_BIN = older;
+      client.app.log.mockClear();
+      await handleCliCommand({ command: "plannotator-annotate", client, sessionId: "s1", cwd: root, rawArgs: "spec.md mock.html" });
+      expect(client.app.log.mock.calls.map(([entry]) => entry.message).join("\n")).toContain("update Plannotator to open several files at once");
+    } finally {
+      if (previous === undefined) delete process.env.PLANNOTATOR_BIN;
+      else process.env.PLANNOTATOR_BIN = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   test("maps OpenCode sharing context into child CLI env", () => {
     expect(buildCliBridgeEnv({

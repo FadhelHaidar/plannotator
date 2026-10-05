@@ -7,6 +7,13 @@ export interface AnnotateReferenceRootOptions {
 	filePath: string;
 	folderPath?: string;
 	initialSingleFileSourcePath?: string | null;
+	/**
+	 * `annotate-bundle`: the bundle's files (absolute). Each contributes its
+	 * directory, the single-file rule applied per file, so the documents a
+	 * bundle file links to resolve exactly as they would if it were opened
+	 * alone.
+	 */
+	bundlePaths?: readonly string[];
 }
 
 export function getAnnotateReferenceRootPaths(options: AnnotateReferenceRootOptions): string[] {
@@ -29,6 +36,10 @@ export function getAnnotateReferenceRootPaths(options: AnnotateReferenceRootOpti
 	}
 
 	addRoot(process.cwd());
+	if (options.mode === "annotate-bundle" && options.bundlePaths) {
+		for (const path of options.bundlePaths) addRoot(dirname(path));
+		return roots;
+	}
 	if (/^https?:\/\//i.test(options.filePath)) {
 		return roots;
 	}

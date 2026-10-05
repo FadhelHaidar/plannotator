@@ -1,5 +1,6 @@
 export type AnnotateFeedbackTarget = {
-  fileHeader: "File" | "Folder";
+  /** "Files" names every file of a review of several files. */
+  fileHeader: "File" | "Folder" | "Files";
   filePath: string;
 };
 

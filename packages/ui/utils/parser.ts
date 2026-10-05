@@ -1379,6 +1379,11 @@ export const FOLDER_DOC_EXPORT_HEADING: LinkedDocExportHeading = {
   intro: 'The following feedback is on files in the reviewed folder, grouped by file.',
 };
 
+export const BUNDLE_DOC_EXPORT_HEADING: LinkedDocExportHeading = {
+  title: 'File Feedback',
+  intro: 'The following feedback is on the files under review, one section per file, in the order they were given for review.',
+};
+
 export const exportLinkedDocAnnotations = (
   docAnnotations: Map<string, LinkedDocAnnotationEntry>,
   heading: LinkedDocExportHeading = LINKED_DOC_EXPORT_HEADING,

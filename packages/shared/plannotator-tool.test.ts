@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  isOlderCliBundleRefusal,
   normalizePlannotatorSessionId,
+  plannotatorBundleSubject,
   parsePlannotatorToolInput,
   plannotatorDecisionHeading,
   plannotatorToolArgs,
@@ -84,6 +86,24 @@ describe('plannotator tool v2: several targets', () => {
     expect(error({ action: 'annotate', target: ['a.md', '--hook'] })).toContain('target[1]')
     expect(error({ action: 'annotate', target: ['a.md', 3] })).toContain('target[1]')
     expect(error({ action: 'review', target: ['a', 'b'] })).toContain('annotate')
+  })
+})
+
+describe('plannotator tool: reviews of several files', () => {
+  // The failure: a host cannot tell an older CLI's refusal of several paths
+  // from the current CLI's own ambiguity error (a URL among the files), and
+  // either tells the agent to update when it should fix its call, or the
+  // reverse.
+  test('an older CLI refusal is the ambiguity error without the bundle hint', () => {
+    const older = 'Ambiguous annotate arguments: 2 of them each resolve to an existing target.\n  a.md -> /r/a.md\n  b.md -> /r/b.md\nRe-run with exactly one target: plannotator annotate <...>'
+    expect(isOlderCliBundleRefusal(older)).toBe(true)
+    expect(isOlderCliBundleRefusal(`${older}\nTo review several files together, pass only their paths: plannotator annotate a.md b.html`)).toBe(false)
+    expect(isOlderCliBundleRefusal('File not found: a.md')).toBe(false)
+  })
+
+  test('a bundle is named by its count and first file names', () => {
+    expect(plannotatorBundleSubject(['/r/spec.md', '/r/mock.html'])).toBe('2 files: spec.md, mock.html')
+    expect(plannotatorBundleSubject(['a.md', 'docs/b.md', 'c\\d.md', 'e.md', 'f.md'])).toBe('5 files: a.md, b.md, d.md +2 more')
   })
 })
 

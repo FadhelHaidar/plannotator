@@ -104,11 +104,16 @@ import {
   type GoalSetupStage,
 } from "@plannotator/shared/goal-setup";
 import {
+  ANNOTATE_BUNDLE_HINT,
   buildAmbiguousAnnotateArgsMessage,
   buildUnresolvedAnnotateArgsMessage,
+  probeAnnotateBundlePath,
   probeAnnotateToken,
+  resolveAnnotateBundleFiles,
   selectAnnotateTokenTarget,
 } from "@plannotator/shared/annotate-target";
+import { annotateBundleRoot, type AnnotateBundleFile } from "@plannotator/shared/annotate-bundle";
+import { plannotatorBundleSubject } from "@plannotator/shared/plannotator-tool";
 import { createWorktreePool, type WorktreePool, type PoolEntry } from "@plannotator/shared/worktree-pool";
 import { parsePRUrl, checkPRAuth, fetchPR, getCliName, getCliInstallUrl, getMRLabel, getMRNumberLabel, getDisplayRepo, getPlatformLabel, getPRNumber, getPRHeadFetchSpec, getPRCloneCommand } from "@plannotator/server/pr";
 import { writeRemoteShareLink } from "@plannotator/server/share-url";
@@ -126,7 +131,7 @@ import {
 import { readHostMessages, takeHostMessagesPath } from "./host-messages";
 import { exitOnPortInUse } from "./port-in-use";
 import { parseModPlanInput, readModPlanRevision, writeModPlanRevisionAck } from "./claude-mod-plan";
-import { LIVE_APP_REMOTE_MESSAGE } from "@plannotator/shared/live-probe";
+import { LIVE_APP_REMOTE_MESSAGE, LIVE_APP_REQUIRES_URL_MESSAGE } from "@plannotator/shared/live-probe";
 // Bridge sources for live app sessions: the CLI supplies them so
 // @plannotator/server never imports @plannotator/ui (mirrors the existing
 // htmlContent precedent).
@@ -1387,15 +1392,66 @@ if (args[0] === "sessions") {
   // disable tolerance entirely so a typo'd flag errors the way it always
   // did instead of being silently skipped.
   const targetTokens = args.slice(1);
-  const tolerantMultiToken = !strictAnnotate && targetTokens.length > 1;
   // Bare directory names only count as targets when they are the sole
   // argument; in multi-token mode a stray word matching a directory (or `.`)
   // must not hijack the fast path.
   const annotateProbe = (token: string) =>
     probeAnnotateToken(token, projectRoot, { bareDirectories: false });
 
+  // Several files reviewed as one (0.29 bundles): when there are several
+  // arguments and EVERY one is an existing file named by its path, they open
+  // as one review in the typed order. Checked first, for strict gates too
+  // (which take nothing else with several arguments). Anything less keeps the
+  // tiers below unchanged.
+  let bundleResolution: Awaited<ReturnType<typeof resolveAnnotateTarget>> | null = null;
+  if (targetTokens.length > 1) {
+    const bundlePath = (token: string) => probeAnnotateBundlePath(token, projectRoot);
+    const bundleSelection = selectAnnotateTokenTarget(targetTokens, annotateProbe, { bundlePath });
+    if (bundleSelection.kind === "bundle") {
+      // --app needs a URL, exactly as for a single file.
+      if (appFlag) exitAnnotateStartupFailure(LIVE_APP_REQUIRES_URL_MESSAGE);
+      const checked = resolveAnnotateBundleFiles(
+        bundleSelection.files.map((file) => file.value),
+        { convertHtml: renderMarkdownFlag },
+      );
+      if (!checked.ok) exitAnnotateStartupFailure(checked.message);
+      const bundleRoot = annotateBundleRoot(checked.files.map((file) => file.path));
+      console.error(`Files (${checked.files.length}): ${checked.files.map((file) => file.path).join(", ")}`);
+      bundleResolution = {
+        ok: true,
+        markdown: "",
+        absolutePath: bundleRoot,
+        annotateMode: "annotate-bundle",
+        bundleFiles: checked.files,
+        sourceConverted: false,
+        isUrl: false,
+      };
+    } else if (strictAnnotate && !targetTokens.every((token) => bundlePath(token) !== null)) {
+      // A strict gate's arguments are one target or only file paths. The
+      // first argument's own error wins (a typo'd path keeps its message);
+      // otherwise the extra words are refused instead of ignored.
+      const first = await resolveAnnotateTarget({
+        rawFilePath,
+        projectRoot,
+        noJina: cliNoJina,
+        renderMarkdown: renderMarkdownFlag,
+        forceApp: appFlag,
+        forceStatic: staticFlag,
+      });
+      if (!first.ok) exitAnnotateStartupFailure(first.message);
+      exitAnnotateStartupFailure(
+        [
+          `A strict annotate gate takes one target, or only existing file paths to review several files together. These arguments are neither: ${targetTokens.join(" ")}`,
+          ANNOTATE_BUNDLE_HINT,
+        ].join("\n"),
+      );
+    }
+  }
+
+  const tolerantMultiToken = !strictAnnotate && targetTokens.length > 1 && bundleResolution === null;
+
   let resolution: Awaited<ReturnType<typeof resolveAnnotateTarget>> | null =
-    tolerantMultiToken
+    bundleResolution ?? (tolerantMultiToken
       ? null
       : await resolveAnnotateTarget({
           rawFilePath,
@@ -1404,7 +1460,7 @@ if (args[0] === "sessions") {
           renderMarkdown: renderMarkdownFlag,
           forceApp: appFlag,
           forceStatic: staticFlag,
-        });
+        }));
 
   if (tolerantMultiToken) {
     const selection = selectAnnotateTokenTarget(targetTokens, annotateProbe);
@@ -1418,7 +1474,9 @@ if (args[0] === "sessions") {
         forceStatic: staticFlag,
       });
     } else if (selection.kind === "multiple") {
-      exitAnnotateStartupFailure(buildAmbiguousAnnotateArgsMessage(selection.candidates));
+      // This CLI opens several file paths as one review; the hint says so
+      // (and its presence is how a host tells this CLI from an older one).
+      exitAnnotateStartupFailure(buildAmbiguousAnnotateArgsMessage(selection.candidates, { bundleHint: true }));
     } else if (selection.kind === "none" && selection.words.length > 1) {
       // Content flags only: transport flags (--gate/--json/--hook) describe
       // this invocation's plumbing, and suggesting them would tell an agent
@@ -1474,7 +1532,9 @@ if (args[0] === "sessions") {
     sourceConverted,
     isUrl,
     liveApp: liveAppResolved,
+    bundleFiles,
   } = resolution;
+  const bundlePaths = bundleFiles?.map((file) => file.path);
 
   // Remote hard-off (layer 1 of 3; the server throw and the proxy's
   // unconditional loopback bind are the others). No override env var exists
@@ -1511,6 +1571,7 @@ if (args[0] === "sessions") {
         }
       : undefined,
     folderPath,
+    bundleFiles,
     sourceInfo,
     sourceConverted,
     sharingEnabled,
@@ -1562,9 +1623,11 @@ if (args[0] === "sessions") {
     mode: "annotate",
     project: annotateProject,
     startedAt: new Date().toISOString(),
-    label: folderPath
-      ? `annotate-${path.basename(folderPath)}`
-      : `annotate-${isUrl ? hostnameOrFallback(absolutePath) : path.basename(absolutePath)}`,
+    label: bundlePaths
+      ? `annotate-${plannotatorBundleSubject(bundlePaths)}`
+      : folderPath
+        ? `annotate-${path.basename(folderPath)}`
+        : `annotate-${isUrl ? hostnameOrFallback(absolutePath) : path.basename(absolutePath)}`,
   });
 
   await completeAnnotateCommand({
@@ -1574,11 +1637,13 @@ if (args[0] === "sessions") {
     requireApproval: requireApprovalFlag,
     resultFile,
     emitLegacyOutcome: (outcome) => {
-      publishHostResult(annotateHostResult(outcome, {
-        kind: folderPath ? "folder" : isUrl ? "url" : "file",
-        target: folderPath ?? absolutePath,
-        origin: detectedOrigin,
-      }));
+      publishHostResult(annotateHostResult(outcome, bundlePaths
+        ? { kind: "bundle", bundlePaths, origin: detectedOrigin }
+        : {
+            kind: folderPath ? "folder" : isUrl ? "url" : "file",
+            target: folderPath ?? absolutePath,
+            origin: detectedOrigin,
+          }));
       emitAnnotateOutcome(outcome);
     },
   });

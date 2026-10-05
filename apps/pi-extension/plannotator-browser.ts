@@ -25,6 +25,7 @@ import {
 } from "./server.ts";
 import { BROWSER_SESSION_STOPPED } from "./browser-session-error.ts";
 import type { SessionBridge } from "./generated/ai/session-bridge.ts";
+import type { AnnotateBundleFile } from "./generated/annotate-bundle.ts";
 import { openBrowser, isRemoteSession } from "./server/network.ts";
 import { detectProjectName } from "./server/project.ts";
 import { parsePRUrl, checkPRAuth, fetchPR } from "./server/pr.ts";
@@ -60,7 +61,7 @@ export {
 	hasReviewBrowserHtml,
 } from "./plannotator-browser-runtime.ts";
 
-export type AnnotateMode = "annotate" | "annotate-folder" | "annotate-last" | "annotate-app";
+export type AnnotateMode = "annotate" | "annotate-folder" | "annotate-last" | "annotate-app" | "annotate-bundle";
 export interface PlanReviewDecision {
 	approved: boolean;
 	feedback?: string;
@@ -819,7 +820,9 @@ export async function startMarkdownAnnotationSession(
 	liveTargetUrl?: string,
 	/** "Ask this session": the bridge to the Pi session that opened this annotation. */
 	sessionBridge?: SessionBridge,
-): Promise<BrowserDecisionSession<{ feedback: string; exit?: boolean; approved?: boolean; selectedMessageId?: string; feedbackScope?: "message" | "messages" }>> {
+	/** Several files reviewed as one (mode "annotate-bundle"), in review order. */
+	bundleFiles?: AnnotateBundleFile[],
+): Promise<BrowserDecisionSession<{ feedback: string; annotations?: unknown[]; exit?: boolean; approved?: boolean; selectedMessageId?: string; feedbackScope?: "message" | "messages" }>> {
 	if (!ctx.hasUI) {
 		throw new Error("Plannotator annotation browser is unavailable in this session.");
 	}
@@ -864,6 +867,7 @@ export async function startMarkdownAnnotationSession(
 		mode,
 		liveApp,
 		folderPath,
+		bundleFiles,
 		recentMessages,
 		sourceInfo,
 		sourceConverted,

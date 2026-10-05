@@ -29,6 +29,7 @@ import {
   getPlanToolName,
 } from "@plannotator/shared/prompts";
 import type { ReviewOutput } from "./review-output";
+import { annotateBundleDocumentCounts, annotateBundleTargetText } from "@plannotator/shared/annotate-bundle";
 
 export const HOST_RESULT_FILE_ENV = "PLANNOTATOR_HOST_RESULT_FILE";
 
@@ -59,6 +60,8 @@ export interface HostResultRecord {
   closedBy?: "agent";
   /** With `closedBy`: the reviewer's unsent comments, kept in the draft. */
   unsentAnnotations?: number;
+  /** Annotate of several files (a bundle): each file, in review order, with how many comments were made on it. */
+  documents?: { path: string; annotationCount: number }[];
 }
 
 /** The `closedBy` / `unsentAnnotations` pair a host close adds to a dismissal. */
@@ -167,10 +170,12 @@ interface AnnotateOutcomeLike {
 }
 
 export interface AnnotateHostContext {
-  /** "last-message" for annotate-last. */
-  kind: "file" | "folder" | "url" | "last";
-  /** Absolute file/folder path or URL; unused for `last`. */
+  /** "last-message" for annotate-last; "bundle" for several files reviewed as one. */
+  kind: "file" | "folder" | "url" | "last" | "bundle";
+  /** Absolute file/folder path or URL; unused for `last` and `bundle`. */
   target?: string;
+  /** `bundle`: the files in review order (absolute). */
+  bundlePaths?: readonly string[];
   origin?: Origin;
   config?: PlannotatorConfig;
 }
@@ -181,6 +186,16 @@ export interface AnnotateHostContext {
  * framing the OpenCode and Pi hosts use.
  */
 export function annotateHostResult(result: AnnotateOutcomeLike, context: AnnotateHostContext): HostResultRecord {
+  const record = annotateHostRecord(result, context);
+  if (context.kind !== "bundle") return record;
+  // A bundle names each file with its comment count, in review order.
+  return {
+    ...record,
+    documents: annotateBundleDocumentCounts(context.bundlePaths ?? [], Array.isArray(result.annotations) ? result.annotations : []),
+  };
+}
+
+function annotateHostRecord(result: AnnotateOutcomeLike, context: AnnotateHostContext): HostResultRecord {
   const surface: HostResultSurface = context.kind === "last" ? "annotate-last" : "annotate";
   const annotationCount = Array.isArray(result.annotations) ? result.annotations.length : undefined;
   const feedback = (result.feedback ?? "").trim() ? result.feedback ?? "" : "";
@@ -188,7 +203,8 @@ export function annotateHostResult(result: AnnotateOutcomeLike, context: Annotat
   if (result.exit) {
     return { v: 1, surface, decision: "dismissed", message: "", noop: true, ...(annotationCount !== undefined && { annotationCount }), ...closedByFields(result) };
   }
-  const header = context.kind === "folder" ? "Folder" : context.kind === "url" ? "URL" : "File";
+  const header = context.kind === "folder" ? "Folder" : context.kind === "url" ? "URL" : context.kind === "bundle" ? "Files" : "File";
+  if (context.kind === "bundle") context = { ...context, target: annotateBundleTargetText(context.bundlePaths ?? []) };
   if (result.approved) {
     if (!feedback) {
       return { v: 1, surface, decision: "approved", message: getAnnotateApprovedPrompt(runtime, context.config), noop: true, ...(annotationCount !== undefined && { annotationCount }) };

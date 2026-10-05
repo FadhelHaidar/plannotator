@@ -169,10 +169,12 @@ function describeSurface(context: AIContext): string | null {
 		case "plan-review":
 			return "Surface: plan review";
 		case "annotate": {
-			const { filePath, sourceInfo } = context.annotate;
+			const { filePath, sourceInfo, bundlePosition } = context.annotate;
 			if (filePath === "last-message") return "Surface: annotating your last message";
 			const where = sourceInfo && /^https?:\/\//i.test(sourceInfo) ? sourceInfo : filePath;
-			return where ? `Surface: annotating ${where}` : "Surface: annotating a document";
+			// A review of several files names the open file's place in it.
+			const position = bundlePosition ? `, file ${bundlePosition.index} of ${bundlePosition.total}` : "";
+			return where ? `Surface: annotating ${where}${position}` : "Surface: annotating a document";
 		}
 		default:
 			return null;

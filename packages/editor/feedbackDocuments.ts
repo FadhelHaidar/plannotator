@@ -14,6 +14,7 @@ import type { FeedbackDocuments } from '@plannotator/ui/hooks/useLinkedDoc';
 import {
   diagramDocumentBlocks,
   parseMarkdownToBlocks,
+  BUNDLE_DOC_EXPORT_HEADING,
   FOLDER_DOC_EXPORT_HEADING,
   LINKED_DOC_EXPORT_HEADING,
   type LinkedDocAnnotationEntry,
@@ -64,6 +65,12 @@ export interface FeedbackSectionsInput {
   sourceFilePath?: string;
   sourceConverted: boolean;
   annotateSource: 'file' | 'message' | 'folder' | null;
+  /**
+   * A review of several files: the files in review order. Documents are
+   * exported in this order (anything else, such as a linked document, after
+   * them in the order it was opened) under the bundle heading.
+   */
+  bundleOrder?: readonly string[] | null;
 }
 
 export interface FeedbackSections {
@@ -94,8 +101,18 @@ export function resolveFeedbackSections(input: FeedbackSectionsInput): FeedbackS
       : parseMarkdownToBlocks(markdown, { frontmatter: shouldStripFrontmatter(input.sourceFilePath) });
   }
 
+  const order = input.bundleOrder ?? null;
+  const rank = (path: string) => {
+    if (!order) return 0;
+    const index = order.indexOf(path);
+    return index === -1 ? order.length : index;
+  };
+  // Stable sort: unlisted documents keep their opening order after the files.
+  const entries = order
+    ? [...documents].sort(([a], [b]) => rank(a) - rank(b))
+    : [...documents];
   const linkedDocuments = new Map<string, LinkedDocAnnotationEntry>();
-  for (const [filepath, entry] of documents) {
+  for (const [filepath, entry] of entries) {
     linkedDocuments.set(filepath, entry.markdown
       ? { ...entry, blocks: blocksForDocument(filepath, entry.markdown) }
       : entry);
@@ -107,9 +124,11 @@ export function resolveFeedbackSections(input: FeedbackSectionsInput): FeedbackS
     blocks,
     sourceConverted: input.sourceConverted,
     linkedDocuments,
-    linkedDocumentsHeading: input.annotateSource === 'folder'
-      ? FOLDER_DOC_EXPORT_HEADING
-      : LINKED_DOC_EXPORT_HEADING,
+    linkedDocumentsHeading: order
+      ? BUNDLE_DOC_EXPORT_HEADING
+      : input.annotateSource === 'folder'
+        ? FOLDER_DOC_EXPORT_HEADING
+        : LINKED_DOC_EXPORT_HEADING,
   };
 }
 

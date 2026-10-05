@@ -239,6 +239,38 @@ describe("handleAnnotateCommand", () => {
     expect(startAnnotateServerMock.mock.calls[0]?.[0].approvalNotesSupported).toBe(false);
   });
 
+  // Several existing file paths are one review of all of them (the shared
+  // bundle rule): the failure is the old ambiguity error, or a prompt that
+  // names only one of the files.
+  test("several file paths open one bundle session, and the prompt names every file", async () => {
+    const projectRoot = makeTempDir();
+    const spec = path.join(projectRoot, "spec.md");
+    const mock_ = path.join(projectRoot, "mock.html");
+    writeFileSync(spec, "# Spec\n");
+    writeFileSync(mock_, "<h1>Mock</h1>");
+    const deps: any = makeDeps();
+    deps.directory = projectRoot;
+    deps.startAnnotateServer = mock(async (options: any) => ({
+      port: 0,
+      url: "http://localhost",
+      isRemote: false,
+      options,
+      waitForDecision: async () => ({ feedback: "Two notes.", annotations: [{ id: "a1" }] }),
+      stop: () => {},
+    }));
+
+    await handleAnnotateCommand({ properties: { arguments: "mock.html spec.md", sessionID: "session-123" } }, deps);
+
+    const options = deps.startAnnotateServer.mock.calls[0]?.[0];
+    expect(options.mode).toBe("annotate-bundle");
+    expect(options.bundleFiles).toEqual([
+      { path: mock_, renderAs: "html" },
+      { path: spec, renderAs: "markdown" },
+    ]);
+    const prompt = deps.client.session.prompt.mock.calls[0]?.[0].body.parts[0].text;
+    expect(prompt).toContain(`Files: ${mock_}, ${spec}`);
+  });
+
   test("injects approved feedback as non-blocking notes with file context", async () => {
     const projectRoot = makeTempDir();
     const filePath = path.join(projectRoot, "plan.md");

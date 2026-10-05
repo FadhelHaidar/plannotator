@@ -99,9 +99,10 @@ function loadPlannotatorPrompts(): Promise<PlannotatorPromptsModule> {
 }
 
 async function loadAnnotateCommandModules() {
-	const [annotateArgs, annotateTarget, atReference, resolveFile, referenceCommon] = await Promise.all([
+	const [annotateArgs, annotateTarget, annotateBundle, atReference, resolveFile, referenceCommon] = await Promise.all([
 		import("./generated/annotate-args.ts"),
 		import("./generated/annotate-target.ts"),
+		import("./generated/annotate-bundle.ts"),
 		import("./generated/at-reference.ts"),
 		import("./generated/resolve-file.ts"),
 		import("./generated/reference-common.ts"),
@@ -112,6 +113,10 @@ async function loadAnnotateCommandModules() {
 		buildAmbiguousAnnotateArgsMessage: annotateTarget.buildAmbiguousAnnotateArgsMessage,
 		buildUnresolvedAnnotateArgsMessage: annotateTarget.buildUnresolvedAnnotateArgsMessage,
 		probeAnnotateToken: annotateTarget.probeAnnotateToken,
+		probeAnnotateBundlePath: annotateTarget.probeAnnotateBundlePath,
+		resolveAnnotateBundleFiles: annotateTarget.resolveAnnotateBundleFiles,
+		annotateBundleRoot: annotateBundle.annotateBundleRoot,
+		annotateBundleTargetText: annotateBundle.annotateBundleTargetText,
 		selectAnnotateTokenTarget: annotateTarget.selectAnnotateTokenTarget,
 		resolveAtReference: atReference.resolveAtReference,
 		hasMarkdownFiles: resolveFile.hasMarkdownFiles,
@@ -881,7 +886,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	});
 
 	pi.registerCommand("plannotator-annotate", {
-		description: "Open markdown file or folder in annotation UI",
+		description: "Open a file, several files, a URL or a folder in the annotation UI",
 		handler: async (args, ctx) => {
 			const {
 				FILE_BROWSER_EXCLUDED,
@@ -891,6 +896,10 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				buildAmbiguousAnnotateArgsMessage,
 				buildUnresolvedAnnotateArgsMessage,
 				probeAnnotateToken,
+				probeAnnotateBundlePath,
+				resolveAnnotateBundleFiles,
+				annotateBundleRoot,
+				annotateBundleTargetText,
 				selectAnnotateTokenTarget,
 				resolveAtReference,
 				resolveUserPath,
@@ -922,15 +931,30 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			// only count in the sole-arg pre-pass, and unrecognized
 			// dash-prefixed tokens disable tolerance so a typo'd flag errors
 			// the way it always did.
+			// Several existing file paths (every word one) open as one review,
+			// in the typed order: the shared bundle rule, same as the CLI.
+			let bundleFiles: { path: string; renderAs: "markdown" | "html" | "mermaid" | "graphviz" }[] | undefined;
 			if (!annotateInputNamesExistingTarget(rawFilePath, ctx.cwd)) {
-				const selection = selectAnnotateTokenTarget(rawFilePath, (token: string) =>
-					probeAnnotateToken(token, ctx.cwd, { bareDirectories: false }),
+				const selection = selectAnnotateTokenTarget(
+					rawFilePath,
+					(token: string) => probeAnnotateToken(token, ctx.cwd, { bareDirectories: false }),
+					{ bundlePath: (token: string) => probeAnnotateBundlePath(token, ctx.cwd) },
 				);
-				if (selection.kind === "single") {
+				if (selection.kind === "bundle") {
+					const checked = resolveAnnotateBundleFiles(
+						selection.files.map((file) => file.value),
+						{ convertHtml: renderMarkdownFlag },
+					);
+					if (!checked.ok) {
+						ctx.ui.notify(checked.message, "error");
+						return;
+					}
+					bundleFiles = checked.files;
+				} else if (selection.kind === "single") {
 					filePath = selection.candidate.value;
 					rawFilePath = selection.candidate.value;
 				} else if (selection.kind === "multiple") {
-					ctx.ui.notify(buildAmbiguousAnnotateArgsMessage(selection.candidates), "error");
+					ctx.ui.notify(buildAmbiguousAnnotateArgsMessage(selection.candidates, { bundleHint: true }), "error");
 					return;
 				} else if (selection.kind === "none" && selection.words.length > 1) {
 					// Content flags only; --gate is transport for this
@@ -959,14 +983,14 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			let rawHtml: string | undefined;
 			let absolutePath: string;
 			let folderPath: string | undefined;
-			let mode: "annotate" | "annotate-folder" | "annotate-app" | undefined;
+			let mode: "annotate" | "annotate-folder" | "annotate-app" | "annotate-bundle" | undefined;
 			let sourceInfo: string | undefined;
 			let sourceConverted = false;
 			let isFolder = false;
 			let liveTargetUrl: string | undefined;
 
 			// --- URL annotation ---
-			const isUrl = /^https?:\/\//i.test(filePath);
+			const isUrl = !bundleFiles && /^https?:\/\//i.test(filePath);
 
 			// --app is contracted to fail loudly whenever it cannot apply; a
 			// file or folder target silently swallowing it would hide the
@@ -977,7 +1001,14 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				return;
 			}
 
-			if (isUrl) {
+			if (bundleFiles) {
+				// The deepest directory holding every file stands in for the
+				// session's path; the files ride the server's `bundleFiles`.
+				markdown = "";
+				absolutePath = annotateBundleRoot(bundleFiles.map((file) => file.path));
+				mode = "annotate-bundle";
+				ctx.ui.notify(`Opening annotation UI for ${bundleFiles.length} files...`, "info");
+			} else if (isUrl) {
 				// --- Live app detection (shared probe: same 3s timeout, same
 				// "< 500 + HTML + same loopback origin" gate as the Bun CLI) ---
 				const {
@@ -1122,6 +1153,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 					undefined,
 					liveTargetUrl,
 					sessionBridgeFor(ctx, origin),
+					bundleFiles,
 				);
 				ctx.ui.notify(sessionOpenedMessage("Annotation opened", session.url), "info");
 				void session
@@ -1145,15 +1177,20 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 								getAnnotateApprovedWithNotesPrompt,
 								getAnnotateFileFeedbackPrompt,
 							} = await loadPlannotatorPrompts();
-							const context = `${isFolder ? "Folder" : "File"}: ${absolutePath}`;
+							// A bundle names every file of the review, in order.
+							const fileHeader = bundleFiles ? "Files" : isFolder ? "Folder" : "File";
+							const targetText = bundleFiles
+								? annotateBundleTargetText(bundleFiles.map((file) => file.path))
+								: absolutePath;
+							const context = `${fileHeader}: ${targetText}`;
 							const prompt = outcome.promptKind === "approved-with-notes"
 								? getAnnotateApprovedWithNotesPrompt("pi", loadConfig(), {
 										context,
 										feedback: outcome.feedback,
 									})
 								: getAnnotateFileFeedbackPrompt("pi", loadConfig(), {
-										fileHeader: isFolder ? "Folder" : "File",
-										filePath: absolutePath,
+										fileHeader,
+										filePath: targetText,
 										feedback: outcome.feedback,
 									});
 							sendUserMessageWithCurrentSessionFallback(

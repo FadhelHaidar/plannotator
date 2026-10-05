@@ -190,6 +190,38 @@ describe('folder session feedback export', () => {
   });
 });
 
+// A review of several files: the failure is the export following the order
+// the reviewer happened to open files in (or path order) instead of the
+// order the files were given for review.
+describe('bundle session feedback export', () => {
+  test('files are exported in bundle order, a linked document after them, each once', () => {
+    const LINKED = '/repo/docs/linked.md';
+    const sections = resolveFeedbackSections({
+      feedbackDocuments: {
+        root: FOLDER_ROOT,
+        // Opened in this order: a linked document, then A, then B.
+        documents: new Map([
+          [LINKED, doc('# L\n\nLinked text.', [global('gl', 'LINKED-NOTE')])],
+          [A_PATH, doc(A_TEXT, [inline('ia', A_TEXT, 'Alpha paragraph', 'A-NOTE')])],
+          [B_PATH, doc(B_TEXT, [inline('ib', B_TEXT, 'Bravo paragraph', 'B-NOTE')])],
+        ]),
+      },
+      live: { annotations: [], globalAttachments: [], blocks: parseMarkdownToBlocks(B_TEXT) },
+      externalAnnotations: [],
+      sourceConverted: false,
+      annotateSource: 'folder',
+      bundleOrder: [B_PATH, A_PATH],
+    });
+    expect([...sections.linkedDocuments.keys()]).toEqual([B_PATH, A_PATH, LINKED]);
+    expect(sections.linkedDocumentsHeading.title).toBe('File Feedback');
+    expect(collectSubmittedAnnotations(sections).map((a) => [a.id, a.documentPath])).toEqual([
+      ['ib', B_PATH],
+      ['ia', A_PATH],
+      ['gl', LINKED],
+    ]);
+  });
+});
+
 describe('plain session with a linked document', () => {
   const planAnn = inline('p1', PLAN_TEXT, 'Plan paragraph', 'PLAN-COMMENT');
   const linkedAnn = inline('l1', B_TEXT, 'Bravo paragraph', 'LINKED-COMMENT');
