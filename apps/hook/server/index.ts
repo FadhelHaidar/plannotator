@@ -776,7 +776,10 @@ function emitOpenCodeAnnotateOutcome(result: {
   selectedMessageId?: string;
   feedbackScope?: "message" | "messages";
   nothingToSend?: boolean;
+  annotations?: unknown[];
 }): void {
+  // Additive: the plugin's decision heading names the count ("· 3 comments").
+  const count = Array.isArray(result.annotations) ? { annotationCount: result.annotations.length } : {};
   if (result.approved) {
     console.log(JSON.stringify({
       decision: "approved",
@@ -785,6 +788,7 @@ function emitOpenCodeAnnotateOutcome(result: {
       // to route the notes to the agent that wrote it (#1612).
       ...(result.selectedMessageId && { selectedMessageId: result.selectedMessageId }),
       ...(result.feedbackScope && { feedbackScope: result.feedbackScope }),
+      ...count,
     }));
     return;
   }
@@ -799,6 +803,7 @@ function emitOpenCodeAnnotateOutcome(result: {
     ...(result.feedbackScope && { feedbackScope: result.feedbackScope }),
     // Additive: a Done with nothing to send, which the bridge delivers as no turn (#1701).
     ...(result.nothingToSend === true && { nothingToSend: true }),
+    ...count,
   }));
 }
 
@@ -2243,6 +2248,8 @@ if (args[0] === "sessions") {
     platform: result.platform === true,
     ...(result.feedback && { feedback: withReviewDirectory(result.feedback, result.reviewDirectory) }),
     ...(result.agentSwitch && { agentSwitch: result.agentSwitch }),
+    // Additive: the plugin's decision heading names the count ("· 3 comments").
+    ...(!result.exit && Array.isArray(result.annotations) && { annotationCount: result.annotations.length }),
   }));
   process.exit(0);
 

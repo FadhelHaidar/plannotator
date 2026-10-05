@@ -72,10 +72,10 @@ Restart OpenCode. By default, the `submit_plan` tool is available to OpenCode's 
 
 ## Workflow Modes
 
-The examples below use the OpenCode 1 config shape. OpenCode 2 places the same option keys under the plugin entry's `options` object shown above. In V2, `manual` registers no tool, so it leaves only the slash commands: useful on a host with native command execution, inactive on one without it.
+The examples below use the OpenCode 1 config shape. OpenCode 2 places the same option keys under the plugin entry's `options` object shown above. In V2, `manual` registers no `submit_plan`, so it leaves the slash commands and the `plannotator` tool, which every mode registers on OpenCode 2. The slash commands need a host with native command execution and are inactive on one without it.
 
 - **`plan-agent`** (default): `submit_plan` is available to OpenCode's built-in `plan` agent plus any extra agents listed in `planningAgents`. This keeps Plannotator integrated with OpenCode plan mode without nudging `build` to call it.
-- **`manual`**: `submit_plan` is not registered. Use `/plannotator-last`, `/plannotator-annotate`, and `/plannotator-review` when you want Plannotator.
+- **`manual`**: `submit_plan` is not registered. Use `/plannotator-last`, `/plannotator-annotate`, and `/plannotator-review` when you want Plannotator. On OpenCode 2 the agent can still open a review with the `plannotator` tool.
 - **`user-managed`**: `submit_plan` is registered but no prompts or agent permissions are modified. You manage which agents can call `submit_plan` via OpenCode's native agent configuration.
 - **`all-agents`**: legacy broad behavior. Primary agents can see and call `submit_plan`.
 
@@ -179,6 +179,7 @@ Register the tool but manage prompts and permissions yourself:
 - **Plan Diff**: See what changed when the agent revises a plan after feedback
 - **Annotate last message**: Run `/plannotator-last` to annotate the agent's most recent response
 - **Annotate files, folders, and URLs**: Run `/plannotator-annotate` when you want manual review of an artifact
+- **The `plannotator` tool (OpenCode 2)**: ask the agent to "open notes.md in Plannotator" and it opens the review itself, without waiting on it. Your feedback comes back later as a message that names the review's session id (`pn-…`). The agent can also list the reviews it opened in this session and close one it no longer needs; your unsent comments stay saved as a draft.
 - **Obsidian integration**: Auto-save approved plans to your vault with frontmatter and tags
 
 ## Environment Variables

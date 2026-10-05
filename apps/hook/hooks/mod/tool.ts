@@ -308,6 +308,13 @@ export function plannotatorToolOpenedText(subject: string, url: string | undefin
 }
 
 /**
+ * The outcome a decision heading names for a code review the reviewer posted
+ * straight to the PR platform (GitHub, GitLab, Bitbucket): the same words on
+ * every host that delivers it as a message.
+ */
+export const PLANNOTATOR_OUTCOME_REVIEW_POSTED = 'Review posted'
+
+/**
  * The first line of every decision message a host delivers: what was
  * reviewed, its session id, and the outcome (`Feedback · 3 comments`).
  */

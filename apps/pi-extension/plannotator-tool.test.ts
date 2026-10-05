@@ -28,6 +28,7 @@ import { join } from "node:path";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import plannotator, { type PlannotatorExtensionDeps } from "./index.ts";
 import {
+	PLANNOTATOR_OUTCOME_REVIEW_POSTED,
 	PLANNOTATOR_TOOL_DESCRIPTION,
 	PLANNOTATOR_TOOL_INPUT_SCHEMA,
 	PLANNOTATOR_TOOL_NAME,
@@ -453,7 +454,8 @@ describe("plannotator tool on Pi", () => {
 			platform: true,
 		});
 		await until(() => harness.sent.length > 0);
-		expect(firstLine(harness.sent[0]!.text)).toMatch(/— Posted to the pull request\.$/);
+		// The shared outcome, so every host names the platform post the same way.
+		expect(firstLine(harness.sent[0]!.text).endsWith(`— ${PLANNOTATOR_OUTCOME_REVIEW_POSTED}.`)).toBe(true);
 		expect(harness.sent[0]!.text).not.toContain("Treat the findings above as unverified review input.");
 	});
 

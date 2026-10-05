@@ -23,7 +23,13 @@ import {
   type OpenCodePlanReviewResult,
 } from "./cli-bridge";
 import { switchV2SessionAgent } from "./agent-switch";
-import { registerNativeCommands } from "./native-commands";
+import { registerNativeCommands, runNativeCommand, type NativeCommandDeps } from "./native-commands";
+import {
+  PLANNOTATOR_TOOL_DESCRIPTION,
+  PLANNOTATOR_TOOL_INPUT_SCHEMA,
+  PLANNOTATOR_TOOL_NAME,
+} from "@plannotator/shared/plannotator-tool";
+import { OpenCodeLaunchRegistry, runPlannotatorTool, type LaunchHandle, type PlannotatorToolDeps } from "./plannotator-tool";
 import {
   createV2BridgeClient,
   dropSessionUrlNotices,
@@ -102,12 +108,17 @@ const serverPlugin = {
     // Wrapped because a transform rejection must never fail plugin setup: the
     // whole Plannotator integration would go down for a slash command that has
     // a working markdown fallback.
+    // Every review this plugin opens, per OpenCode session: the `plannotator`
+    // tool's list/close read it, and the slash commands record theirs too.
+    const launches = new OpenCodeLaunchRegistry();
+    const nativeDeps: NativeCommandDeps = {
+      ctx: v2,
+      getAgents,
+      getBridgeContext: () => getBridgeContext(getAgents),
+      launches,
+    };
     try {
-      await registerNativeCommands({
-        ctx: v2,
-        getAgents,
-        getBridgeContext: () => getBridgeContext(getAgents),
-      });
+      await registerNativeCommands(nativeDeps);
     } catch (error) {
       console.error(`[Plannotator] Could not register the OpenCode 2 slash commands: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -136,6 +147,34 @@ const serverPlugin = {
         });
       } catch (error) {
         console.error(`[Plannotator] Could not register the session-URL notice filter: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    // The `plannotator` tool (annotate / review / last / list / close), for
+    // every workflow: it opens reviews through the slash commands' own launch
+    // and returns at once. Wrapped like the commands: a failed registration
+    // must not take the plugin down.
+    if (hasToolTransform) {
+      try {
+        await registerPlannotatorTool(ctx.tool as unknown as ToolDomainLike, v2, {
+          registry: launches,
+          launch: (request) => runNativeCommand(
+            request.command,
+            { sessionID: request.sessionID, prompt: { text: request.rawArgs } },
+            nativeDeps,
+            { launch: request.launch, annotateArgs: request.annotateArgs, annotateBundle: request.annotateBundle },
+          ),
+          resolveOwner: (sessionID) => resolveRootSession(v2, sessionID),
+          reportLateFailure: async ({ sessionID, text }) => {
+            // The person sees it in the transcript (OpenCode 2's plugin
+            // context has no toast surface), and the agent reads it as a
+            // turn, so neither keeps waiting. "queue": a late arrival.
+            console.error(`[Plannotator] ${text.split("\n").find((line) => line.startsWith("Plannotator could not start")) ?? text}`);
+            await v2.session?.prompt?.({ sessionID, text, delivery: "queue" });
+          },
+        });
+      } catch (error) {
+        console.error(`[Plannotator] Could not register the plannotator tool: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
@@ -258,6 +297,9 @@ const serverPlugin = {
               modes: { turn: false, transient: true },
             })
             : undefined;
+          // Listed by the tool's `list` while it waits (never closable there:
+          // a plan review ends with the reviewer's decision).
+          const planLaunch = launches.begin(toolContext.sessionID, "plan", "Plan");
           try {
             const result = await executeSubmitPlan({
               edits: getPlanEdits(input),
@@ -277,6 +319,7 @@ const serverPlugin = {
                 directory,
                 bridge,
                 sessionBridge: planBridge,
+                launch: planLaunch,
               }),
               resolveTargetAgent: async ({ requestedAgent }) => await switchV2SessionAgent({
                 ctx: v2,
@@ -293,6 +336,7 @@ const serverPlugin = {
 
             return { content: result };
           } finally {
+            planLaunch.end();
             planBridge?.dispose();
             releasePlanPending();
             // Same call as `runNativeCommand`: closes the session-URL notice
@@ -378,8 +422,17 @@ function getPlanHtml(): string {
  * Best-effort in both directions: an older host exposes no `session.synthetic`,
  * so `notifyUrl` is absent and this stays silent, exactly as before.
  */
-export function createPlanReadyNotifier(client: V2Client): (url: string) => void {
-  return (url: string) => {
+export function createPlanReadyNotifier(
+  client: V2Client,
+  /** Also told the server is up: the tool's `list` entry for this plan review. */
+  onServer?: (info: { url: string; port?: number; isRemote: boolean }) => void,
+): (url: string, isRemote?: boolean, port?: number) => void {
+  return (url: string, isRemote?: boolean, port?: number) => {
+    try {
+      onServer?.({ url, ...(port !== undefined ? { port } : {}), isRemote: isRemote === true });
+    } catch {
+      // The list entry is best-effort.
+    }
     const notify = client.notifyUrl;
     if (typeof notify !== "function") return;
     try {
@@ -405,6 +458,8 @@ async function runPlanReview(input: {
   bridge: OpenCodeBridgeContext;
   /** "Ask this session" while the plan waits (transient answers only). */
   sessionBridge?: SessionBridge;
+  /** The plan review's entry in the tool's list: learns the url once it is up. */
+  launch?: LaunchHandle;
 }): Promise<OpenCodePlanReviewResult> {
   if (input.runtime === "embedded" && !hasEmbeddedRuntime()) {
     throw new Error('runtime "embedded" requires a Bun-hosted OpenCode plugin runtime. Use runtime "auto" or "cli" with this OpenCode host.');
@@ -422,7 +477,7 @@ async function runPlanReview(input: {
         htmlContent: getPlanHtml(),
         timeoutSeconds: input.timeoutSeconds,
         abortSignal: input.abortSignal,
-        logReady: createPlanReadyNotifier(input.client),
+        logReady: createPlanReadyNotifier(input.client, input.launch?.observer.onServer),
         sessionBridge: input.sessionBridge,
       });
     } catch (error) {
@@ -439,7 +494,70 @@ async function runPlanReview(input: {
     abortSignal: input.abortSignal,
     bridge: input.bridge,
     sessionBridge: input.sessionBridge,
+    ...(input.launch ? { observer: input.launch.observer } : {}),
   });
+}
+
+/**
+ * The root of `sessionID`'s parent chain. A subagent runs in a child session
+ * (`parentID`); its `plannotator` reviews belong to the root session, where the
+ * person is, as on the Claude Code mod. A chain that cannot be read stops
+ * where it is.
+ */
+export async function resolveRootSession(v2: V2ContextLike, sessionID: string): Promise<{ root: string; subagent: boolean }> {
+  let current = sessionID;
+  const seen = new Set<string>([current]);
+  for (let depth = 0; depth < 16; depth++) {
+    let parentID: unknown;
+    try {
+      const session: unknown = await v2.session?.get?.({ sessionID: current });
+      parentID = session && typeof session === "object" ? Reflect.get(session, "parentID") : undefined;
+    } catch {
+      break;
+    }
+    if (typeof parentID !== "string" || !parentID || seen.has(parentID)) break;
+    seen.add(parentID);
+    current = parentID;
+  }
+  return { root: current, subagent: current !== sessionID };
+}
+
+/** The part of OpenCode 2's tool domain the `plannotator` tool needs (probed: older hosts differ). */
+export interface ToolDomainLike {
+  transform?: (apply: (tools: { add?: (tool: Record<string, unknown>) => void }) => void) => Promise<unknown> | unknown;
+}
+
+/**
+ * Register the `plannotator` tool (contract `packages/shared/plannotator-tool.ts`:
+ * the shared name, description and JSON schema, never a copy). Nothing is
+ * registered on a host whose tool draft has no `add`, or whose session domain
+ * cannot `prompt` (the reviewer's decision could never come back). Returns
+ * whether the draft took it; like the commands, the callback may run later
+ * under boot batching, so the answer is read after `transform` resolves.
+ */
+export async function registerPlannotatorTool(
+  toolDomain: ToolDomainLike | undefined,
+  v2: V2ContextLike,
+  deps: PlannotatorToolDeps,
+): Promise<boolean> {
+  const transform = toolDomain?.transform;
+  if (typeof transform !== "function") return false;
+  if (typeof v2.session?.prompt !== "function") return false;
+  let added = false;
+  await transform((tools) => {
+    if (typeof tools?.add !== "function") return;
+    added = true;
+    tools.add({
+      name: PLANNOTATOR_TOOL_NAME,
+      description: PLANNOTATOR_TOOL_DESCRIPTION,
+      input: PLANNOTATOR_TOOL_INPUT_SCHEMA,
+      options: { codemode: false },
+      execute: async (input: unknown, toolContext: { sessionID: string }) => ({
+        content: await runPlannotatorTool(input, { sessionID: toolContext.sessionID }, deps),
+      }),
+    });
+  });
+  return added;
 }
 
 type SystemPart = { type: "text"; text: string; [key: string]: unknown };

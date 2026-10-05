@@ -20,7 +20,12 @@ import {
   selectAnnotateTokenTarget,
 } from "@plannotator/shared/annotate-target";
 import { annotateBundleTargetText } from "@plannotator/shared/annotate-bundle";
-import { isOlderCliBundleRefusal, PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT } from "@plannotator/shared/plannotator-tool";
+import {
+  isOlderCliBundleRefusal,
+  PLANNOTATOR_OUTCOME_REVIEW_POSTED,
+  PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT,
+  plannotatorDecisionHeading,
+} from "@plannotator/shared/plannotator-tool";
 import { parseReviewArgs, resolveReviewTarget } from "@plannotator/shared/review-args";
 import {
   composeReviewApprovedMessage,
@@ -108,6 +113,46 @@ interface RunCliOptions {
    * in its environment, and once it is listening this process long-polls it.
    */
   sessionBridge?: SessionBridge;
+  /** What a host tracking this launch learns while it runs (the `plannotator` tool's list/close). */
+  observer?: CliLaunchObserver;
+}
+
+/**
+ * What a host that tracks a launch (the `plannotator` tool's `list` and
+ * `close`, `plannotator-tool.ts`) learns about the CLI child while it runs.
+ */
+export interface CliLaunchObserver {
+  /**
+   * The child started. `token` is the per-launch secret its server accepts on
+   * the host-control endpoints (`/api/host/status`, `/api/host/close`): the
+   * pull-bridge token, so undefined when the launch has no session bridge.
+   * `terminate` sends the child SIGTERM and answers whether it was still
+   * running; it is the older-CLI close fallback, never a first resort.
+   */
+  onSpawn?: (info: { pid: number | undefined; token: string | undefined; terminate: () => boolean }) => void;
+  /** The server is up (from the ready file). `port` is absent from a CLI that does not write it. */
+  onServer?: (info: { url: string; port?: number; isRemote: boolean }) => void;
+}
+
+/** A launch a host tracks: the observer, plus what its decision message names. */
+export interface CliLaunch extends CliLaunchObserver {
+  /** The `pn-` session id the decision message's first line names. */
+  sessionId: string;
+  /** What the review shows, as that line names it (`notes.md`, `PR #12`, `local changes`). */
+  subject: string;
+  /**
+   * Deliver a bare approval as a message. A gate the agent opened itself (the
+   * tool's `gate: true`) was told to wait for the sign-off; a slash command's
+   * bare approval still sends nothing.
+   */
+  deliverApproval?: boolean;
+  /** The command could not open the review: a refused argument or the CLI's startup error. */
+  onFailure?: (message: string) => void;
+  /**
+   * The agent closed this review itself. An older CLI it stopped with SIGTERM
+   * exits without a decision, which is then the close, not a failure.
+   */
+  isClosedByAgent?: () => boolean;
 }
 
 interface RunCliResult {
@@ -130,9 +175,13 @@ export interface CliAnnotateOutcome {
   /** A Done with nothing to send (#1701): `feedback` is the zero-state
    *  sentence, and no turn is started. Absent from an older CLI. */
   nothingToSend?: boolean;
+  /** How many annotations the decision carried (absent from an older CLI). */
+  annotationCount?: number;
 }
 
 export interface CliReviewOutcome {
+  /** How many annotations the decision carried (absent from an older CLI). */
+  annotationCount?: number;
   decision?: "approved" | "dismissed" | "annotated";
   approved?: boolean;
   feedback?: string;
@@ -362,7 +411,7 @@ function logReadyFile(
   readyLabel: string,
   loggedUrls: Set<string>,
   toastedUrls: Set<string>,
-  onServer?: (metadata: { port: number; isRemote: boolean }) => void,
+  onServer?: (metadata: { url: string; port?: number; isRemote: boolean }) => void,
 ): void {
   if (!existsSync(readyFile)) return;
 
@@ -372,9 +421,11 @@ function logReadyFile(
     try {
       const metadata = JSON.parse(line) as { url?: string; port?: unknown; isRemote?: unknown };
       if (!metadata.url || loggedUrls.has(metadata.url)) continue;
-      if (typeof metadata.port === "number") {
-        onServer?.({ port: metadata.port, isRemote: metadata.isRemote === true });
-      }
+      onServer?.({
+        url: metadata.url,
+        ...(typeof metadata.port === "number" ? { port: metadata.port } : {}),
+        isRemote: metadata.isRemote === true,
+      });
       loggedUrls.add(metadata.url);
       log(client, "info", `[Plannotator] Open ${readyLabel}: ${metadata.url}`);
       toastPlannotatorUrl(client, `Open ${readyLabel}: ${metadata.url}`, toastedUrls);
@@ -424,9 +475,15 @@ async function runPlannotatorCli(options: RunCliOptions): Promise<RunCliResult> 
   const bridgeClient = new AbortController();
   let bridgeClientStarted = false;
   // The server is up: start answering its "Ask this session" questions.
-  const onServer = ({ port, isRemote }: { port: number; isRemote: boolean }) => {
+  const onServer = (metadata: { url: string; port?: number; isRemote: boolean }) => {
+    try {
+      options.observer?.onServer?.(metadata);
+    } catch {
+      // An observer never breaks the launch.
+    }
+    const { port, isRemote } = metadata;
     // The server keeps the bridge off in remote mode; nothing to poll there.
-    if (!sessionBridge || !bridgeToken || bridgeClientStarted || isRemote) return;
+    if (port === undefined || !sessionBridge || !bridgeToken || bridgeClientStarted || isRemote) return;
     bridgeClientStarted = true;
     void runPullSessionBridgeClient({
       baseUrl: `http://127.0.0.1:${port}`,
@@ -502,6 +559,23 @@ async function runPlannotatorCli(options: RunCliOptions): Promise<RunCliResult> 
         stdio: ["pipe", "pipe", "pipe"],
         detached,
       });
+      const spawned = child;
+      try {
+        options.observer?.onSpawn?.({
+          pid: spawned.pid,
+          token: bridgeToken,
+          terminate: () => {
+            if (spawned.exitCode !== null || spawned.signalCode !== null) return false;
+            try {
+              return spawned.kill("SIGTERM");
+            } catch {
+              return false;
+            }
+          },
+        });
+      } catch {
+        // An observer never breaks the launch.
+      }
       stderrForwarder = createCliStderrForwarder(options.client, toastedUrls);
       interval = setInterval(
         () => logReadyFile(options.client, readyFile, options.readyLabel, loggedUrls, toastedUrls, onServer),
@@ -616,11 +690,14 @@ export async function runCliPlanReview(input: {
   bridge?: OpenCodeBridgeContext;
   /** "Ask this session" (quick answers while the plan waits). */
   sessionBridge?: SessionBridge;
+  /** The tool's `list` learns the plan review's url from here. */
+  observer?: CliLaunchObserver;
 }): Promise<OpenCodePlanReviewResult> {
   const result = await runPlannotatorCli({
     client: input.client,
     args: ["opencode-plan"],
     sessionBridge: input.sessionBridge,
+    observer: input.observer,
     cwd: input.cwd,
     input: JSON.stringify({
       plan: input.planContent,
@@ -706,6 +783,15 @@ async function readSessionUserAgent(
   }
 }
 
+/**
+ * The review decision was the PR-platform status post (#1719): the CLI's
+ * explicit `platform` flag; a CLI older than the flag only said `isPRMode`.
+ * Never inferred from the annotation count.
+ */
+export function isPlatformPost(outcome: CliReviewOutcome): boolean {
+  return typeof outcome.platform === "boolean" ? outcome.platform : outcome.isPRMode === true;
+}
+
 export function buildReviewPromptFromBridgeOutcome(outcome: CliReviewOutcome): {
   message: string | null;
   agent?: string;
@@ -735,7 +821,7 @@ export function buildReviewPromptFromBridgeOutcome(outcome: CliReviewOutcome): {
   // reviewer sent gets the suffix. A CLI older than the `platform` field only
   // said `isPRMode`, so that stays the fallback (PR-mode feedback then keeps
   // its old suffix-less shape).
-  const platformPost = typeof outcome.platform === "boolean" ? outcome.platform : outcome.isPRMode === true;
+  const platformPost = isPlatformPost(outcome);
   return {
     message: platformPost
       ? outcome.feedback
@@ -790,6 +876,41 @@ export function buildAnnotatePromptFromBridgeOutcome(
 /** A session bridge the command owns for the lifetime of its CLI run. */
 export type DisposableSessionBridge = SessionBridge & { dispose?: () => void };
 
+/**
+ * The first line a tracked launch's decision message carries
+ * (`plannotatorDecisionHeading`): what was reviewed, its session id, and the
+ * outcome, so the agent can tell which of its reviews answered.
+ */
+export function withDecisionHeading(launch: CliLaunch | undefined, outcome: string, message: string): string {
+  if (!launch) return message;
+  const heading = plannotatorDecisionHeading(launch.subject, launch.sessionId, outcome);
+  return message.trim() ? `${heading}\n\n${message}` : heading;
+}
+
+/** ` · 3 comments`, or nothing for none or an unknown count (an older CLI). */
+function commentsSuffix(count: number | undefined): string {
+  if (typeof count !== "number" || !Number.isInteger(count) || count <= 0) return "";
+  return ` · ${count} ${count === 1 ? "comment" : "comments"}`;
+}
+
+/** The outcome a review decision's heading names (the Claude Code mod's wording). */
+export function reviewDecisionOutcome(outcome: CliReviewOutcome): string {
+  const comments = commentsSuffix(outcome.annotationCount);
+  if (outcome.approved || outcome.decision === "approved") {
+    return outcome.feedback?.trim() ? `Approved with notes${comments}` : "Approved";
+  }
+  // The status post carries what was posted to the platform, not a request.
+  if (isPlatformPost(outcome)) return PLANNOTATOR_OUTCOME_REVIEW_POSTED;
+  return `Changes requested${comments}`;
+}
+
+/** The outcome an annotate decision's heading names (the Claude Code mod's wording). */
+export function annotateDecisionOutcome(outcome: CliAnnotateOutcome): string {
+  const comments = commentsSuffix(outcome.annotationCount);
+  if (outcome.decision === "approved") return outcome.feedback?.trim() ? `Approved with notes${comments}` : "Approved";
+  return `Feedback${comments}`;
+}
+
 export async function handleCliCommand(input: {
   command: string;
   client: OpenCodeClient;
@@ -802,8 +923,22 @@ export async function handleCliCommand(input: {
    * once the command is about to open a Plannotator UI; disposed when it ends.
    */
   createSessionBridge?: () => DisposableSessionBridge | undefined;
+  /**
+   * Annotate arguments already split (the `plannotator` tool, whose target is
+   * one argument however many spaces it holds). Used instead of parsing
+   * `rawArgs` for `plannotator-annotate`.
+   */
+  annotateArgs?: ParsedAnnotateArgs;
+  /**
+   * With `annotateArgs`: the tool's list of files (two or more), in order,
+   * opened as one review. Each is its own CLI argument.
+   */
+  annotateBundle?: readonly string[];
+  /** A launch the host tracks: its observer, failure report and decision heading. */
+  launch?: CliLaunch;
 }): Promise<void> {
   const cwd = input.cwd ?? process.cwd();
+  const launch = input.launch;
   let ownedBridge: DisposableSessionBridge | undefined;
   const sessionBridge = (): SessionBridge | undefined => {
     if (!ownedBridge) {
@@ -814,6 +949,26 @@ export async function handleCliCommand(input: {
       }
     }
     return ownedBridge;
+  };
+  // The review did not open (or its CLI failed): tell a tracking host, once.
+  let failureReported = false;
+  const reportFailure = (message: string) => {
+    if (failureReported) return;
+    failureReported = true;
+    try {
+      launch?.onFailure?.(message);
+    } catch {
+      // A tracking host never breaks the command.
+    }
+  };
+  const cliFailure = (result: RunCliResult) => {
+    if (launch?.isClosedByAgent?.()) {
+      log(input.client, "info", `[Plannotator] The agent closed ${launch.subject} (${launch.sessionId}); nothing is sent for it.`);
+      return;
+    }
+    const message = result.stderr.trim() || `Plannotator CLI exited with code ${result.exitCode}`;
+    log(input.client, "error", message);
+    reportFailure(message);
   };
 
   try {
@@ -828,7 +983,9 @@ export async function handleCliCommand(input: {
       try {
         directoryTarget = resolveReviewTarget(parsed, cwd).directory;
       } catch (error) {
-        logAndToastError(input.client, `[Plannotator] ${error instanceof Error ? error.message : String(error)}`);
+        const message = error instanceof Error ? error.message : String(error);
+        logAndToastError(input.client, `[Plannotator] ${message}`);
+        reportFailure(message);
         return;
       }
       const command = directoryTarget ? "opencode-review-directory" : "opencode-review";
@@ -854,13 +1011,18 @@ export async function handleCliCommand(input: {
         readyLabel: "code review",
         bridge: input.bridge,
         sessionBridge: sessionBridge(),
+        observer: launch,
       });
       if (result.exitCode !== 0) {
-        log(input.client, "error", result.stderr.trim() || `Plannotator CLI exited with code ${result.exitCode}`);
         // >= 0.27.11 answers "Unknown command"; older binaries fall into the
         // plan hook path and answer "No plan content in hook event".
         if (directoryTarget && /unknown (?:subcommand|command)|no plan content in hook event/i.test(result.stderr)) {
-          logAndToastError(input.client, "Update the Plannotator CLI to review a directory from OpenCode.");
+          log(input.client, "error", result.stderr.trim() || `Plannotator CLI exited with code ${result.exitCode}`);
+          const update = "Update the Plannotator CLI to review a directory from OpenCode.";
+          logAndToastError(input.client, update);
+          reportFailure(update);
+        } else {
+          cliFailure(result);
         }
         return;
       }
@@ -874,28 +1036,40 @@ export async function handleCliCommand(input: {
           targetAgent: prompt.agent,
           directory: cwd,
         });
-        await injectSessionPrompt(input.client, input.sessionId, prompt.message, {
-          agent: targetAgent,
-        });
+        await injectSessionPrompt(
+          input.client,
+          input.sessionId,
+          withDecisionHeading(launch, reviewDecisionOutcome(outcome), prompt.message),
+          { agent: targetAgent },
+        );
       }
       return;
     }
 
     if (input.command === "plannotator-annotate") {
-      const parsed = parseAnnotateArgs(input.rawArgs);
+      const parsed = input.annotateArgs ?? parseAnnotateArgs(input.rawArgs);
       if (!parsed.filePath) {
-        log(input.client, "error", "Usage: /plannotator-annotate <file.md | file.txt | file.html | https://... | folder/> [--markdown] [--no-jina] [--gate] [--json]");
+        const usage = "Usage: /plannotator-annotate <file.md | file.txt | file.html | https://... | folder/> [--markdown] [--no-jina] [--gate] [--json]";
+        log(input.client, "error", usage);
+        reportFailure(usage);
         return;
       }
       if (!canLaunchGatedAnnotate(parsed, input.sessionId)) {
         log(input.client, "error", "No active session.");
+        reportFailure("No active session.");
         return;
       }
 
-      // Several existing file paths open as one review of all of them.
-      const bundleSelection = annotateBundleCliPaths(parsed.rawFilePath, cwd);
+      // Several existing file paths open as one review of all of them. The
+      // tool's list arrives split (each entry one argument, never re-split,
+      // checked by the CLI); a single tool target is never read as several.
+      const bundleSelection = input.annotateArgs
+        ? (input.annotateBundle && input.annotateBundle.length > 1 ? [...input.annotateBundle] : null)
+        : annotateBundleCliPaths(parsed.rawFilePath, cwd);
       if (bundleSelection && !Array.isArray(bundleSelection)) {
-        log(input.client, "error", buildMissingAnnotateFilesMessage(bundleSelection.missing));
+        const missing = buildMissingAnnotateFilesMessage(bundleSelection.missing);
+        log(input.client, "error", missing);
+        reportFailure(missing);
         return;
       }
       const bundlePaths = bundleSelection;
@@ -906,31 +1080,33 @@ export async function handleCliCommand(input: {
         readyLabel: "annotation UI",
         bridge: input.bridge,
         sessionBridge: sessionBridge(),
+        observer: launch,
       });
       if (result.exitCode !== 0) {
         // A CLI that predates reviews of several files answers with its
         // ambiguity error; say to update instead.
-        const stderr = result.stderr.trim();
-        log(
-          input.client,
-          "error",
-          bundlePaths && isOlderCliBundleRefusal(stderr)
-            ? PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT
-            : stderr || `Plannotator CLI exited with code ${result.exitCode}`,
-        );
+        if (bundlePaths && isOlderCliBundleRefusal(result.stderr.trim()) && !launch?.isClosedByAgent?.()) {
+          log(input.client, "error", PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT);
+          reportFailure(PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT);
+        } else {
+          cliFailure(result);
+        }
         return;
       }
 
       logCliWarnings(input.client, result.stderr);
       const outcome = parseLastJson<CliAnnotateOutcome>(result.stdout);
-      const prompt = buildAnnotatePromptFromBridgeOutcome(outcome, bundlePaths
+      let prompt = buildAnnotatePromptFromBridgeOutcome(outcome, bundlePaths
         ? { kind: "file", fileHeader: "Files", filePath: annotateBundleTargetText(bundlePaths) }
         : {
             kind: "file",
             fileHeader: getAnnotateFileHeader(parsed.filePath, input.cwd),
             filePath: parsed.filePath,
           });
-      if (prompt && input.sessionId) {
+      // A gate the agent opened itself waits for the sign-off: a bare
+      // approval is still a message (its heading says "Approved").
+      if (prompt === null && launch?.deliverApproval && outcome.decision === "approved") prompt = "";
+      if (prompt !== null && input.sessionId) {
         // No annotated message here: the agent the user is talking to reads
         // the feedback, not OpenCode's default agent (#1612).
         const agent = await resolveAddressableAgent({
@@ -941,7 +1117,7 @@ export async function handleCliCommand(input: {
         await injectSessionPrompt(
           input.client,
           input.sessionId,
-          prompt,
+          withDecisionHeading(launch, annotateDecisionOutcome(outcome), prompt),
           { agent },
         );
       }
@@ -951,12 +1127,14 @@ export async function handleCliCommand(input: {
     if (input.command === "plannotator-last") {
       if (!input.sessionId) {
         log(input.client, "error", "No active session.");
+        reportFailure("No active session.");
         return;
       }
 
       const recentMessages = await getRecentAssistantMessages(input.client, input.sessionId);
       if (recentMessages.length === 0) {
         log(input.client, "error", "No assistant message found in session.");
+        reportFailure("There is no assistant message to annotate yet.");
         return;
       }
 
@@ -973,9 +1151,10 @@ export async function handleCliCommand(input: {
         readyLabel: "annotation UI",
         bridge: input.bridge,
         sessionBridge: sessionBridge(),
+        observer: launch,
       });
       if (result.exitCode !== 0) {
-        log(input.client, "error", result.stderr.trim() || `Plannotator CLI exited with code ${result.exitCode}`);
+        cliFailure(result);
         return;
       }
 
@@ -995,7 +1174,7 @@ export async function handleCliCommand(input: {
         await injectSessionPrompt(
           input.client,
           input.sessionId,
-          prompt,
+          withDecisionHeading(launch, annotateDecisionOutcome(outcome), prompt),
           { agent },
         );
       }
@@ -1003,7 +1182,9 @@ export async function handleCliCommand(input: {
     }
 
   } catch (error) {
-    log(input.client, "error", `[Plannotator] ${error instanceof Error ? error.message : String(error)}`);
+    const message = error instanceof Error ? error.message : String(error);
+    log(input.client, "error", `[Plannotator] ${message}`);
+    reportFailure(message);
     if (isOpenCodePromptDeliveryError(error)) throw error;
   } finally {
     ownedBridge?.dispose?.();

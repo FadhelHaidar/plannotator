@@ -68,6 +68,8 @@ If the reviewer approves while leaving notes, direct structured transport preser
 
 The object is emitted as a single line of JSON per invocation. One invocation, one decision, one line on stdout.
 
+Approved and annotated objects also carry `annotationCount`, the number of annotations the decision carried, for example `"annotationCount": 2`. Read unknown fields as optional: older versions omit this one. The strict result record (`--require-approval`, `--result-file`) does not include it.
+
 ## `--gate`
 
 A three-way review decision. The annotation UI adds an Approve button alongside Close and Send Annotations. The reviewer declares intent explicitly:

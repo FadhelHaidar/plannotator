@@ -8,7 +8,8 @@
  * because a hooks module may import only its own folder; `tool.test.ts` there
  * fails when the two differ). Pi registers it with `pi.registerTool`
  * (apps/pi-extension/index.ts, vendored as generated/plannotator-tool.ts).
- * OpenCode adopts it in its own PR.
+ * The OpenCode 2 plugin registers it with `tools.add`
+ * (`apps/opencode-plugin/plannotator-tool.ts`, which imports this file).
  *
  * Agent-run CLI commands: `plannotatorCommandToToolInput` turns a shell
  * command (`plannotator annotate x.md --gate --json`) into the tool input that
@@ -339,6 +340,13 @@ export function plannotatorToolOpenedText(subject: string, url: string | undefin
     'Do not poll, reopen it, or run the plannotator CLI for this session.',
   ].join('\n')
 }
+
+/**
+ * The outcome a decision heading names for a code review the reviewer posted
+ * straight to the PR platform (GitHub, GitLab, Bitbucket): the same words on
+ * every host that delivers it as a message.
+ */
+export const PLANNOTATOR_OUTCOME_REVIEW_POSTED = 'Review posted'
 
 /**
  * The first line of every decision message a host delivers: what was

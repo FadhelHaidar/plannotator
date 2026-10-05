@@ -20,6 +20,7 @@ plannotator/
 │   │   ├── commands/             # Slash command stubs (review, annotate, last — plugin intercepts execution)
 │   │   ├── index.ts              # OpenCode 1 entry with submit_plan tool + review/annotate event handlers
 │   │   ├── server.ts             # OpenCode 2 adapter (stable @opencode/plugin types; older-host capability fallbacks)
+│   │   ├── plannotator-tool.ts   # OpenCode 2 `plannotator` tool + per-session launch record (list/close); see "OpenCode 2: the plannotator tool"
 │   │   ├── plannotator.html      # Built plan review app
 │   │   └── review-editor.html    # Built code review app
 │   ├── amp-plugin/               # Amp plugin
@@ -347,7 +348,7 @@ Review, annotate and last decisions (commands included) now start with
 is `Changes requested` (` · N comments` when it carries annotations), and the
 PR-platform status post, which the review server marks `platform: true`
 (#1719, `classifyReviewOutcome` in `apps/pi-extension/review-outcome.ts`), is
-`Posted to the pull request` and delivered verbatim, without the verification
+`Review posted` (`PLANNOTATOR_OUTCOME_REVIEW_POSTED`, shared with OpenCode 2) and delivered verbatim, without the verification
 suffix. Every review decision whose feedback has content is delivered,
 zero annotations included (PR description, PR comment and editor notes ride
 only in the feedback text); nothing is inferred from the annotation count.
@@ -851,6 +852,113 @@ otherwise try to load; bun skips `apps/hook/tests/` through `pathIgnorePatterns`
 Typecheck: `apps/hook/hooks/mod/tsconfig.json` (no DOM, no Node; `globals.d.ts`
 declares the few web APIs a hooks module has). `PLANNOTATOR_MOD_DEBUG=1` writes
 `claude-code-mod/debug.log` in the data dir.
+
+### OpenCode 2: the `plannotator` tool
+
+The OpenCode 2 plugin (`apps/opencode-plugin/server.ts`, `registerPlannotatorTool`)
+registers the same `plannotator` tool the Claude Code mod does, through
+`ctx.tool.transform` → `tools.add`, with the shared contract itself
+(`PLANNOTATOR_TOOL_NAME` / `_DESCRIPTION` / `_INPUT_SCHEMA` and
+`parsePlannotatorToolInput` from `packages/shared/plannotator-tool.ts`, never a
+copy; `plannotator-tool.test.ts` checks the registered schema IS the shared
+object). It is registered for every workflow (`manual` included), and not at
+all where the decision could never come back: a tool draft without `add` (an
+older V2 host, probed inside the callback like the native commands' draft) or
+a session domain without `prompt`. OpenCode 1 gets no tool in 0.29 (design
+decision; its `plugin.tool` route is feasible).
+
+**Open (annotate, review, last).** Each call runs the SAME launch the native
+slash commands use (`runNativeCommand` → `handleCliCommand`: a `plannotator`
+CLI child, the pull-bridge token so "Ask this session" works, the ready file,
+the decision delivered later to the calling session with `session.prompt`),
+and the tool returns as soon as the ready file names the url (up to 45 s for
+review, 15 s otherwise, then the "starting" text): `Session: pn-…` plus
+`plannotatorToolOpenedText`. A refused argument or the CLI's startup error is
+the result text (`Plannotator could not start: …`; results are always text,
+since the promise adapter turns a rejected `execute` into a defect). The
+annotate target is passed as ONE argument (`toolLaunchRequest` builds
+`ParsedAnnotateArgs` instead of re-parsing a string, so `my notes.md` stays one
+path); review words are quoted for `parseReviewArgs`' string form
+(`quoteReviewWord`). A gated tool session delivers its bare approval
+(`Plannotator: notes.md (pn-…) — Approved.`), like the mod; a slash command's
+bare gated approval still sends nothing. A list of files (two or more after the
+contract drops duplicates) opens ONE bundle review through the same launch:
+`handleCliCommand`'s `annotateBundle` passes each entry as its own CLI argument
+in the agent's order (never re-split, and a single tool target is never read as
+several words), the subject is `plannotatorBundleSubject` (`2 files: a.md,
+b.html`) in the result, `list` and the decision heading, and the feedback is
+framed under `Files: …` as the slash command's bundle is. An older CLI's
+several-paths ambiguity error (`isOlderCliBundleRefusal`) makes the result
+`PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT`. `reply` answers
+`PLANNOTATOR_TOOL_REPLY_UNAVAILABLE_TEXT`, launching nothing. When a launch
+answered "starting" and its CLI then fails before the page opens, the session
+gets one message (`plannotatorLateFailureText`: `Plannotator: notes.md (pn-…) —
+Did not open.` plus the CLI's error), delivered with `session.prompt`
+(`queue`), so neither the agent nor the person waits for a decision that never
+comes; OpenCode 2's plugin context has no toast surface, so that transcript
+message is the visible signal. A command that merely ends without a ready file
+sends nothing (a CLI older than 0.19.24 writes none and delivers its decision
+at exit). Subagents work as on the mod: a subagent's (child) session resolves
+to its root session (`resolveRootSession` walks `parentID`), which owns the
+review, gets its decision and lists or closes it; only `last` is refused from a
+subagent (`PLANNOTATOR_TOOL_SUBAGENT_LAST_TEXT`, the mod's wording), since it
+reads the main session's messages. Ask this session for such a review asks the
+root session. Not verified live: delivery to the root while it still waits on
+the subagent relies on `queue` delivery. Tool launches always queue their
+decision (`createV2BridgeClient`'s `alwaysQueue`), even while their session-URL
+notice is still a pending steer: the session is mid-turn when a tool launch
+posts that notice (the tool call itself, or the root waiting on a subagent), so
+the notice is promoted inside that turn, and the slash commands' co-promoting
+steer (#1515) would instead push a late decision into a running turn. No
+shell take-over: nothing in the OpenCode 2 plugin API can answer a shell call.
+
+**Session ids, list and close.** `OpenCodeLaunchRegistry` (one per plugin
+instance) records every review a session opens: tool calls, its slash commands
+(`runNativeCommand` with `launches`), and its `submit_plan` review (listed,
+never closable). Every recorded launch's decision message starts with
+`plannotatorDecisionHeading` (`withDecisionHeading` in `cli-bridge.ts`), slash
+commands included, so `list` and the decision name the same id. Its outcome
+uses the mod's words: `Feedback · N comments`, `Approved with notes · N
+comments`, `Approved`, and for code review (local or PR) `Changes requested ·
+N comments`. The count comes from the CLI's additive `annotationCount` on the
+`annotate --json`, `opencode-annotate-last` and `opencode-review` records (an
+older CLI omits it and the heading has no count). A PR-platform status post
+reads `Review posted` (`PLANNOTATOR_OUTCOME_REVIEW_POSTED`, the same words as Pi) and is decided by the record's `platform` flag (#1719;
+`isPlatformPost`, falling back to `isPRMode` only for a CLI without the flag),
+never inferred from zero annotations, so description-only PR feedback is
+`Changes requested`. `list` and
+`close` see only the calling OpenCode session's launches (never the global
+`sessions/` registry; another session's id is "not found"). `list` reads
+`GET /api/host/status` with the launch's token for `unsent` and `decided`
+(`readHostStatusAnswer`; `unknown` for an older CLI). `close` posts
+`POST /api/host/close` and reads the answer with `classifyHostCloseAnswer`
+(`packages/shared/host-control.ts`, the mod's rule): closed (draft kept, the
+tab told, nothing delivered, since the CLI's record is then `dismissed`),
+decided (the reviewer's decision is on its way), refused, turned off (left
+running; the text says remote mode only when the ready file did, and otherwise
+names a server started without a host token), or not answering (left
+running). `close all` skips plan reviews silently; only an explicit plan id
+gets the "not closable" line. A close that stopped an older CLI is logged as
+the agent's close, not as a CLI failure (`isClosedByAgent`). Only a server that
+answered as an older Plannotator without the endpoint (an uncoded JSON `404`
+or its app page) is stopped instead: SIGTERM to the plugin's own child process
+(`terminate` from `runPlannotatorCli`'s observer), which never deletes a
+draft; a decision such a CLI is still publishing is lost, as on the mod.
+
+Tests: `apps/opencode-plugin/plannotator-tool.test.ts` (registration against
+older drafts and without `prompt`, refusals, and the real launch path against a
+stub CLI that serves the real host-control guards: open → url and id → list →
+decision heading in the right session, gated bare approval, close with the
+token, turned-off close leaves the server up, older CLI stopped, startup
+error, a slash command listed). Checked live on OpenCode 2.0.22 with a fake
+model: the model's tool call opened annotate and review, `list` showed the
+server's count, the reviewer's feedback and a gated approval arrived as new
+turns headed with the id, `close all` closed a review holding 2 draft comments
+with no turn delivered, and Ask AI showed "Ask this session". A list target
+(`["notes.md", "mock.html"]`) opened one `annotate-bundle` session in that
+order, `list` named it `2 files: notes.md, mock.html`, its feedback arrived
+headed `— Feedback · 2 comments.` under `Files: notes.md, mock.html`, and
+`close all` closed a second bundle.
 
 ### Codex Stop hook: which turn the plan belongs to
 
@@ -1439,7 +1547,7 @@ Tests: `packages/server/annotate-draft.scenarios.ts` (run against both runtimes 
 
 ### Strict direct annotate results
 
-Direct `plannotator annotate` invocations may add `--require-approval` and/or `--result-file <path>` only with `--gate --json`; both reject `--hook` and are not shared with OpenCode/Pi slash-command parsing. When neither strict option is present, single-target invocations keep the legacy plaintext, JSON, hook, and exit behavior unchanged, with one additive JSON field: a non-gated Done with nothing to send prints `{"decision":"annotated","feedback":"User reviewed the document and has no feedback.","nothingToSend":true}` (the field appears only in that case and only on the non-strict `--json` record and the `opencode-annotate-last` record; decision values, the feedback text, plaintext, `--hook` output, the strict-gate record and every exit code are unchanged; the OpenCode CLI bridge, Amp and Droid read it; #1701). Multi-token invocations go through the tolerant tiers described under "Tolerant argument resolution" above; several existing file paths open one review of all of them (strict gates included).
+Direct `plannotator annotate` invocations may add `--require-approval` and/or `--result-file <path>` only with `--gate --json`; both reject `--hook` and are not shared with OpenCode/Pi slash-command parsing. When neither strict option is present, single-target invocations keep the legacy plaintext, JSON, hook, and exit behavior unchanged, with two additive JSON fields. First, a non-gated Done with nothing to send prints `{"decision":"annotated","feedback":"User reviewed the document and has no feedback.","nothingToSend":true,"annotationCount":0}` (`nothingToSend` appears only in that case and only on the non-strict `--json` record and the `opencode-annotate-last` record; decision values, the feedback text, plaintext, `--hook` output, the strict-gate record and every exit code are unchanged; the OpenCode CLI bridge, Amp and Droid read it; #1701). Second, `annotationCount` (the number of annotations the decision carried) rides every approved and annotated record of the non-strict `--json` output, `opencode-annotate-last`, and `opencode-review`; the OpenCode bridge names it in its decision heading, and the strict-gate record does not carry it. Multi-token invocations go through the tolerant tiers described under "Tolerant argument resolution" above; several existing file paths open one review of all of them (strict gates included).
 
 Strict decisions use one newline-terminated JSON record on stdout and, when requested, identical bytes in the result file. Exit codes follow the grep convention: approval exits `0`; with `--require-approval`, annotated and dismissed decisions are published before exiting `1` (negative human outcome); usage/startup/validation failures — bad flag combinations, strict flags outside `annotate --gate --json`, a missing `--result-file` parent, a pre-existing or dangling-symlink destination, and every annotate startup failure (missing path, unreachable URL, empty folder, ambiguous name, missing file, oversized file) — exit `2` (the gate itself was misconfigured or could not start). Those startup sites exit `1` as before for non-strict invocations, with one deliberate exception: the multi-token zero-resolve handoff is not a startup failure, so in plain non-strict mode it prints on stdout and exits `0` (under `--json`/`--hook` it stays stderr + exit `1`). Under a strict flag `1` is reserved for "the reviewer did not approve", so a typo'd path must never masquerade as a rejection. Post-decision publication failures (destination appears between validation and publish, hard links unavailable) also exit `2`: the result *file* was not published, so they present as environment errors — "the gate could not publish its result" — never as a reviewer outcome, and never as approval (still fail-closed, since only `0` means approved). The stdout decision record is written **before** result-file publication and is still emitted whenever the decision itself completed; only a stdout write failure leaves no record anywhere. Signal deaths keep `128+n`. Result paths resolve from the invocation working directory, require an existing parent and absent destination, and publish via a flushed/closed `0600` same-directory temporary file plus an atomic no-clobber hard link—never copy or overwrite fallback (the `0600` mode is a no-op on Windows, and the atomic link/rename is not followed by a parent-directory fsync, so publication is atomic but not crash-durable). Keep reviewed sources at stable project paths; unique result and diagnostic log files may use a narrow temporary directory. Explicit Close emits `dismissed`; missing results or process/browser failures are recovery cases, never approval.
 
@@ -1651,7 +1759,10 @@ runtimes' handlers; `useExternalAnnotations`'s `onSessionClosed`), and the CLI's
 host result record carries the same `closedBy` / `unsentAnnotations` on its
 `dismissed` record. Every server result also exposes `hostControl` (`status()`,
 `close?()`) for hosts that run the server in-process (Pi, the OpenCode 2 embedded
-plan server). Plan servers implement status only.
+plan server). Plan servers implement status only. A host that calls the endpoints
+over HTTP reads the answers with `classifyHostCloseAnswer` / `readHostStatusAnswer`
+from the same shared module (the OpenCode 2 tool); the Claude Code mod keeps its own
+copy of that rule because a hooks module imports only its own folder.
 
 ### Paste Service (`apps/paste-service/`)
 

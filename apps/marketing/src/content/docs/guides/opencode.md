@@ -25,7 +25,7 @@ The OpenCode plugin (`@plannotator/opencode`) hooks into OpenCode's plugin syste
 OpenCode support has four explicit modes:
 
 - **`plan-agent`** (default): `submit_plan` is available to OpenCode's built-in `plan` agent plus any extra agents listed in `planningAgents`.
-- **`manual`**: `submit_plan` is not registered. Use `/plannotator-last`, `/plannotator-annotate`, and `/plannotator-review` when you want Plannotator.
+- **`manual`**: `submit_plan` is not registered. Use `/plannotator-last`, `/plannotator-annotate`, and `/plannotator-review` when you want Plannotator. On OpenCode 2 the agent can still open a review with the [`plannotator` tool](#the-plannotator-tool), which every mode registers.
 - **`user-managed`**: `submit_plan` is registered but no prompts or agent permissions are modified. You configure which agents can call `submit_plan` via OpenCode's agent configuration.
 - **`all-agents`**: legacy broad behavior. Primary agents can see and call `submit_plan`.
 
@@ -184,6 +184,18 @@ curl -fsSL https://plannotator.ai/install.sh | bash
 ```
 
 This also clears cached plugin versions for both OpenCode 1 and OpenCode 2. To update the plugin later, run the install script again and restart OpenCode.
+
+## The `plannotator` tool
+
+On OpenCode 2 the plugin also gives the agent a `plannotator` tool, in every workflow mode. Ask the agent to "open notes.md in Plannotator" or "let me review these changes in Plannotator", and it opens the review itself:
+
+- The tool returns as soon as the page is open, so the session does not wait while you review.
+- The agent can pass several files to open them as one review, in the order it chose.
+- Your feedback arrives later as a new message. Its first line names what you reviewed and the review's session id, for example `Plannotator: notes.md (pn-3f2a9c) — Feedback.`
+- The agent can list the reviews it opened in this session, including the ones you opened with the slash commands, and close one it no longer needs. Closing sends the agent nothing, and your unsent comments stay saved as a draft.
+- A subagent can open a file or code review too. Its feedback arrives in your main session, which also lists and closes it.
+
+Plan review still goes through `submit_plan`. The tool needs the CLI, like the slash commands. OpenCode 1 does not get the tool.
 
 ## Ask this session
 

@@ -561,6 +561,29 @@ describe("V2 feedback delivery", () => {
     expect(prompt.mock.calls[0]![0]).toMatchObject({ delivery: "steer" });
   });
 
+  // The `plannotator` tool's launches: the session is mid-turn when their
+  // notice is posted (the tool call, or the root waiting on a subagent), so a
+  // still-pending notice must not turn a late decision into a steer that lands
+  // inside a running turn.
+  test("a tool launch's decision is queued even while its notice is pending", async () => {
+    const synthetic = mock(async (_input: unknown) => ({}));
+    const prompt = mock(async (_input: unknown) => ({}));
+    const client = createV2BridgeClient({
+      ctx: { session: { synthetic, prompt } } as never,
+      getAgents: async () => [],
+      sessionID: "session-1",
+      alwaysQueue: true,
+    });
+
+    await client.notifyUrl!({ url: "http://127.0.0.1:19432", message: "ready" });
+    await client.session.prompt({
+      path: { id: "session-1" },
+      body: { parts: [{ type: "text", text: "fix the null check" }] },
+    });
+
+    expect(prompt.mock.calls[0]![0]).toMatchObject({ delivery: "queue" });
+  });
+
   /**
    * A controllable stand-in for `ctx.event.subscribe()`: an async iterable of
    * host events that honours the abort signal the client passes it, so a test

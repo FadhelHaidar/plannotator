@@ -85,6 +85,7 @@ import { createPiSessionBridgeHub } from "./pi-session-bridge.ts";
 import type { BrowserDecisionSession, PlanReviewBrowserSession, PlanReviewDecision } from "./plannotator-browser.ts";
 import type { AnnotateBundleFile } from "./generated/annotate-bundle.ts";
 import {
+	PLANNOTATOR_OUTCOME_REVIEW_POSTED,
 	PLANNOTATOR_TOOL_DESCRIPTION,
 	PLANNOTATOR_TOOL_INPUT_SCHEMA,
 	PLANNOTATOR_TOOL_NAME,
@@ -1013,7 +1014,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 					reviewFeedback += getReviewDeniedSuffix("pi", loadConfig());
 				}
 				const label = result.platform === true
-					? "Posted to the pull request"
+					? PLANNOTATOR_OUTCOME_REVIEW_POSTED
 					: `Changes requested${commentCountSuffix(result.annotations)}`;
 				sendUserMessageWithCurrentSessionFallback(
 					pi,
