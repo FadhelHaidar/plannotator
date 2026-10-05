@@ -509,3 +509,92 @@ describe("annotate feedback agent routing (embedded runtime)", () => {
     expect(deps.client.session.prompt.mock.calls[0]?.[0].body.agent).toBe("agent-engineer");
   });
 });
+
+// OpenCode 1, embedded runtime: the session URL must reach a VISIBLE surface.
+// `app.log` only lands in OpenCode's log file and the server's ready line goes
+// to stderr, so before 0.28.1 a remote/SSH reviewer running a slash command
+// never saw the URL at all (plan review already toasted it). Failure caught: a
+// command whose onReady stops toasting.
+describe("embedded commands toast the session URL", () => {
+  const REMOTE_URL = "http://remote.example.test:19432";
+
+  /** Call the server's ready hook the way the real server does, in remote mode. */
+  function readyThenDecide(decision: Record<string, unknown>) {
+    return mock(async (options: any) => {
+      await options.onReady(REMOTE_URL, true, 19432);
+      return {
+        port: 19432,
+        url: REMOTE_URL,
+        isRemote: true,
+        waitForDecision: async () => ({ annotations: [], ...decision }),
+        stop: () => {},
+      };
+    });
+  }
+
+  function toastedMessages(deps: any): string[] {
+    return deps.client.tui.showToast.mock.calls.map((call: any[]) => call[0].body.message);
+  }
+
+  async function withoutBrowser(run: () => Promise<void>): Promise<void> {
+    // Remote mode never opens a browser, but the ready file and the skip flag
+    // are read from the environment: pin both for the duration of the test.
+    const skip = process.env.PLANNOTATOR_SKIP_BROWSER_OPEN;
+    const readyFile = process.env.PLANNOTATOR_READY_FILE;
+    const dataDir = process.env.PLANNOTATOR_DATA_DIR;
+    process.env.PLANNOTATOR_SKIP_BROWSER_OPEN = "1";
+    delete process.env.PLANNOTATOR_READY_FILE;
+    process.env.PLANNOTATOR_DATA_DIR = makeTempDir();
+    try {
+      await run();
+    } finally {
+      if (skip === undefined) delete process.env.PLANNOTATOR_SKIP_BROWSER_OPEN;
+      else process.env.PLANNOTATOR_SKIP_BROWSER_OPEN = skip;
+      if (readyFile !== undefined) process.env.PLANNOTATOR_READY_FILE = readyFile;
+      if (dataDir === undefined) delete process.env.PLANNOTATOR_DATA_DIR;
+      else process.env.PLANNOTATOR_DATA_DIR = dataDir;
+    }
+  }
+
+  test("/plannotator-review", async () => {
+    await withoutBrowser(async () => {
+      const repoDir = initGitRepo();
+      writeFileSync(path.join(repoDir, "change.ts"), "x\n");
+      const deps: any = makeDeps();
+      deps.directory = repoDir;
+      deps.startReviewServer = readyThenDecide({ exit: true });
+
+      await handleReviewCommand({ properties: { arguments: "", sessionID: "s" } }, deps);
+
+      expect(toastedMessages(deps).some((message) => message.includes(REMOTE_URL))).toBe(true);
+    });
+  });
+
+  test("/plannotator-annotate", async () => {
+    await withoutBrowser(async () => {
+      const projectRoot = makeTempDir();
+      writeFileSync(path.join(projectRoot, "notes.md"), "# Notes\n");
+      const deps: any = makeDeps();
+      deps.directory = projectRoot;
+      deps.startAnnotateServer = readyThenDecide({ exit: true });
+
+      await handleAnnotateCommand({ properties: { arguments: "notes.md", sessionID: "s" } }, deps);
+
+      expect(toastedMessages(deps).some((message) => message.includes(REMOTE_URL))).toBe(true);
+    });
+  });
+
+  test("/plannotator-last", async () => {
+    await withoutBrowser(async () => {
+      const deps: any = makeDeps();
+      deps.client.session.messages = mock(async (_input: unknown) => ({
+        data: [{ info: { role: "assistant" }, parts: [{ type: "text", text: "Answer" }] }],
+      }));
+      deps.startAnnotateServer = readyThenDecide({ exit: true });
+
+      await handleAnnotateLastCommand({ properties: { sessionID: "s" } }, deps);
+
+      expect(toastedMessages(deps).some((message) => message.includes(REMOTE_URL))).toBe(true);
+    });
+  });
+});

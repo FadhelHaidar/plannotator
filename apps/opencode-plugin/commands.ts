@@ -42,6 +42,7 @@ import { statSync } from "fs";
 import path from "path";
 import { resolveValidatedTargetAgent } from "./agent-switch";
 import { deliverOpenCodePrompt } from "./prompt-delivery-error";
+import { announceSessionUrl } from "./session-url";
 import {
   readLastUserAgent,
   readMessageAgent,
@@ -286,7 +287,7 @@ export async function handleReviewCommand(
     opencodeClient: client,
     onReady: (url, isRemote, port) => {
       handleReviewServerReady(url, isRemote, port);
-      client.app.log({ level: "info", message: `[Plannotator] Open code review: ${url}` });
+      announceSessionUrl(client, "code review", url);
     },
   });
 
@@ -512,7 +513,7 @@ export async function handleAnnotateCommand(
     htmlContent,
     onReady: (url, isRemote, port) => {
       handleAnnotateServerReady(url, isRemote, port);
-      client.app.log({ level: "info", message: `[Plannotator] Open annotation UI: ${url}` });
+      announceSessionUrl(client, "annotation UI", url);
     },
   });
 
@@ -645,7 +646,7 @@ export async function handleAnnotateLastCommand(
     htmlContent,
     onReady: (url, isRemote, port) => {
       handleAnnotateServerReady(url, isRemote, port);
-      client.app.log({ level: "info", message: `[Plannotator] Open annotation UI: ${url}` });
+      announceSessionUrl(client, "annotation UI", url);
     },
   });
 

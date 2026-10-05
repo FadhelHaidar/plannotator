@@ -49,6 +49,7 @@ import { resolveValidatedTargetAgent } from "./agent-switch";
 import { shouldFallbackAfterEmbeddedError } from "./prompt-delivery-error";
 import { executeSubmitPlan } from "./submit-plan-executor";
 import { getPlanningPrompt } from "./planning-prompt";
+import { announceSessionUrl } from "./session-url";
 
 // Lazy-load HTML at first use instead of embedding in the bundle.
 // The two SPA files are ~20 MB combined — inlining them as string literals
@@ -129,27 +130,6 @@ function getEmbeddedRuntimeError(): string {
   return "runtime \"embedded\" requires a Bun-hosted OpenCode plugin runtime. Use runtime \"auto\" or \"cli\" with this OpenCode host.";
 }
 
-function logPlannotatorReady(client: any, label: string, url: string): void {
-  try {
-    void client.app.log({ level: "info", message: `[Plannotator] Open ${label}: ${url}` });
-  } catch {
-    // OpenCode logging is best-effort.
-  }
-  // app.log only reaches OpenCode's server log file — never the TUI. Toast the
-  // URL too so remote users (no auto-opened browser) actually see it.
-  // Best-effort: older hosts without /tui/show-toast just no-op.
-  try {
-    const result = client.tui?.showToast?.({
-      body: { title: "Plannotator", message: `Open ${label}: ${url}`, variant: "info" },
-    });
-    // A fetch-level failure (host restarting) rejects the SDK promise; swallow
-    // it so a cosmetic toast can never surface an unhandled rejection.
-    if (result && typeof result.catch === "function") result.catch(() => {});
-  } catch {
-    // Toast delivery is best-effort.
-  }
-}
-
 type EmbeddedRuntimeModule = {
   runEmbeddedPlanReview: (input: {
     client: any;
@@ -217,7 +197,7 @@ async function runPlanReview(input: {
         htmlContent: input.htmlContent,
         timeoutSeconds: input.timeoutSeconds,
         abortSignal: input.abortSignal,
-        logReady: (url) => logPlannotatorReady(input.client, "plan review", url),
+        logReady: (url) => announceSessionUrl(input.client, "plan review", url),
       });
     } catch (error) {
       input.abortSignal.throwIfAborted();
