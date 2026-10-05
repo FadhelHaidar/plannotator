@@ -163,13 +163,17 @@ const BUILT_IN_AGENT_ORDER = ["build", "plan", "general", "explore"] as const;
 /**
  * How `createUserMessage` picked the variant of a prompt that named none,
  * by OpenCode version (scanned over every v1.x tag of anomalyco/opencode):
- *  - before 1.1.54: never (`variant: input.variant`);
- *  - 1.1.54 to 1.3.13: the agent's variant when the message's model offers it;
- *  - 1.3.14 on: the same, but only when that model is the agent's own
- *    configured one (`&& same`).
+ *  - before 1.1.49: never (`variant: input.variant`);
+ *  - 1.1.49 to 1.1.53: the agent's variant when the message's model is the
+ *    agent's own configured one, with NO check that the model offers it
+ *    ("agent-model-unchecked");
+ *  - 1.1.54 to 1.3.13: the agent's variant when the message's model offers it,
+ *    whichever model that is ("offered");
+ *  - 1.3.14 on: offered AND on the agent's own model (`&& same`,
+ *    "agent-model").
  * An unknown or unparsable version takes the current rule.
  */
-export type AgentVariantRule = "none" | "offered" | "agent-model";
+export type AgentVariantRule = "none" | "agent-model-unchecked" | "offered" | "agent-model";
 
 export function agentVariantRule(hostVersion: string | undefined): AgentVariantRule {
   const match = /^(\d+)\.(\d+)\.(\d+)/.exec(hostVersion ?? "");
@@ -178,7 +182,8 @@ export function agentVariantRule(hostVersion: string | undefined): AgentVariantR
   const before = (a: number, b: number, c: number) =>
     major < a || (major === a && (minor < b || (minor === b && patch < c)));
   if (major !== 1) return "agent-model";
-  if (before(1, 1, 54)) return "none";
+  if (before(1, 1, 49)) return "none";
+  if (before(1, 1, 54)) return "agent-model-unchecked";
   if (before(1, 3, 14)) return "offered";
   return "agent-model";
 }
@@ -196,10 +201,10 @@ export function agentVariantRule(hostVersion: string | undefined): AgentVariantR
  *    `build` is disabled or hidden;
  *  - model: `agent.model ?? currentModel(session)` (`lastModel` before 1.18),
  *    the session's stored model, else the last user message's;
- *  - variant: per `agentVariantRule(hostVersion)`, and only when the model
- *    offers it (`full?.variants?.[agent.variant]`). `modelVariants` answers
- *    that; undefined there means the host could not list models, and the
- *    agent's own configured variant is kept.
+ *  - variant: per `agentVariantRule(hostVersion)`; where the rule checks that
+ *    the model offers it (`full?.variants?.[agent.variant]`), `modelVariants`
+ *    answers that, and undefined there means the host could not list models,
+ *    so the agent's own configured variant is kept.
  *
  * Returns undefined when the agent cannot be resolved, in which case the
  * command's message is left exactly as OpenCode built it.
@@ -212,7 +217,10 @@ export function resolveFeedbackTarget(input: {
   /** The session's current model before the command's message was created. */
   sessionModel?: CommandModelRef;
   modelVariants?: (model: CommandModelRef) => readonly string[] | undefined;
-  /** The running OpenCode's version (`GET /global/health`). */
+  /**
+   * The OpenCode version, from the session's own `version` (see
+   * `resolveCommandFeedbackTarget` in index.ts for why not the running host's).
+   */
   hostVersion?: string;
 }): FeedbackTarget | undefined {
   let agent: CommandAgentInfo | undefined;
@@ -230,13 +238,17 @@ export function resolveFeedbackTarget(input: {
   const agentModel = modelRef(agent.model);
   const model = agentModel ?? input.sessionModel;
   const rule = agentVariantRule(input.hostVersion);
-  // The model the variant is checked against: the agent's own under the
-  // current rule, whichever model the message gets under the older one.
-  const variantModel = rule === "agent-model" ? agentModel : rule === "offered" ? model : undefined;
   let variant: string | undefined;
-  if (variantModel && agent.variant) {
-    const offered = input.modelVariants?.(variantModel);
-    variant = offered === undefined || offered.includes(agent.variant) ? agent.variant : undefined;
+  if (rule === "agent-model-unchecked") {
+    variant = agentModel ? agent.variant : undefined;
+  } else {
+    // The model the variant is checked against: the agent's own under the
+    // current rule, whichever model the message gets under "offered".
+    const variantModel = rule === "agent-model" ? agentModel : rule === "offered" ? model : undefined;
+    if (variantModel && agent.variant) {
+      const offered = input.modelVariants?.(variantModel);
+      variant = offered === undefined || offered.includes(agent.variant) ? agent.variant : undefined;
+    }
   }
   return {
     agent: agent.name,

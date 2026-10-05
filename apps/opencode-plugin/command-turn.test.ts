@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import {
   appendCommandFeedback,
   createCommandTurnClient,
+  agentVariantRule,
   resolveFeedbackTarget,
   retargetCommandMessage,
 } from "./command-turn";
@@ -219,8 +220,9 @@ describe("retargetCommandMessage", () => {
 // OpenCode 1.1.31 to 1.3.17: the user message keeps its variant TOP-LEVEL
 // (`info.variant`, from the command's `input.variant`: the TUI pick), and the
 // request reads it from there. Transcribed from `createUserMessage` @ v1.1.31
-// (`variant: input.variant`), v1.2.0 (agent variant when the message's model
-// offers it) and v1.3.14+ (only on the agent's own model, `&& same`); the
+// (`variant: input.variant`), v1.1.53 (agent variant on the agent's own
+// model, unchecked), v1.2.0 (agent variant when the message's model offers
+// it) and v1.3.14+ (offered AND on the agent's own model, `&& same`); the
 // version boundaries come from scanning every v1.x tag.
 function olderEraPromptMessage(host: Host & { hostVersion: string }, agentName: string | undefined) {
   const [, minor, patch] = host.hostVersion.split(".").map(Number);
@@ -230,11 +232,14 @@ function olderEraPromptMessage(host: Host & { hostVersion: string }, agentName: 
   const model = ag.model ?? host.sessionModel!;
   const offered = host.variants[`${model.providerID}/${model.modelID}`];
   const same = !!ag.model;
-  const usesAgentVariant = minor > 1 || (minor === 1 && patch >= 54);
-  const needsSame = minor > 3 || (minor === 3 && patch >= 14);
-  const variant = usesAgentVariant && ag.variant && (!needsSame || same) && offered?.includes(ag.variant)
-    ? ag.variant
-    : undefined;
+  const at = (m: number, p: number) => minor > m || (minor === m && patch >= p);
+  let variant: string | undefined;
+  if (at(1, 54)) {
+    variant = ag.variant && (!at(3, 14) || same) && offered?.includes(ag.variant) ? ag.variant : undefined;
+  } else if (at(1, 49)) {
+    // 1.1.49-1.1.53: `agent.variant && agent.model && model === agent.model`.
+    variant = ag.variant && same ? ag.variant : undefined;
+  }
   return { agent: ag.name, model: { providerID: model.providerID, modelID: model.modelID }, variant };
 }
 
@@ -242,10 +247,13 @@ describe("older OpenCode 1 versions keep the variant top-level", () => {
   const TUI_OLD = { agent: "build", model: { providerID: "acme", modelID: "tui-pick" }, variant: "high" };
   const cases: Array<[string, string | undefined]> = [
     ["review agent switch (agent model + offered variant)", "plan"],
+    // `reviewer`'s variant is not offered by its model: only 1.1.49-1.1.53
+    // applied it anyway.
+    ["agent model with an unoffered variant", "reviewer"],
     ["named agent without a model", "writer"],
     ["no agent named", undefined],
   ];
-  for (const hostVersion of ["1.1.31", "1.1.53", "1.1.54", "1.2.10", "1.3.13", "1.3.14", "1.3.17"]) {
+  for (const hostVersion of ["1.1.31", "1.1.48", "1.1.49", "1.1.53", "1.1.54", "1.2.10", "1.3.13", "1.3.14", "1.3.17"]) {
     for (const [name, named] of cases) {
       test(`${hostVersion}: ${name}`, () => {
         const host = {
@@ -289,5 +297,22 @@ describe("default agent when no default_agent is set", () => {
       { name: "zeta", mode: "primary" },
     ];
     expect(resolveFeedbackTarget({ agents, sessionModel: HOST.sessionModel })?.agent).toBe("alpha");
+  });
+});
+
+describe("agentVariantRule boundaries", () => {
+  test("1.1.49 to 1.1.53 apply the agent's variant on its own model without checking the model offers it", () => {
+    for (const version of ["1.1.49", "1.1.53"]) {
+      expect(agentVariantRule(version)).toBe("agent-model-unchecked");
+      const target = resolveFeedbackTarget({
+        namedAgent: "reviewer",
+        agents: HOST.agents,
+        hostVersion: version,
+        modelVariants: () => [], // the model offers nothing
+      });
+      expect(target?.variant).toBe("max");
+    }
+    expect(agentVariantRule("1.1.48")).toBe("none");
+    expect(agentVariantRule("1.1.54")).toBe("offered");
   });
 });
