@@ -1029,12 +1029,8 @@ export async function startAnnotateServer(options: {
 		} else if (url.pathname === "/api/draft") {
 			if (req.method === "POST") {
 				try {
-					const saved = annotateDrafts.save(await parseBody(req));
-					if (!saved && annotateDrafts.reportsRejectedSaves) {
-						json(res, { ok: false, error: "stale draft generation", ...annotateDrafts.state() }, 409);
-						return;
-					}
-					json(res, { ok: true });
+					const result = annotateDrafts.saveRequest(await parseBody(req));
+					json(res, result.body, result.status);
 				} catch (err) {
 					const message = err instanceof Error ? err.message : "Failed to save draft";
 					console.error(`[draft] save failed: ${message}`);

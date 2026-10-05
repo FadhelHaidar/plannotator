@@ -175,6 +175,26 @@ export function defineAnnotateDraftScenarios(runtime: string, start: StartDraftS
       expect(idsOf(await (await fetch(`${unchanged.url}/api/draft`)).json())).toEqual(["fresh"]);
     });
 
+    test("after the decision a save is refused as decided, even above the tombstone", async () => {
+      const session = await openFile("decided.md", "# Decided\n\nv1\n");
+      await post(session, "/api/draft", draftBody(5, ["sent"]));
+      expect((await post(session, "/api/feedback", { feedback: "x", annotations: [comment("sent")], draftGeneration: 6 })).ok).toBe(true);
+
+      // A second tab of the same review saves at a generation the tombstone
+      // would let through.
+      const late = await post(session, "/api/draft", draftBody(7, ["sent"]));
+      expect(late.status).toBe(409);
+      expect((await late.json()).decided).toBe(true);
+      close(session);
+
+      // The sent comments do not come back, on the same text or an edited one.
+      const same = await openFile("decided.md", "# Decided\n\nv1\n");
+      expect((await fetch(`${same.url}/api/draft`)).status).toBe(404);
+      close(same);
+      const edited = await openFile("decided.md", "# Decided\n\nv2\n");
+      expect((await fetch(`${edited.url}/api/draft`)).status).toBe(404);
+    });
+
     test("the reviewer's Close clears the path copy too", async () => {
       const first = await openFile("close.md", "# Close\n\nv1\n");
       await post(first, "/api/draft", draftBody(1, ["c1"]));

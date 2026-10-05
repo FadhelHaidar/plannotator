@@ -153,17 +153,36 @@ export function createAnnotateDraftSession(options: AnnotateDraftSessionOptions)
       return { found: true, draft };
     },
 
-    /** Returns false when the save was rejected (stale generation / tombstone). */
+    /** Returns false when the save was rejected (decided, stale generation, tombstone). */
     save(body: object): boolean {
+      if (settled) return false;
       return saveReviewDraft(keys, body);
+    },
+
+    /**
+     * POST /api/draft, shaped for both runtimes.
+     *  - After a decision every save is refused with `409 { decided: true }`,
+     *    whatever its generation: a second tab must not put back comments
+     *    that were just sent. The client never retries a decided refusal.
+     *  - With a path copy in use a stale save is reported as
+     *    `409 { error, found, draftGeneration }` (the #1590 shape) and the
+     *    client saves again above `draftGeneration`.
+     *  - Otherwise the historical always-ok answer.
+     */
+    saveRequest(body: object): { status: 200 | 409; body: Record<string, unknown> } {
+      if (settled) {
+        return { status: 409, body: { ok: false, decided: true, error: "The review is already decided", ...reviewDraftState(keys) } };
+      }
+      const saved = saveReviewDraft(keys, body);
+      if (!saved && keys.targetKey !== null) {
+        return { status: 409, body: { ok: false, error: "stale draft generation", ...reviewDraftState(keys) } };
+      }
+      return { status: 200, body: { ok: true } };
     },
 
     state(): ReviewDraftState {
       return reviewDraftState(keys);
     },
-
-    /** Path copies are in use: a rejected save is reported, not swallowed. */
-    reportsRejectedSaves: keys.targetKey !== null,
 
     /** The client cleared the draft on screen (everything removed, or dismissed). */
     remove(draftGeneration?: number): void {

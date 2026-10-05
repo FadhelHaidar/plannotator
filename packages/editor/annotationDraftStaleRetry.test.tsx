@@ -1,16 +1,19 @@
 /**
- * A session draft save the server refuses as stale is saved again above the
- * server's generation (useAnnotationDraft + the default /api/draft transport).
+ * Session draft saves the server refuses (useAnnotationDraft + the default
+ * /api/draft transport).
  *
- * The case: two sessions on the same file. Session A (text v1) and session B
- * (text v2, restored from A's path copy at generation 20). A's feedback at
- * generation 25 deletes the path copy and B's content copy and tombstones
- * them. Without the retry B's next saves (21..25) were silently refused, and a
- * crash then lost B's comments.
+ *  - Stale: two sessions on the same file. Session A (text v1) and session B
+ *    (text v2, restored from A's path copy at generation 20). A's feedback at
+ *    generation 25 deletes the path copy and B's content copy and tombstones
+ *    them. Without the retry B's next saves (21..25) were silently refused,
+ *    and a crash then lost B's comments. The client adopts the server's
+ *    generation and saves again.
+ *  - Decided: the session itself was decided (another tab sent it). Its
+ *    refusal is never retried, or the sent comments would come back.
  *
  * The fetch shim routes /api/draft to REAL annotate draft sessions
- * (packages/shared/annotate-draft.ts) over a temp PLANNOTATOR_DATA_DIR, so the
- * refusal is the server's own.
+ * (packages/shared/annotate-draft.ts, saveRequest shapes the response) over a
+ * temp PLANNOTATOR_DATA_DIR, so the refusals are the server's own.
  *
  * Requires DOM (happy-dom) — runs under DOM_TESTS=1.
  */
@@ -20,7 +23,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createAnnotateDraftSession } from '@plannotator/shared/annotate-draft';
+import { createAnnotateDraftSession, type AnnotateDraftSession } from '@plannotator/shared/annotate-draft';
 import { contentHash } from '@plannotator/shared/draft';
 import { useAnnotationDraft } from '@plannotator/ui/hooks/useAnnotationDraft';
 import { AnnotationType, type Annotation } from '@plannotator/ui/types';
@@ -60,40 +63,52 @@ function Harness({ annotations }: { annotations: Annotation[] }) {
 
 const tick = (ms: number) => act(async () => new Promise<void>((r) => setTimeout(r, ms)));
 
-describe.if(hasDom)('session draft save refused as stale', () => {
-  test('adopts the server generation and saves again', async () => {
-    tempDir = realpathSync(mkdtempSync(join(tmpdir(), 'plannotator-stale-retry-')));
-    process.env.PLANNOTATOR_DATA_DIR = join(tempDir, 'data');
-    const filePath = join(tempDir, 'notes.md');
-    writeFileSync(filePath, 'v2');
+function sandboxFile(): string {
+  tempDir = realpathSync(mkdtempSync(join(tmpdir(), 'plannotator-stale-retry-')));
+  process.env.PLANNOTATOR_DATA_DIR = join(tempDir, 'data');
+  const filePath = join(tempDir, 'notes.md');
+  writeFileSync(filePath, 'v2');
+  return filePath;
+}
 
+/** Route /api/draft to `session`; returns the generations POSTed. */
+function serve(session: AnnotateDraftSession): number[] {
+  const posted: number[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), 'http://localhost');
+    const method = (init?.method ?? 'GET').toUpperCase();
+    if (url.pathname !== '/api/draft') return Response.json({});
+    if (method === 'POST') {
+      const body = JSON.parse(String(init?.body));
+      posted.push(body.draftGeneration);
+      const result = session.saveRequest(body);
+      return Response.json(result.body, { status: result.status });
+    }
+    const loaded = session.load();
+    return loaded.found
+      ? Response.json(loaded.draft)
+      : Response.json({ found: false, draftGeneration: loaded.draftGeneration }, { status: 404 });
+  }) as typeof fetch;
+  return posted;
+}
+
+async function mountHarness(): Promise<void> {
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  root = createRoot(host);
+  await act(async () => { root?.render(<Harness annotations={[]} />); });
+  await tick(50);
+}
+
+describe.if(hasDom)('session draft saves the server refuses', () => {
+  test('a stale refusal adopts the server generation and saves again', async () => {
+    const filePath = sandboxFile();
     const sessionA = createAnnotateDraftSession({ contentKey: contentHash('v1'), filePath });
     const sessionB = createAnnotateDraftSession({ contentKey: contentHash('v2'), filePath });
     // A saved at generation 20; B restores from that path copy.
     sessionA.save({ annotations: [comment('from-a')], globalAttachments: [], draftGeneration: 20, ts: 1 });
-
-    const posted: number[] = [];
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = new URL(String(input), 'http://localhost');
-      const method = (init?.method ?? 'GET').toUpperCase();
-      if (url.pathname !== '/api/draft') return Response.json({});
-      if (method === 'POST') {
-        const body = JSON.parse(String(init?.body));
-        posted.push(body.draftGeneration);
-        if (sessionB.save(body)) return Response.json({ ok: true });
-        return Response.json({ ok: false, error: 'stale draft generation', ...sessionB.state() }, { status: 409 });
-      }
-      const loaded = sessionB.load();
-      return loaded.found
-        ? Response.json(loaded.draft)
-        : Response.json({ found: false, draftGeneration: loaded.draftGeneration }, { status: 404 });
-    }) as typeof fetch;
-
-    const host = document.createElement('div');
-    document.body.appendChild(host);
-    root = createRoot(host);
-    await act(async () => { root?.render(<Harness annotations={[]} />); });
-    await tick(50);
+    const posted = serve(sessionB);
+    await mountHarness();
 
     // A decides at generation 25 while B is still open.
     sessionA.settle(25);
@@ -109,5 +124,22 @@ describe.if(hasDom)('session draft save refused as stale', () => {
     if (recovered.found) {
       expect((recovered.draft.annotations as Annotation[]).map((a) => a.id)).toEqual(['from-b']);
     }
+  });
+
+  test('a decided refusal is not retried', async () => {
+    const filePath = sandboxFile();
+    const session = createAnnotateDraftSession({ contentKey: contentHash('v2'), filePath });
+    const posted = serve(session);
+    await mountHarness();
+
+    // Another tab of this review sent the decision.
+    session.settle(6);
+
+    await act(async () => { root?.render(<Harness annotations={[comment('already-sent')]} />); });
+    await tick(700);
+
+    expect(posted).toHaveLength(1);
+    const after = createAnnotateDraftSession({ contentKey: contentHash('v2'), filePath }).load();
+    expect(after.found).toBe(false);
   });
 });

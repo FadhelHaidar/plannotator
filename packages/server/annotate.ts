@@ -1131,17 +1131,10 @@ export async function startAnnotateServer(
           if (url.pathname === "/api/draft") {
             if (req.method === "POST") {
               try {
-                const saved = annotateDrafts.save(await req.json());
-                // With a path copy in use a rejected (stale-generation) save
-                // is reported, as PR review drafts do (#1590); every other
-                // session keeps the historical always-ok answer.
-                if (!saved && annotateDrafts.reportsRejectedSaves) {
-                  return Response.json(
-                    { ok: false, error: "stale draft generation", ...annotateDrafts.state() },
-                    { status: 409 },
-                  );
-                }
-                return Response.json({ ok: true });
+                // Refusals (decided, or stale with a path copy) are shaped by
+                // annotate-draft.ts; see saveRequest.
+                const result = annotateDrafts.saveRequest(await req.json());
+                return Response.json(result.body, { status: result.status });
               } catch (err) {
                 const message = err instanceof Error ? err.message : "Failed to save draft";
                 console.error(`[draft] save failed: ${message}`);

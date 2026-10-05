@@ -42,7 +42,8 @@ const DEBOUNCE_MS = 500;
  *    store reports when there is NO draft (the default reads `draftGeneration`
  *    from the 404 body) so the client can resume past a tombstone.
  *  - `save` MAY resolve `{ staleGeneration }` when the store refused the body
- *    as stale (the default reads it from a `409 { draftGeneration }`, which
+ *    as stale (the default reads it from a `409 { draftGeneration }` that is
+ *    not marked `decided: true`, which
  *    annotate servers answer when the file's path copy was deleted or moved
  *    ahead by another session). The hook then raises its counter above that
  *    generation and saves again, once. Resolving nothing keeps the old
@@ -87,7 +88,10 @@ const defaultDraftTransport: DraftTransport = {
     return fetch('/api/draft', { method: 'POST', headers, body: payload, keepalive }).then(
       async (res): Promise<void | DraftSaveRefused> => {
         if (res.status !== 409) return;
-        const data = (await res.json().catch(() => null)) as MissingDraftData | null;
+        const data = (await res.json().catch(() => null)) as (MissingDraftData & { decided?: boolean }) | null;
+        // The review was decided: saving again would put back comments that
+        // were just sent, so a decided refusal is never retried.
+        if (data?.decided === true) return;
         const staleGeneration = readDraftGeneration(data?.draftGeneration);
         return staleGeneration !== null ? { staleGeneration } : undefined;
       },
