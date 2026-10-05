@@ -53,8 +53,11 @@ import { announceSessionUrl } from "./session-url";
 import {
   appendCommandFeedback,
   createCommandTurnClient,
+  resolveFeedbackTarget,
   retargetCommandMessage,
-  type CommandFeedback,
+  type CommandModelRef,
+  type FeedbackTarget,
+  type PendingCommandFeedback,
 } from "./command-turn";
 
 // Lazy-load HTML at first use instead of embedding in the bundle.
@@ -242,8 +245,70 @@ const PlannotatorPlugin: Plugin = async (ctx, rawOptions?: PlannotatorOpenCodeOp
 
   let cachedAgents: any[] | null = null;
   // Feedback a slash command put in its own message, waiting for `chat.message`
-  // to point that message at the agent it names. Keyed by session.
-  const commandFeedback = new Map<string, CommandFeedback>();
+  // to give that message the agent/model/variant the feedback prompt would
+  // have had. Keyed by session.
+  const commandFeedback = new Map<string, PendingCommandFeedback>();
+
+  /**
+   * What OpenCode would have used for the old separate feedback prompt (agent
+   * named or not, no model, no variant), read when the feedback is delivered:
+   * before the command's own message exists, so the session's model is still
+   * the one that prompt would have seen. Every read is best-effort; see
+   * `resolveFeedbackTarget` for what a missing answer falls back to.
+   */
+  async function resolveCommandFeedbackTarget(
+    sessionID: string,
+    namedAgent: string | undefined,
+  ): Promise<FeedbackTarget | undefined> {
+    const query = { query: { directory: ctx.directory } };
+    const client = ctx.client as any;
+    const [agents, config, session, providers] = await Promise.allSettled([
+      client.app.agents(query),
+      namedAgent ? Promise.resolve(undefined) : client.config.get(query),
+      client.session.get({ path: { id: sessionID }, ...query }),
+      client.config.providers(query),
+    ]);
+    const agentList = agents.status === "fulfilled" && Array.isArray(agents.value?.data) ? agents.value.data : [];
+    const defaultAgent = config.status === "fulfilled" && typeof config.value?.data?.default_agent === "string"
+      ? config.value.data.default_agent
+      : undefined;
+
+    const readModel = (value: any): CommandModelRef | undefined => {
+      const modelID = typeof value?.modelID === "string" ? value.modelID : value?.id;
+      return typeof value?.providerID === "string" && typeof modelID === "string" && value.providerID && modelID
+        ? { providerID: value.providerID, modelID }
+        : undefined;
+    };
+    // `currentModel`: the session's stored model, else the last user message's.
+    let sessionModel = session.status === "fulfilled" ? readModel(session.value?.data?.model) : undefined;
+    if (!sessionModel) {
+      try {
+        const messages = (await client.session.messages({ path: { id: sessionID }, ...query }))?.data;
+        for (let i = (messages?.length ?? 0) - 1; i >= 0 && !sessionModel; i--) {
+          if (messages[i]?.info?.role === "user") sessionModel = readModel(messages[i].info.model);
+        }
+      } catch {
+        // Leave it to the message's own model.
+      }
+    }
+
+    const providerList = providers.status === "fulfilled" && Array.isArray(providers.value?.data?.providers)
+      ? providers.value.data.providers
+      : undefined;
+    return resolveFeedbackTarget({
+      namedAgent,
+      agents: agentList,
+      defaultAgent,
+      sessionModel,
+      // `provider.getModel` in createUserMessage: an unknown model offers no
+      // variants. Undefined only when the listing itself failed.
+      modelVariants: (model) => {
+        if (!providerList) return undefined;
+        const entry = providerList.find((provider: any) => provider?.id === model.providerID)?.models?.[model.modelID];
+        return entry?.variants && typeof entry.variants === "object" ? Object.keys(entry.variants) : [];
+      },
+    });
+  }
 
   async function getSharingEnabled(): Promise<boolean> {
     try {
@@ -471,26 +536,28 @@ Do NOT proceed with implementation until your plan is approved.`;
         const feedback = turn.take();
         if (feedback) {
           appendCommandFeedback(output.parts as unknown[], feedback);
-          if (feedback.agent) commandFeedback.set(input.sessionID, feedback);
+          const target = await resolveCommandFeedbackTarget(input.sessionID, feedback.agent)
+            .catch(() => undefined);
+          if (target) commandFeedback.set(input.sessionID, { text: feedback.text, target });
         }
       }
     },
 
     // The command's message is built right after `command.execute.before`
-    // returns; this is where it can still be pointed at the agent the feedback
-    // names (the review UI's agent switch, or the writer of an annotated
-    // message, #1612). One-shot, and only for the message carrying our text.
+    // returns; this is where it still gets the agent, model and variant the
+    // separate feedback prompt used to have (the review UI's agent switch,
+    // the writer of an annotated message #1612, or OpenCode's default agent).
+    // One-shot, and only for the message carrying our text.
     "chat.message": async (input, output) => {
-      const feedback = commandFeedback.get(input.sessionID);
-      if (!feedback) return;
+      const pending = commandFeedback.get(input.sessionID);
+      if (!pending) return;
       commandFeedback.delete(input.sessionID);
       retargetCommandMessage({
         sessionID: input.sessionID,
-        feedback,
+        pending,
         hook: input,
         message: output.message,
         parts: output.parts,
-        agents: await getOpenCodeAgents(),
       });
     },
   };

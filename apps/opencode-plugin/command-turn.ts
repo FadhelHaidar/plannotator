@@ -18,14 +18,16 @@
  * the hook then puts that text into `output.parts`, the array OpenCode turns
  * into the command's message, and OpenCode runs exactly one turn for it.
  *
- * The one thing a hook's `parts` cannot say is WHICH agent answers: the
- * command message takes the command's agent (the one the user is on). The
- * feedback may name another one, either the review UI's agent switch or the
- * agent that wrote an annotated message (#1612). That choice is applied in
- * `chat.message`, the hook OpenCode fires while building that very message
- * (`createUserMessage`, same file), by retargeting the message itself
- * (`retargetCommandMessage`). It is what the separate prompt used to do: the
- * reply is written by that agent, on that agent's configured model.
+ * The one thing a hook's `parts` cannot say is WHO answers: the command's
+ * message takes the command's agent and model (the ones the user is on). The
+ * separate prompt named the agent the feedback was for (the review UI's agent
+ * switch, or the agent that wrote an annotated message, #1612) or, when there
+ * was none, no agent at all, so OpenCode's default agent answered; either way
+ * on that agent's configured model and variant. `resolveFeedbackTarget`
+ * computes exactly that when the feedback is delivered, and
+ * `retargetCommandMessage` applies it in `chat.message`, the hook OpenCode
+ * fires while building the command's message (`createUserMessage`, same
+ * file). Only the turn count changes.
  *
  * A command with nothing to send still runs one turn on an empty message, as
  * before; OpenCode 1 gives a command hook no way to skip it.
@@ -120,42 +122,120 @@ export function appendCommandFeedback(parts: unknown[], feedback: CommandFeedbac
   parts.push({ type: "text", text: feedback.text });
 }
 
-/** An OpenCode 1 agent listing entry, as far as retargeting reads it. */
+/** A model reference as OpenCode 1 user messages carry it. */
+export interface CommandModelRef {
+  providerID: string;
+  modelID: string;
+}
+
+/** An OpenCode 1 agent listing entry (`GET /agent`), as far as routing reads it. */
 export interface CommandAgentInfo {
   name?: string;
+  mode?: string;
+  hidden?: boolean;
   model?: { providerID?: string; modelID?: string };
+  variant?: string;
+}
+
+/** Who answers the feedback, on which model and variant. */
+export interface FeedbackTarget {
+  agent: string;
+  /** Undefined when the host could not say; the message keeps its model then. */
+  model?: CommandModelRef;
+  variant?: string;
+}
+
+function modelRef(value: unknown): CommandModelRef | undefined {
+  if (!isRecord(value)) return undefined;
+  const modelID = typeof value.modelID === "string" ? value.modelID : typeof value.id === "string" ? value.id : undefined;
+  if (typeof value.providerID !== "string" || !value.providerID || !modelID) return undefined;
+  return { providerID: value.providerID, modelID };
 }
 
 /**
- * Point the command's message at the agent the feedback names.
+ * Resolve what OpenCode 1 would have used for a prompt naming `namedAgent`
+ * (or no agent) with no model and no variant: the shape of every feedback
+ * prompt this plugin used to send. Mirrors `createUserMessage`
+ * (`packages/opencode/src/session/prompt.ts` @ v1.18.32):
  *
- * Applies only to the message that carries `feedback.text` in `sessionID`, so
+ *  - agent: the named one, else `Agent.defaultInfo()`: `default_agent` from
+ *    config, else the first primary, non-hidden agent (the host's `GET /agent`
+ *    lists that one first: it sorts `default_agent`, else `build`, to the top);
+ *  - model: `agent.model ?? currentModel(session)`, where `currentModel` is
+ *    the session's stored model, else the last user message's;
+ *  - variant: the agent's `variant`, only when the agent configures a model
+ *    and that model offers the variant (`full?.variants?.[agent.variant]`).
+ *    `modelVariants` answers that; undefined there means the host could not
+ *    list models, and the agent's own configured variant is kept.
+ *
+ * Returns undefined when the agent cannot be resolved, in which case the
+ * command's message is left exactly as OpenCode built it.
+ */
+export function resolveFeedbackTarget(input: {
+  namedAgent?: string;
+  agents: readonly CommandAgentInfo[];
+  /** `default_agent` from the OpenCode config, when set. */
+  defaultAgent?: string;
+  /** The session's current model before the command's message was created. */
+  sessionModel?: CommandModelRef;
+  modelVariants?: (model: CommandModelRef) => readonly string[] | undefined;
+}): FeedbackTarget | undefined {
+  const agent = input.namedAgent
+    ? input.agents.find((entry) => entry.name === input.namedAgent)
+    : input.defaultAgent
+      ? input.agents.find((entry) => entry.name === input.defaultAgent)
+      : input.agents.find((entry) => entry.mode !== "subagent" && entry.hidden !== true);
+  if (!agent?.name) return undefined;
+
+  const agentModel = modelRef(agent.model);
+  let variant: string | undefined;
+  if (agentModel && agent.variant) {
+    const offered = input.modelVariants?.(agentModel);
+    variant = offered === undefined || offered.includes(agent.variant) ? agent.variant : undefined;
+  }
+  const model = agentModel ?? input.sessionModel;
+  return {
+    agent: agent.name,
+    ...(model && { model }),
+    ...(variant && { variant }),
+  };
+}
+
+/** Feedback waiting for its message, with the target resolved at delivery time. */
+export interface PendingCommandFeedback {
+  text: string;
+  target: FeedbackTarget;
+}
+
+/**
+ * Give the command's message the agent, model and variant the feedback prompt
+ * would have had (`resolveFeedbackTarget`), so moving the feedback into the
+ * command's own turn changes nothing but the number of turns.
+ *
+ * Applies only to the message that carries `pending.text` in `sessionID`, so
  * an unrelated prompt can never be retargeted. Returns whether it applied.
- * When the agent configures a model the message moves to it too, which is
- * what a prompt naming that agent always did (`createUserMessage`:
- * `input.model ?? agent.model ?? current`); the variant belonged to the old
- * model and is dropped with it.
  */
 export function retargetCommandMessage(input: {
   sessionID: string;
-  feedback: CommandFeedback;
-  /** `chat.message`'s own input: the session and the agent OpenCode chose. */
-  hook: { sessionID?: unknown; agent?: unknown };
+  pending: PendingCommandFeedback;
+  /** `chat.message`'s own input. */
+  hook: { sessionID?: unknown };
   message: unknown;
   parts: unknown;
-  agents?: readonly CommandAgentInfo[];
 }): boolean {
-  const agent = input.feedback.agent;
-  if (!agent || input.hook.sessionID !== input.sessionID || !isRecord(input.message)) return false;
+  if (input.hook.sessionID !== input.sessionID || !isRecord(input.message)) return false;
   if (!Array.isArray(input.parts) || !input.parts.some((part) =>
-    isRecord(part) && part.type === "text" && part.text === input.feedback.text)) return false;
-  // Already that agent: leave the message (and the model the user picked) alone.
-  if (input.hook.agent === agent || input.message.agent === agent) return true;
+    isRecord(part) && part.type === "text" && part.text === input.pending.text)) return false;
 
-  input.message.agent = agent;
-  const model = input.agents?.find((entry) => entry.name === agent)?.model;
-  if (model?.providerID && model.modelID) {
-    input.message.model = { providerID: model.providerID, modelID: model.modelID };
+  const { target } = input.pending;
+  const model = target.model ?? modelRef(input.message.model);
+  input.message.agent = target.agent;
+  if (model) {
+    input.message.model = {
+      providerID: model.providerID,
+      modelID: model.modelID,
+      ...(target.variant && { variant: target.variant }),
+    };
   }
   return true;
 }

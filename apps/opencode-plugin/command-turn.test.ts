@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import {
   appendCommandFeedback,
   createCommandTurnClient,
+  resolveFeedbackTarget,
   retargetCommandMessage,
 } from "./command-turn";
 
@@ -78,62 +79,137 @@ describe("createCommandTurnClient", () => {
   });
 });
 
-describe("retargetCommandMessage", () => {
-  const feedback = { text: "Feedback body", agent: "reviewer" };
-  const agents = [
-    { name: "build" },
-    { name: "reviewer", model: { providerID: "acme", modelID: "careful-1" } },
+// What OpenCode 1 did with the OLD separate feedback prompt
+// (`session.prompt({ agent?, parts })`: no model, no variant), transcribed from
+// `createUserMessage` in packages/opencode/src/session/prompt.ts @ v1.18.32
+// (Agent.defaultInfo from packages/opencode/src/agent/agent.ts). The new path
+// must land on exactly this agent/model/variant; only the turn count changes.
+interface HostAgent {
+  name: string;
+  mode: "primary" | "subagent" | "all";
+  hidden?: boolean;
+  model?: { providerID: string; modelID: string };
+  variant?: string;
+}
+interface Host {
+  agents: HostAgent[]; // object order == GET /agent order in these fixtures
+  defaultAgent?: string;
+  sessionModel?: { providerID: string; modelID: string };
+  variants: Record<string, string[]>; // "provider/model" -> offered variants
+}
+function oldPromptMessage(host: Host, agentName: string | undefined) {
+  const ag = agentName
+    ? host.agents.find((a) => a.name === agentName)!
+    : host.defaultAgent
+      ? host.agents.find((a) => a.name === host.defaultAgent)!
+      : host.agents.find((a) => a.mode !== "subagent" && a.hidden !== true)!;
+  const model = ag.model ?? host.sessionModel!;
+  const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID;
+  const offered = host.variants[`${model.providerID}/${model.modelID}`];
+  const variant = ag.variant && same && offered?.includes(ag.variant) ? ag.variant : undefined;
+  return { agent: ag.name, model: { providerID: model.providerID, modelID: model.modelID, ...(variant && { variant }) } };
+}
+
+function newCommandMessage(
+  host: Host,
+  namedAgent: string | undefined,
+  commandMessage: { agent: string; model: { providerID: string; modelID: string; variant?: string } },
+) {
+  const target = resolveFeedbackTarget({
+    namedAgent,
+    agents: host.agents,
+    defaultAgent: host.defaultAgent,
+    sessionModel: host.sessionModel,
+    modelVariants: (model) => host.variants[`${model.providerID}/${model.modelID}`] ?? [],
+  });
+  expect(target).toBeDefined();
+  const message = structuredClone(commandMessage) as Record<string, unknown>;
+  const applied = retargetCommandMessage({
+    sessionID: "ses_1",
+    pending: { text: "Feedback body", target: target! },
+    hook: { sessionID: "ses_1" },
+    message,
+    parts: [{ type: "text", text: "Feedback body", id: "prt_1" }],
+  });
+  expect(applied).toBe(true);
+  return message;
+}
+
+const HOST: Host = {
+  agents: [
+    { name: "build", mode: "primary" },
+    { name: "plan", mode: "primary", model: { providerID: "acme", modelID: "think-2" }, variant: "high" },
+    { name: "reviewer", mode: "primary", model: { providerID: "acme", modelID: "careful-1" }, variant: "max" },
+    { name: "writer", mode: "primary", variant: "high" },
+    { name: "explore", mode: "subagent" },
+    { name: "title", mode: "primary", hidden: true },
+  ],
+  sessionModel: { providerID: "acme", modelID: "everyday-1" },
+  variants: { "acme/think-2": ["low", "high"], "acme/careful-1": ["low"], "acme/everyday-1": ["high"] },
+};
+
+// The command's own message as OpenCode builds it: the TUI's agent, and the
+// model + variant the user picked in the TUI.
+const TUI_MESSAGE = { agent: "build", model: { providerID: "acme", modelID: "tui-pick", variant: "high" } };
+
+describe("feedback answered by the same agent/model/variant as the old separate prompt", () => {
+  const cases: Array<[string, Host, string | undefined, typeof TUI_MESSAGE]> = [
+    // Review UI agent switch to an agent with a model and an offered variant.
+    ["review agent switch: model and variant carried", HOST, "plan", TUI_MESSAGE],
+    // #1612: the annotated message's writer; its variant is not offered by its
+    // model, so the old prompt dropped it.
+    ["annotated-message writer: unoffered variant dropped", HOST, "reviewer", TUI_MESSAGE],
+    // A named agent with no model answers on the session's model, no variant.
+    ["named agent without a model: session model, no variant", HOST, "writer", TUI_MESSAGE],
+    // No agent named (review feedback without a switch, or an unresolvable /
+    // subagent writer): OpenCode's default agent answered.
+    ["no agent: default agent on the session model", HOST, undefined, { ...TUI_MESSAGE, agent: "plan" }],
+    ["no agent: configured default_agent", { ...HOST, defaultAgent: "plan" }, undefined, TUI_MESSAGE],
+    // Routed agent == the command's agent: the agent's configured model, not
+    // the TUI pick.
+    ["routed agent equals the current agent", HOST, "plan", { ...TUI_MESSAGE, agent: "plan" }],
   ];
 
-  function commandMessage() {
-    return {
-      agent: "build",
-      model: { providerID: "acme", modelID: "fast-1", variant: "high" },
-    };
+  for (const [name, host, named, command] of cases) {
+    test(name, () => {
+      expect(newCommandMessage(host, named, command)).toEqual(oldPromptMessage(host, named));
+    });
   }
 
-  // Failure caught: the reply coming from the command's agent when the review
-  // UI's agent switch or the annotated message's writer (#1612) named another.
-  test("points the message carrying the feedback at the named agent and its model", () => {
-    const message = commandMessage();
-    const applied = retargetCommandMessage({
-      sessionID: "ses_1",
-      feedback,
-      hook: { sessionID: "ses_1", agent: "build" },
-      message,
-      parts: [{ type: "text", text: "Feedback body", id: "prt_1" }],
-      agents,
-    });
-
-    expect(applied).toBe(true);
-    expect(message).toEqual({ agent: "reviewer", model: { providerID: "acme", modelID: "careful-1" } });
+  test("an unreadable model listing keeps the agent's own configured variant", () => {
+    const target = resolveFeedbackTarget({ namedAgent: "plan", agents: HOST.agents, modelVariants: () => undefined });
+    expect(target?.variant).toBe("high");
   });
 
-  test("an agent with no configured model keeps the message's model", () => {
-    const message = commandMessage();
-    retargetCommandMessage({
-      sessionID: "ses_1",
-      feedback: { text: "Feedback body", agent: "plain" },
-      hook: { sessionID: "ses_1", agent: "build" },
-      message,
-      parts: [{ type: "text", text: "Feedback body" }],
-      agents: [...agents, { name: "plain" }],
-    });
-
-    expect(message.agent).toBe("plain");
-    expect(message.model).toEqual(commandMessage().model);
+  test("an unknown agent leaves the command's message as OpenCode built it", () => {
+    expect(resolveFeedbackTarget({ namedAgent: "gone", agents: HOST.agents })).toBeUndefined();
   });
+});
 
-  test("never touches another message, another session, or the same agent", () => {
+describe("retargetCommandMessage", () => {
+  const pending = { text: "Feedback body", target: { agent: "plan", model: { providerID: "acme", modelID: "think-2" } } };
+
+  test("never touches another message or another session", () => {
     const cases = [
-      { hook: { sessionID: "ses_1", agent: "build" }, parts: [{ type: "text", text: "something the user typed" }] },
-      { hook: { sessionID: "ses_2", agent: "build" }, parts: [{ type: "text", text: "Feedback body" }] },
-      { hook: { sessionID: "ses_1", agent: "reviewer" }, parts: [{ type: "text", text: "Feedback body" }] },
+      { hook: { sessionID: "ses_1" }, parts: [{ type: "text", text: "something the user typed" }] },
+      { hook: { sessionID: "ses_2" }, parts: [{ type: "text", text: "Feedback body" }] },
     ];
     for (const { hook, parts } of cases) {
-      const message = commandMessage();
-      retargetCommandMessage({ sessionID: "ses_1", feedback, hook, message, parts, agents });
-      expect(message).toEqual(commandMessage());
+      const message = structuredClone(TUI_MESSAGE);
+      expect(retargetCommandMessage({ sessionID: "ses_1", pending, hook, message, parts })).toBe(false);
+      expect(message).toEqual(TUI_MESSAGE);
     }
+  });
+
+  test("with no resolvable model it keeps the message's model but not its TUI variant", () => {
+    const message = structuredClone(TUI_MESSAGE) as Record<string, unknown>;
+    retargetCommandMessage({
+      sessionID: "ses_1",
+      pending: { text: "Feedback body", target: { agent: "build" } },
+      hook: { sessionID: "ses_1" },
+      message,
+      parts: [{ type: "text", text: "Feedback body" }],
+    });
+    expect(message).toEqual({ agent: "build", model: { providerID: "acme", modelID: "tui-pick" } });
   });
 });
