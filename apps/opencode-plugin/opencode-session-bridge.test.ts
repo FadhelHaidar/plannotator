@@ -359,6 +359,27 @@ describe("OpenCode session bridge", () => {
     expect(sink.deltas).toEqual(["Done."]);
   });
 
+  // The failure this guards: an OpenAI-compatible provider reporting "stop"
+  // on a step that called tools made a cut answer read as finished.
+  test('a step that called tools is never a finished answer, even when its finish says "stop"', async () => {
+    const host = fakeHost();
+    const bridge = bridgeFor(host);
+    const sink = recordingSink();
+    bridge.ask({ askId: "a1", text: "q", mode: "turn" }, sink.sink, new AbortController().signal);
+    await waitFor(() => host.prompts.length === 1);
+    host.emit("session.execution.started");
+    host.emit("session.inbox.delivered", { inboxID: host.prompts[0].id });
+    host.emit("session.step.started", { assistantMessageID: "m1" });
+    host.emit("session.text.delta", { assistantMessageID: "m1", ordinal: 0, delta: "Let me look." });
+    host.emit("session.tool.input.started", { assistantMessageID: "m1", id: "t1", name: "read" });
+    host.emit("session.step.ended", { assistantMessageID: "m1", finish: "stop" });
+    host.emit("session.inbox.enqueued", { inboxID: "msg_person", item: { type: "user", delivery: "steer", payload: {} } });
+    host.emit("session.inbox.delivered", { inboxID: "msg_person" });
+    await waitFor(() => sink.error !== undefined || sink.done !== undefined);
+    expect(sink.done).toBeUndefined();
+    expect(sink.error).toEqual({ code: "taken_over", message: TAKEN_OVER_TEXT });
+  });
+
   test("the plugin sends the same take-over texts the provider would", () => {
     // Spelled out in the plugin so an older CLI server still shows them.
     expect(TAKEN_OVER_TEXT).toBe(SESSION_ASK_TAKEN_OVER_TEXT);

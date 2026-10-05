@@ -20,7 +20,7 @@
  * released when the ask settles. The ask settles at the turn's next step (the
  * engine folds a prompt typed mid-turn into the next model request, so from
  * there on the output answers THEM): as `done` when the response before it
- * ended the answer (`end_turn`, no tool call), else as `taken_over` with the
+ * ended the answer (`end_turn`, no tool call) with text shown, else as `taken_over` with the
  * note. When the turn ends first (their prompt then runs as a turn of its
  * own), it settles with the turn's answer as `done`. Either way Plannotator
  * never aborts that turn again: a Stop only closes the question, and
@@ -67,11 +67,9 @@ export interface EnteredPrompt {
  *   through Remote Control. `slack-ping`: the session's owner from Slack.
  *   `channel`: a message an MCP channel relays (Slack, Telegram), a person on
  *   the other end.
- * - `peer`: "Another Claude session sent a message", a conversational message
- *   addressed to this session that the model answers in this turn, exactly
- *   like a person typing; the rest of the reply is to that session, not to
- *   the reviewer.
- * Not listed, so never a take-over: `task-notification` and
+ * Not listed, so never a take-over: `peer` (another Claude session's message:
+ * the owner's call is that losing the reviewer's answer is worse than a peer's
+ * reply streaming into the panel), `task-notification` and
  * `peer-send-message` (notifications framed for the agent: a background task
  * or another session's SendMessage finishing), `scheduled-trigger`,
  * `observer`, `observer-activity`, `coordinator`, `projects-relay`,
@@ -79,7 +77,7 @@ export interface EnteredPrompt {
  * receipts), `sdk`, `plugin` (a plugin's prompt runs once idle and carries no
  * turn id).
  */
-const TAKEOVER_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge', 'slack-ping', 'channel', 'peer'])
+const TAKEOVER_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge', 'slack-ping', 'channel'])
 /** Of those, the person typing into this session: the note says "You typed". */
 const PERSON_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge'])
 
@@ -275,7 +273,9 @@ export class TurnTracker {
     this.releaseHeld(ask)
     // The response before this request ended the answer (no tool call): the
     // engine runs on only for their prompt, and the question was answered whole.
-    if (lastStop === 'end_turn') ask.sink.done(ask.streamed)
+    // A thinking-only final response streamed nothing: an empty `done` would
+    // show nothing at all, so that case reads as taken over (as on Pi / OpenCode).
+    if (lastStop === 'end_turn' && ask.streamed.trim()) ask.sink.done(ask.streamed)
     else ask.sink.error('taken_over', ask.byPerson ? TAKEN_OVER_BY_PERSON_TEXT : TAKEN_OVER_TEXT)
   }
 

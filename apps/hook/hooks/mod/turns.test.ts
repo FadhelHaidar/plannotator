@@ -142,6 +142,19 @@ describe("TurnTracker: a prompt typed into the question's turn takes it over", (
     expect(s.errors).toEqual([])
   })
 
+  test('a thinking-only final response (nothing streamed) settles as taken over, not an empty done', () => {
+    const turns = new TurnTracker()
+    const s = sink()
+    turns.beginAsk('a1', 'why?', s)
+    turns.onTurnStart('t1', 'The plannotator plugin sent a message:\nwhy?')
+    turns.onStep('t1')
+    turns.onPromptEntered(typed('composer'))
+    turns.onStepStop('t1', 'end_turn')
+    turns.onStep('t1')
+    expect(s.answers).toEqual([])
+    expect(s.errors).toEqual(['taken_over'])
+  })
+
   test('a Stop between the take-over and the next step closes the question, never the turn', () => {
     const { turns, s } = running()
     turns.onPromptEntered(typed('composer'))
@@ -164,11 +177,10 @@ describe("TurnTracker: a prompt typed into the question's turn takes it over", (
     expect(turns.ownsTurn('t2')).toBe(false)
   })
 
-  test('the person (prompt box, Remote Control) gets "You typed"; a peer, channel or Slack ping the neutral note', () => {
+  test('the person (prompt box, Remote Control) gets "You typed"; a channel or Slack ping the neutral note', () => {
     for (const [originKind, note] of [
       ['composer', TAKEN_OVER_BY_PERSON_TEXT],
       ['bridge', TAKEN_OVER_BY_PERSON_TEXT],
-      ['peer', TAKEN_OVER_TEXT],
       ['channel', TAKEN_OVER_TEXT],
       ['slack-ping', TAKEN_OVER_TEXT],
     ] as const) {
@@ -181,6 +193,9 @@ describe("TurnTracker: a prompt typed into the question's turn takes it over", (
 
   test("the agent's own work and engine notices never take the turn over", () => {
     for (const originKind of [
+      // The owner's call: a peer session's reply streaming into the panel is
+      // better than losing the reviewer's answer.
+      'peer',
       'task-notification',
       'peer-send-message',
       'scheduled-trigger',

@@ -46,8 +46,9 @@
  *   nothing over. Rows promoted in the same batch as ours (a command's
  *   session-URL notice) are delivered before the model starts and take
  *   nothing over either. On a take-over the question settles at once: `done`
- *   when the last model step had finished the answer (`finish: "stop"`, no
- *   tool calls), else `taken_over` (deltas already sent stand). Neither a Stop
+ *   when the last model step had finished the answer (`finish: "stop"` AND no
+ *   `session.tool.input.started` in that step, since some OpenAI-compatible
+ *   providers report "stop" on a tool-calling step), else `taken_over` (deltas already sent stand). Neither a Stop
  *   nor "Interrupt and ask now" interrupts that execution afterwards.
  */
 
@@ -146,6 +147,8 @@ interface ActiveTurn {
 	answering: boolean;
 	/** How the last model step ended (`stop`: the answer was complete, no tool calls). */
 	lastFinish: string | undefined;
+	/** The current (or last) model step started a tool call: never a finished answer, whatever `finish` says. */
+	stepCalledTools: boolean;
 }
 
 /**
@@ -381,7 +384,9 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 				) {
 					// Someone else's prompt entered the run answering our question.
 					takenOverRun = true;
-					const complete = turn.lastFinish === "stop" && !!turn.answer;
+					// Some OpenAI-compatible providers report "stop" on a step that
+					// called tools, so a tool call in the step rules it out too.
+					const complete = turn.lastFinish === "stop" && !turn.stepCalledTools && !!turn.answer;
 					finishTurn(turn, () => (complete ? turn.sink.done(turn.answer) : turn.sink.error("taken_over", TAKEN_OVER_TEXT)));
 				}
 				if (typeof data.inboxID === "string") rowKinds.delete(data.inboxID);
@@ -390,6 +395,7 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 				if (turn?.delivered) {
 					turn.answering = true;
 					turn.lastFinish = undefined;
+					turn.stepCalledTools = false;
 				}
 				return;
 			case "session.step.ended":
@@ -417,7 +423,10 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 				}
 				return;
 			case "session.tool.input.started":
-				if (turn?.delivered) turn.answering = true;
+				if (turn?.delivered) {
+					turn.answering = true;
+					turn.stepCalledTools = true;
+				}
 				if (turn?.delivered && !turn.cancelled && typeof data.name === "string") turn.sink.tool?.(data.name);
 				return;
 			case "session.execution.succeeded":
@@ -475,6 +484,7 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 			watchdog: null,
 			answering: false,
 			lastFinish: undefined,
+			stepCalledTools: false,
 		};
 		active = turn;
 
