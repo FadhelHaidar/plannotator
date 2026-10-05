@@ -2213,6 +2213,30 @@ describe("exportAnnotations — element context (raw-HTML / live-app pinpoints)"
     expect(inline).toContain("## 1. Feedback on the <img> element (data:image/png)\n");
   });
 
+  // Failure to catch (0.28.1 smoke): an image with no usable `src` (srcset
+  // only, a lazy data: placeholder with the file in data-src, <picture>, a
+  // video poster) exported as a bare "<img> element" or "(data:image/png)"
+  // while the composer quote named the real file.
+  test("an image heading names the file the bridge resolved, not the src attribute alone", () => {
+    const img = (context: object, originalText: string) => ({
+      blockId: "", startOffset: 0, endOffset: 0, type: "COMMENT", text: "swap this",
+      originalText, htmlAnchor: { selector: "#hero", tagName: "img", text: "" },
+      elementContext: { tag: "img", role: "img", ...context },
+    });
+    const srcsetOnly = exportAnnotations([], [img({ sourceName: "hero-480.jpg" }, "[element: Image (hero-480.jpg)]")]);
+    expect(srcsetOnly).toContain("## 1. Feedback on the <img> element (hero-480.jpg)\n");
+    // The data: placeholder in src loses to the resolved lazy file.
+    const lazy = exportAnnotations([], [img(
+      { sourceName: "hero-banner.webp", attrs: [["src", "data:image/gif;base64,…"]] },
+      "[element: Image (hero-banner.webp)]",
+    )]);
+    expect(lazy).toContain("## 1. Feedback on the <img> element (hero-banner.webp)\n");
+    expect(lazy).not.toContain("(data:image/gif)");
+    // A file that equals the accessible name is not repeated.
+    const same = exportAnnotations([], [img({ name: "logo.svg", sourceName: "logo.svg" }, '[element: Image "logo.svg"]')]);
+    expect(same).toContain('## 1. Feedback on the <img> element — "logo.svg"\n');
+  });
+
   test("a pinpoint with real quoted text keeps its quote line and gains the block", () => {
     const output = exportAnnotations([], [navAnn({ originalText: "Home About Pricing Docs", elementContext: { ...NAV_CONTEXT, text: "Home About Pricing Docs" } })]);
     expect(output).toContain('## 1. Feedback on: "Home About Pricing Docs"\n> this\n');

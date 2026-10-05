@@ -12,6 +12,8 @@
  * for non-opted-in documents must go red here.
  */
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { parseHtmlElementContext } from "@plannotator/core/html-anchor";
+import { exportAnnotations } from "../../utils/parser";
 import { ANNOTATION_HIGHLIGHT_CSS, BRIDGE_SCRIPT } from "./bridge-script";
 import {
   DIFF_HIGHLIGHT_CSS,
@@ -1547,6 +1549,54 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
       const { messages } = await clickAndCollectSelection(el, x, 40);
       expect(messages.length).toBe(1);
       expect(messages[0]!.text).toBe(expected);
+      postBridge({ type: "plannotator-bridge-cancel-selection" });
+    }
+
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
+    document.body.replaceChildren();
+  });
+
+  // Failure to catch (0.28.1 smoke): the composer quote naming the real file
+  // while the exported heading said only "<img> element" or "(data:image/gif)",
+  // because the export read the src attribute alone. The context now carries
+  // the bridge's own resolution, so quote and heading name the same file.
+  test("the exported heading names the same file the composer quote does, whatever attribute carries it", async () => {
+    document.body.innerHTML = [
+      "<div>",
+      '<img id="p-srcset" srcset="hero-480.jpg 480w, hero-960.jpg 960w">',
+      '<img id="p-lazy" src="data:image/gif;base64,R0lGOD" data-src="/img/real.png?v=2">',
+      '<picture><source srcset="/img/pic.avif 1x, /img/pic@2x.avif 2x"><img id="p-picture"></picture>',
+      '<video id="p-poster" poster="/media/cover.jpg?sig=x"></video>',
+      '<video id="p-source"><source src="/media/clip.mp4"></video>',
+      '<img id="p-src" alt="Team" src="https://cdn.test/team.jpg?sig=SECRET">',
+      "</div>",
+    ].join("");
+    postBridge({ type: "plannotator-bridge-set-vim-mode", enabled: false });
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "pinpoint" });
+
+    const cases: Array<[string, string, string]> = [
+      ["#p-srcset", "[element: Image (hero-480.jpg)]", "Feedback on the <img> element (hero-480.jpg)"],
+      ["#p-lazy", "[element: Image (real.png)]", "Feedback on the <img> element (real.png)"],
+      ["#p-picture", "[element: Image (pic.avif)]", "Feedback on the <img> element (pic.avif)"],
+      ["#p-poster", "[element: Video (cover.jpg)]", "Feedback on the <video> element (cover.jpg)"],
+      ["#p-source", "[element: Video (clip.mp4)]", "Feedback on the <video> element (clip.mp4)"],
+      ["#p-src", '[element: Image "Team" (team.jpg)]', 'Feedback on the <img> element — "Team" (team.jpg)'],
+    ];
+    let x = 10;
+    for (const [selector, quote, heading] of cases) {
+      const el = document.querySelector<HTMLElement>(selector)!;
+      hoverAt(el, (x += 40), 40);
+      const { messages } = await clickAndCollectSelection(el, x, 40);
+      expect(messages.length).toBe(1);
+      expect(messages[0]!.text).toBe(quote);
+      // Through the parent's trust boundary, then the export.
+      const elementContext = parseHtmlElementContext(messages[0]!.context);
+      expect(JSON.stringify(elementContext)).not.toContain("SECRET");
+      const out = exportAnnotations([], [{
+        id: "a", blockId: "", startOffset: 0, endOffset: 0, type: "COMMENT", text: "note",
+        originalText: quote, createdA: 1, elementContext,
+      }]);
+      expect(out).toContain(`## 1. ${heading}\n`);
       postBridge({ type: "plannotator-bridge-cancel-selection" });
     }
 

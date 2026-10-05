@@ -188,6 +188,10 @@ export interface HtmlElementContext {
   component?: string;
   /** Live-app sessions only: the route the element was seen on and the page title. */
   page?: { url: string; title?: string };
+  /** Media elements only: the file the element shows, resolved by the bridge
+   *  exactly as the composer quote names it (src, data-src, srcset,
+   *  <picture>/<source>, poster), query and fragment scrubbed. */
+  sourceName?: string;
 }
 
 export type AlertKind = 'note' | 'tip' | 'warning' | 'caution' | 'important';

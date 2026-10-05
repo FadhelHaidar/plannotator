@@ -3277,6 +3277,12 @@ export const BRIDGE_SCRIPT = `(function() {
       if (heading) context.heading = heading;
       var component = ctxComponent(el);
       if (component) context.component = component;
+      // The media file this element shows, resolved exactly as the composer
+      // quote resolves it (src, a lazy data-src, srcset, <picture>/<source>,
+      // poster; see descRawSource), so the exported heading can name the file
+      // even when the element has no usable src attribute.
+      var sourceName = descSourceName(el);
+      if (sourceName) context.sourceName = sourceName;
       if (LIVE) {
         context.page = { url: currentPageUrl() };
         var title = ctxCollapse(document.title, 200);
@@ -3406,6 +3412,15 @@ export const BRIDGE_SCRIPT = `(function() {
     return ctxCollapse(String(value).replace(/\\[/g, '(').replace(/\\]/g, ')').replace(/"/g, "'"), max);
   }
 
+  // Candidates are comma-separated ("a.png, b.png 2x"); the URL is the
+  // first candidate's first word. A data: URL carries its own comma, so it is
+  // taken up to whitespace instead.
+  function descFirstSrcsetUrl(value) {
+    var srcset = String(value || '').trim();
+    if (!srcset) return '';
+    return (/^data:/i.test(srcset) ? srcset : srcset.split(',')[0]).trim().split(/\\s+/)[0] || '';
+  }
+
   function descRawSource(el) {
     var tag = el.tagName;
     if (tag === 'INPUT' && String(el.getAttribute('type') || '').toLowerCase() !== 'image') return '';
@@ -3418,11 +3433,14 @@ export const BRIDGE_SCRIPT = `(function() {
     var lazy = (el.getAttribute('data-src') || '').trim();
     if (lazy && (!src || /^data:/i.test(src))) src = lazy;
     if (!src && tag === 'IMG') {
-      var srcset = (el.getAttribute('srcset') || '').trim();
-      // Candidates are comma-separated ("a.png, b.png 2x"); the URL is the
-      // first candidate's first word. A data: URL carries its own comma, so
-      // it is taken up to whitespace instead.
-      if (srcset) src = (/^data:/i.test(srcset) ? srcset : srcset.split(',')[0]).trim().split(/\\s+/)[0] || '';
+      src = descFirstSrcsetUrl(el.getAttribute('srcset'));
+      // <picture><source srcset="…"><img></picture>: the img itself may carry
+      // no source at all; the first <source> candidate names the file.
+      var picture = el.parentElement;
+      if (!src && picture && picture.tagName === 'PICTURE' && picture.querySelector) {
+        var pictureSource = picture.querySelector('source[srcset]');
+        if (pictureSource) src = descFirstSrcsetUrl(pictureSource.getAttribute('srcset'));
+      }
     }
     if (!src && (tag === 'VIDEO' || tag === 'AUDIO')) {
       var child = el.querySelector && el.querySelector('source[src]');

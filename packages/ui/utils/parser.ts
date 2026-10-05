@@ -784,10 +784,18 @@ const commentHeadingLine = (ann: any): string => {
   return `Feedback on: "${ann.originalText}"`;
 };
 
-/** The file a media element's (already scrubbed) `src` attribute names, so two nameless images read differently in a heading:
+/** The file a media element shows, so two nameless images read differently in a heading:
  *  `team.jpg` for `https://cdn.test/img/team.jpg?…`, `data:image/png` for an
- *  inline image. Empty when the context carries no source. */
+ *  inline image. Empty when the context carries no source.
+ *
+ *  `sourceName` is the bridge's own resolution (the one the composer quote
+ *  uses: src, a lazy data-src, srcset, <picture>/<source>, poster), so the
+ *  heading and the quote can never name different files. Contexts captured
+ *  before that field existed fall back to the scrubbed `src` attribute. */
 const elementSourceFileName = (context: any): string => {
+  if (typeof context?.sourceName === 'string' && context.sourceName.trim()) {
+    return safeInline(context.sourceName, 60);
+  }
   const attrs = Array.isArray(context?.attrs) ? context.attrs : [];
   const pair = attrs.find((p: unknown) => Array.isArray(p) && p[0] === 'src' && typeof p[1] === 'string');
   if (!pair) return '';
@@ -1049,15 +1057,37 @@ const questionItemsFromAnswers = (answers: QuestionAnswer[]): QuestionExportItem
     settled: false,
   }));
 
+/** The diff-block index of a comment made in the plan/version diff view
+ *  (`blockId` `diff-block-N`), or null for every other annotation. */
+const diffBlockIndex = (ann: any): number | null => {
+  const match = typeof ann?.blockId === 'string' ? /^diff-block-(\d+)$/.exec(ann.blockId) : null;
+  return match ? Number(match[1]) : null;
+};
+
 /**
  * Sort annotations in DOCUMENT order: by the block's position in `blocks`,
  * then by offset. Without blocks (a linked document whose text is unknown)
  * block ids compare numerically, so block-10 never precedes block-2.
+ *
+ * Comments made in the version diff view (`diff-block-N`) cannot be placed in
+ * the document: N indexes the diff against whichever base was selected, and
+ * nothing in the annotation maps it back to a block. They go together AFTER
+ * every other comment, in diff order (which is itself document order, since
+ * the diff walks the document). A list with no diff comments sorts exactly as
+ * before.
  */
 const sortAnnotationsInDocumentOrder = (annotations: any[], blocks: Block[] | undefined): any[] => {
   const order = new Map<string, number>();
   blocks?.forEach((blk, index) => order.set(blk.id, index));
   return [...annotations].sort((a, b) => {
+    const diffA = diffBlockIndex(a);
+    const diffB = diffBlockIndex(b);
+    if (diffA !== null || diffB !== null) {
+      if (diffA === null) return -1;
+      if (diffB === null) return 1;
+      if (diffA !== diffB) return diffA - diffB;
+      return a.startOffset - b.startOffset;
+    }
     if (a.blockId !== b.blockId) {
       // Two ids missing from `blocks` share position -1; fall through to the
       // offset so the main document keeps its pre-#1696 order.
