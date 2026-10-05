@@ -105,7 +105,7 @@ export function findVibePlanInTranscript(
     if (entry?.role !== "tool") continue;
     const output = entry?.tool_result?.output;
     if (!output || typeof output !== "object") continue;
-    const target: unknown =
+    const target: string | undefined =
       typeof output.file_path === "string" ? output.file_path :
       typeof output.file === "string" ? output.file :
       undefined;
