@@ -212,6 +212,16 @@ function contextBytes(value: unknown): number {
 }
 
 /**
+ * Fields an over-budget context sheds, first to last; mirrors `CTX_SHED_ORDER`
+ * in the bridge (a test keeps the two in step). `sourceName` goes last: the
+ * export heading falls back to the `src` attribute without it, and shedding it
+ * is still better than losing the whole context.
+ */
+export const ELEMENT_CONTEXT_SHED_ORDER: ReadonlyArray<keyof HtmlElementContext> = [
+  "outline", "text", "attrs", "classes", "path", "heading", "landmark", "component", "sourceName",
+];
+
+/**
  * Validate a bridge-posted element context. Pure and fail-closed: returns
  * `undefined` if `value` is not a valid element context or tag is missing/empty.
  * Every scalar is re-collapsed (control characters and whitespace runs),
@@ -288,8 +298,7 @@ export function parseHtmlElementContext(value: unknown): HtmlElementContext | un
     }
   }
   // Serialized bound: shed the expendable fields in the bridge's order until the whole fits.
-  const shedOrder: Array<keyof HtmlElementContext> = ["outline", "text", "attrs", "classes", "path", "heading", "landmark", "component"];
-  for (const field of shedOrder) {
+  for (const field of ELEMENT_CONTEXT_SHED_ORDER) {
     if (contextBytes(context) <= MAX_ELEMENT_CONTEXT_BYTES) break;
     delete context[field];
   }

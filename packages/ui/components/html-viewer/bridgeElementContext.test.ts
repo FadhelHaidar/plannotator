@@ -15,7 +15,21 @@
  * the SHIPPED source rather than a copy.
  */
 import { describe, expect, test } from 'bun:test';
+import { ELEMENT_CONTEXT_SHED_ORDER } from '@plannotator/core/html-anchor';
 import { BRIDGE_SCRIPT } from './bridge-script';
+
+// Failure to catch: the bridge and the parent's validator shedding different
+// fields (or one of them never shedding a new field such as sourceName), so a
+// context the bridge trimmed to fit is dropped whole at the trust boundary.
+describe('element context shed order', () => {
+  test("the bridge's CTX_SHED_ORDER equals core's ELEMENT_CONTEXT_SHED_ORDER", () => {
+    const match = /var CTX_SHED_ORDER = (\[[^\]]*\]);/.exec(BRIDGE_SCRIPT);
+    if (!match) throw new Error('bridge no longer defines CTX_SHED_ORDER');
+    const bridgeOrder = JSON.parse(match[1]!.replace(/'/g, '"')) as string[];
+    expect(bridgeOrder).toEqual([...ELEMENT_CONTEXT_SHED_ORDER]);
+    expect(bridgeOrder).toContain('sourceName');
+  });
+});
 
 /** Pull one `function name(...) { ... }` out of the bridge source by brace
  *  balance, so the test never diverges from what ships. */

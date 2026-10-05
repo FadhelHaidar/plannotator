@@ -3250,7 +3250,8 @@ export const BRIDGE_SCRIPT = `(function() {
   }
 
   // Shed order when over budget: the fields an agent can live without first.
-  var CTX_SHED_ORDER = ['outline', 'text', 'attrs', 'classes', 'path', 'heading', 'landmark', 'component'];
+  // Mirrors ELEMENT_CONTEXT_SHED_ORDER in @plannotator/core/html-anchor.
+  var CTX_SHED_ORDER = ['outline', 'text', 'attrs', 'classes', 'path', 'heading', 'landmark', 'component', 'sourceName'];
 
   function buildElementContext(el, maxBytes) {
     if (!el || el.nodeType !== 1) return null;
