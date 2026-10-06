@@ -52,7 +52,7 @@ export function fakeHost(): FakeHost {
     async tick() {
       for (const fn of [...timers]) fn()
       // Let the async work the timers started settle.
-      for (let index = 0; index < 50; index += 1) await Promise.resolve()
+      for (let index = 0; index < 500; index += 1) await Promise.resolve()
     },
     now: async () => host.clock,
     sleep: async (ms) => {
@@ -70,7 +70,22 @@ export function fakeHost(): FakeHost {
     run: async (argv, init) => {
       const call: RunCall = { argv, env: init?.env }
       host.runs.push(call)
-      return host.onRun(call) ?? { exitCode: 0, stdout: '', stderr: '' }
+      const answered = host.onRun(call)
+      if (answered) return answered
+      // What the real scripts do to the files, so several instances sharing
+      // one file map see each other: the launcher writes the pid, a claim
+      // renames its file (one winner).
+      if (argv[3] === 'plannotator-launch') {
+        const dir = argv[4] as string
+        if (!host.files.has(`${dir}/pid`)) host.files.set(`${dir}/pid`, '4242\n')
+      } else if (argv[3] === 'plannotator-claim') {
+        const path = argv[4] as string
+        const text = host.files.get(path)
+        if (text === undefined) return { exitCode: 3, stdout: '', stderr: '' }
+        host.files.delete(path)
+        host.files.set(`${path}.claimed`, text)
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
     },
     readFile: async (path) => {
       const text = host.files.get(path)

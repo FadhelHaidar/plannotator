@@ -14,6 +14,8 @@
  *   exit         the CLI's exit code, written after it exits
  *   revision.json / revision.json.ack   plan revisions pushed into an open review
  *   messages.json  PLANNOTATOR_HOST_MESSAGES_FILE: `last`'s recent assistant messages, for the picker
+ *   watcher.json   which Claude Code process watches this launch (`{ owner, at }`, a heartbeat)
+ *   <file>.claimed result.json, exit or pid renamed by the process that settles the launch
  *
  * No listener in the mod: it looks at these files on a timer.
  */
@@ -46,8 +48,13 @@ export const LAUNCH_FILES = {
   exit: 'exit',
   revision: 'revision.json',
   messages: 'messages.json',
+  watcher: 'watcher.json',
   overflow: 'feedback.md',
 } as const
+
+/** The files whose rename claims a launch's settlement (`claimArgv`). */
+export type ClaimableFile = 'result' | 'exit' | 'pid'
+export const CLAIMED_SUFFIX = '.claimed'
 
 export function fileIn(dir: string, name: keyof typeof LAUNCH_FILES): string {
   return `${dir}/${LAUNCH_FILES[name]}`
@@ -117,6 +124,7 @@ export function cleanupArgv(dir: string): string[] {
   const names = Object.entries(LAUNCH_FILES)
     .filter(([key]) => key !== 'overflow')
     .map(([, name]) => name)
+  const claimed = (['result', 'exit', 'pid'] as const).map((key) => `${LAUNCH_FILES[key]}${CLAIMED_SUFFIX}`)
   return [
     '/bin/sh',
     '-c',
@@ -124,9 +132,83 @@ export function cleanupArgv(dir: string): string[] {
     'plannotator-cleanup',
     dir,
     ...names,
+    ...claimed,
     'revision.json.ack',
     'exit.tmp',
   ]
+}
+
+/** Exit codes of `CLAIM_SCRIPT`. */
+export const CLAIM_EXIT = { won: 0, lost: 3, failed: 4 } as const
+
+/**
+ * Claims one launch's settlement across Claude Code processes: two processes
+ * on one session id (`claude --continue` while the first still runs) both
+ * watch the launch, and only the one whose rename of `$1` to `$1.claimed`
+ * succeeds delivers. rename(2) in one directory is atomic, so exactly one
+ * wins; the other finds the file gone (exit 3). A file still there after a
+ * failed rename (permissions, a full disk) is exit 4: try again later.
+ */
+export const CLAIM_SCRIPT = [
+  '[ -e "$1" ] || exit 3',
+  'mv -f "$1" "$1.claimed" 2>/dev/null && exit 0',
+  '[ -e "$1" ] && exit 4',
+  'exit 3',
+].join('\n')
+
+export function claimArgv(path: string): string[] {
+  return ['/bin/sh', '-c', CLAIM_SCRIPT, 'plannotator-claim', path]
+}
+
+/**
+ * Prints each launch directory (argument) whose stored record can go: no
+ * decision waiting (`result.json` or `exit` not yet claimed), and either
+ * cleaned up (no `stdin`, which the mod writes before launching and only
+ * `cleanupArgv` removes; or no directory at all) or, for directories after a
+ * `--` marker, a server whose pid no longer answers `kill -0`.
+ * A live server, or a decision a resumed session would still deliver, keeps
+ * its record.
+ */
+export const PRUNE_SCRIPT = [
+  'dead=0',
+  'for d in "$@"; do',
+  '  if [ "$d" = "--" ]; then dead=1; continue; fi',
+  '  for f in result.json exit; do [ -e "$d/$f" ] && continue 2; done',
+  '  if [ ! -e "$d/stdin" ]; then echo "$d"; continue; fi',
+  '  [ "$dead" = 1 ] || continue',
+  '  pid=$(cat "$d/pid" 2>/dev/null)',
+  '  case "$pid" in ""|*[!0-9]*) continue ;; esac',
+  '  kill -0 "$pid" 2>/dev/null || echo "$d"',
+  'done',
+].join('\n')
+
+/**
+ * `cleanedDirs` are pruned only when cleaned up (no `stdin`); `deadDirs`
+ * also when their server's pid is gone.
+ */
+export function pruneArgv(cleanedDirs: readonly string[], deadDirs: readonly string[]): string[] {
+  return ['/bin/sh', '-c', PRUNE_SCRIPT, 'plannotator-prune', ...cleanedDirs, '--', ...deadDirs]
+}
+
+/** Above this the debug log is moved to `<file>.1` before the next append. */
+export const DEBUG_LOG_MAX_BYTES = 1_048_576
+
+/**
+ * Appends stdin to the debug log, rotating it once it passes
+ * `DEBUG_LOG_MAX_BYTES`. Appending (O_APPEND) is what lets several Claude Code
+ * processes share one log: rewriting the whole file from each process's own
+ * buffer clobbered the other's lines and could leave NUL bytes behind.
+ */
+export const DEBUG_APPEND_SCRIPT = [
+  'f=$1',
+  'mkdir -p "$(dirname "$f")" 2>/dev/null',
+  'size=$(wc -c < "$f" 2>/dev/null | tr -d \' \')',
+  `[ "\${size:-0}" -gt ${DEBUG_LOG_MAX_BYTES} ] && mv -f "$f" "$f.1" 2>/dev/null`,
+  'cat >> "$f"',
+].join('\n')
+
+export function debugAppendArgv(path: string): string[] {
+  return ['/bin/sh', '-c', DEBUG_APPEND_SCRIPT, 'plannotator-debug', path]
 }
 
 /** Liveness probe through the shell's own `kill` (no /bin/kill on every system). */

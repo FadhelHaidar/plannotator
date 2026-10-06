@@ -7,11 +7,15 @@
  * bun tests drive this class with a host made of memory.
  */
 
-import { BRIDGE_HOST, BRIDGE_MODES, bridgeBaseUrl, createBridge, type BridgeHandle } from './bridge'
+import { BRIDGE_HOST, BRIDGE_MODES, bridgeBaseUrl, createBridge, type BridgeEnd, type BridgeHandle } from './bridge'
 import { deliveryFor, legacyResult, parseHostResult, type HostResultRecord, type SessionKind } from './delivery'
 import type { Host, HttpResult } from './host'
 import {
   aliveArgv,
+  CLAIM_EXIT,
+  claimArgv,
+  CLAIMED_SUFFIX,
+  type ClaimableFile,
   cleanupArgv,
   stopArgv,
   STOP_EXIT,
@@ -25,6 +29,7 @@ import {
   parseReadyFile,
   pickerFile,
   privateDirArgv,
+  pruneArgv,
   RECENT_MESSAGES_SUBJECT,
   recentAssistantTexts,
   subjectFor,
@@ -159,6 +164,28 @@ const PID_CHECK_EVERY_TICKS = 15
 const PID_MISSES_BEFORE_STOPPED = 3
 const READY_WAIT_MS = { review: 45_000, other: 15_000 }
 const REVISION_ACK_WAIT_MS = 4_000
+/**
+ * A bridge loop that ended because the server stopped answering is started
+ * again after `first`, doubling up to `max` while it keeps failing. A loop
+ * that got through at least once starts the next wait at `first` again.
+ */
+export const BRIDGE_RETRY_MS = { first: 5_000, max: 60_000 } as const
+/**
+ * The watcher lease (`watcher.json` in the launch directory): when two Claude
+ * Code processes hold the same session (`claude --continue` while the first
+ * still runs), one of them watches a launch, runs its bridge and delivers its
+ * decision. The holder renews it every `LEASE_EVERY_TICKS`; another process
+ * takes it over once it is `LEASE_STALE_MS` old (the holder exited, slept, or
+ * hung). Delivery is also claimed atomically (`claimArgv`), so a lease race
+ * can never deliver twice.
+ */
+const LEASE_EVERY_TICKS = 5
+export const LEASE_STALE_MS = 20_000
+/**
+ * The minimum age of a stored record `pruneStoredLaunches` looks at: a
+ * younger one's wrapper may not have written its pid yet.
+ */
+export const LAUNCH_SETTLED_AGE_MS = 60_000
 
 interface LiveLaunch extends LaunchRecord {
   pidMisses: number
@@ -170,6 +197,27 @@ interface LiveLaunch extends LaunchRecord {
    */
   starting: boolean
   bridge: BridgeHandle | null
+  /** No new bridge before this time (after a loop gave up on a silent server). */
+  bridgeRetryAt: number
+  /** The last retry wait, doubled while loops keep failing. */
+  bridgeBackoffMs: number
+  /** The server refused the bridge (an older CLI, a wrong token, AI off) or is closing: never again. */
+  bridgeOff: boolean
+  /** This instance holds the watcher lease: it runs the bridge and delivers. */
+  leader: boolean
+  /** The tick the lease was last looked at; null: never. */
+  leaseTick: number | null
+}
+
+interface WatcherLease {
+  owner: string | null
+  at: number
+}
+
+function parseWatcherLease(text: string): WatcherLease | null {
+  const body = jsonObjectOf(text)
+  if (!body || typeof body.at !== 'number') return null
+  return { owner: typeof body.owner === 'string' && body.owner ? body.owner : null, at: body.at }
 }
 
 export interface SessionInfo {
@@ -195,18 +243,23 @@ export class PlannotatorMod {
   private delivering: Promise<void> = Promise.resolve()
   private sequence = 0
   private disposed = false
+  /** Launch ids this instance settled or dropped: kept out of the store even if another process re-adds them. */
+  private forgotten = new Set<string>()
+  /** Names this instance in a launch's watcher lease. */
+  private readonly instanceId: string
 
   constructor(
     private readonly host: Host,
     readonly session: SessionInfo,
-  ) {}
+  ) {
+    this.instanceId = host.randomHex(8)
+  }
 
   // --- Lifecycle -----------------------------------------------------------
 
   /** Reattach the reviews this session left open (restart, `--resume`). */
   async restore(): Promise<void> {
-    const stored = await this.host.storeGet(STORE_LAUNCHES)
-    const records = Array.isArray(stored) ? (stored as LaunchRecord[]) : []
+    const records = await this.pruneStoredLaunches()
     const mine = records.filter((record) => record && record.sessionId === this.session.sessionId && typeof record.dir === 'string')
     for (const record of mine) this.adopt(record)
     const approvals = await this.host.storeGet(STORE_APPROVALS)
@@ -234,6 +287,12 @@ export class PlannotatorMod {
     this.timer?.cancel()
     this.timer = null
     this.host.status(undefined)
+    // Hand the launches this instance watched to any other process on the session at once.
+    for (const launch of this.launches.values()) {
+      if (!launch.leader) continue
+      launch.leader = false
+      void this.host.writeFile(fileIn(launch.dir, 'watcher'), JSON.stringify({ owner: null, at: 0 })).catch(() => undefined)
+    }
   }
 
   get isDisposed(): boolean {
@@ -241,18 +300,76 @@ export class PlannotatorMod {
   }
 
   private adopt(record: LaunchRecord): LiveLaunch {
-    const live: LiveLaunch = { ...record, pidMisses: 0, ticks: 0, settling: false, starting: false, bridge: null }
+    const live: LiveLaunch = {
+      ...record,
+      pidMisses: 0,
+      ticks: 0,
+      settling: false,
+      starting: false,
+      bridge: null,
+      bridgeRetryAt: 0,
+      bridgeBackoffMs: 0,
+      bridgeOff: false,
+      leader: false,
+      leaseTick: null,
+    }
     this.launches.set(record.id, live)
     return live
   }
 
+  /**
+   * Stored records, minus the ones nothing is left of: a launch directory
+   * that was cleaned or removed (any session), or, for other sessions, a
+   * server that died without a decision. A live server, or a decision still
+   * waiting to be delivered when its session resumes, keeps its record; so
+   * does anything younger than a minute (its wrapper may not have written the
+   * pid yet). This session's dead servers are left to the timer, which says so.
+   */
+  private async pruneStoredLaunches(): Promise<LaunchRecord[]> {
+    const stored = await this.host.storeGet(STORE_LAUNCHES)
+    const records = (Array.isArray(stored) ? (stored as LaunchRecord[]) : []).filter(
+      (record) => record && typeof record.dir === 'string' && typeof record.sessionId === 'string',
+    )
+    const now = await this.host.now()
+    const old = records.filter((record) => now - (Number(record.startedAt) || 0) > LAUNCH_SETTLED_AGE_MS)
+    if (old.length === 0) return records
+    const own = old.filter((record) => record.sessionId === this.session.sessionId).map((record) => record.dir)
+    const others = old.filter((record) => record.sessionId !== this.session.sessionId).map((record) => record.dir)
+    const probe = await this.host.run(pruneArgv(own, others), { timeoutMs: 10_000 }).catch(() => null)
+    if (!probe || probe.exitCode !== 0) return records
+    const gone = new Set(probe.stdout.split('\n').map((line) => line.trim()).filter(Boolean))
+    if (gone.size === 0) return records
+    const kept = records.filter((record) => !gone.has(record.dir))
+    this.host.debug(`pruned ${records.length - kept.length} stored launch record(s)`)
+    await this.host.storeSet(STORE_LAUNCHES, kept)
+    return kept
+  }
+
+  /**
+   * Writes this instance's launches for this session. Records of this session
+   * this instance does not know (another Claude Code process on the same
+   * session launched them) are kept, unless this instance settled them.
+   */
   private async persist(): Promise<void> {
     const stored = await this.host.storeGet(STORE_LAUNCHES)
-    const others = (Array.isArray(stored) ? (stored as LaunchRecord[]) : []).filter(
-      (record) => record && record.sessionId !== this.session.sessionId,
+    const all = (Array.isArray(stored) ? (stored as LaunchRecord[]) : []).filter((record) => !!record)
+    const others = all.filter(
+      (record) => record.sessionId !== this.session.sessionId || (!this.launches.has(record.id) && !this.forgotten.has(record.id)),
     )
     const mine: LaunchRecord[] = [...this.launches.values()].map(
-      ({ pidMisses: _misses, ticks: _ticks, settling: _settling, starting: _starting, bridge: _bridge, ...record }) => record,
+      ({
+        pidMisses: _misses,
+        ticks: _ticks,
+        settling: _settling,
+        starting: _starting,
+        bridge: _bridge,
+        bridgeRetryAt: _retryAt,
+        bridgeBackoffMs: _backoff,
+        bridgeOff: _off,
+        leader: _leader,
+        leaseTick: _leaseTick,
+        ...record
+      }) => record,
     )
     await this.host.storeSet(STORE_LAUNCHES, [...others, ...mine])
   }
@@ -822,8 +939,15 @@ export class PlannotatorMod {
 
   private async check(launch: LiveLaunch): Promise<void> {
     if (!launch.url) await this.readReady(launch)
+    // Another Claude Code process on this session settled it (claimed, or delivered and cleaned up).
+    if (await this.settledElsewhere(launch)) {
+      await this.forgetSettledElsewhere(launch)
+      return
+    }
+    // Another process watches it: that one runs the bridge and delivers.
+    if (!(await this.holdLease(launch))) return
     // Started from the timer, never from inside a hook: the loop outlives any one dispatch.
-    if (launch.port && !launch.bridge) this.startBridge(launch)
+    if (launch.port && !launch.bridge && !launch.bridgeOff && (await this.host.now()) >= launch.bridgeRetryAt) this.startBridge(launch)
     const resultPath = fileIn(launch.dir, 'result')
     if (launch.closedByAgent) {
       // Only a record marked closedBy "agent" (or an exit with no decision) is
@@ -831,13 +955,13 @@ export class PlannotatorMod {
       // the reviewer's decision that won the race against a TERM: deliver it.
       const record = (await this.host.exists(resultPath)) ? parseHostResult(await this.host.readFile(resultPath)) : null
       if (record) {
+        if (!(await this.claimSettlement(launch, 'result'))) return
         if (record.closedBy === 'agent') {
           await this.finishAgentClose(launch, record)
           return
         }
         this.host.debug(`result ${launch.id}: ${record.surface} ${record.decision} after Claude's close; delivering it`)
         launch.closedByAgent = false
-        launch.settling = true
         await this.settle(launch, record)
         return
       }
@@ -845,6 +969,7 @@ export class PlannotatorMod {
       if (await this.host.exists(exitPath)) {
         const code = (await this.host.readFile(exitPath).catch(() => '')).trim()
         if (code !== '0' || launch.kind === 'plan') {
+          if (!(await this.claimSettlement(launch, 'exit'))) return
           await this.finishAgentClose(launch, null)
           return
         }
@@ -858,15 +983,20 @@ export class PlannotatorMod {
     if (await this.host.exists(resultPath)) {
       const record = parseHostResult(await this.host.readFile(resultPath))
       if (record) {
+        if (!(await this.claimSettlement(launch, 'result'))) return
         this.host.debug(`result ${launch.id}: ${record.surface} ${record.decision}${record.noop ? ' (no-op)' : ''}`)
-        launch.settling = true
+        // Claude closed it from another process on this session: nothing to deliver.
+        if (record.closedBy === 'agent') {
+          await this.finishAgentClose(launch, record)
+          return
+        }
         await this.settle(launch, record)
         return
       }
     }
     if (await this.host.exists(fileIn(launch.dir, 'exit'))) {
-      launch.settling = true
       const code = (await this.host.readFile(fileIn(launch.dir, 'exit')).catch(() => '')).trim()
+      if (!(await this.claimSettlement(launch, 'exit'))) return
       // A CLI older than the host result file still prints the decision the
       // skill would have shown Claude. (A plan never exits 0 without a record.)
       if (code === '0' && launch.kind !== 'plan') {
@@ -904,14 +1034,74 @@ export class PlannotatorMod {
     launch.pidMisses += 1
     // Gone and never wrote an exit code: the whole process group was killed.
     if (launch.pidMisses >= PID_MISSES_BEFORE_STOPPED && !(await this.host.exists(fileIn(launch.dir, 'exit')))) {
+      if (!(await this.claimSettlement(launch, 'pid'))) return
       if (launch.closedByAgent) {
         await this.finishAgentClose(launch, null)
         return
       }
-      launch.settling = true
       this.host.log(`The review server for ${launch.subject} is no longer running. Your draft is saved.`)
       await this.forget(launch)
     }
+  }
+
+  // --- Several Claude Code processes on one session ---------------------------
+
+  /**
+   * Claims the right to settle a launch by renaming the file that says it is
+   * settled (`claimArgv`). True: this instance settles it (marked settling).
+   * False: another process got there first (the launch is forgotten here,
+   * nothing said), or the rename failed (tried again next tick).
+   */
+  private async claimSettlement(launch: LiveLaunch, file: ClaimableFile): Promise<boolean> {
+    launch.settling = true
+    const claimed = await this.host.run(claimArgv(fileIn(launch.dir, file)), { timeoutMs: 5_000 }).catch(() => null)
+    if (claimed?.exitCode === CLAIM_EXIT.won) return true
+    if (claimed?.exitCode === CLAIM_EXIT.lost) {
+      await this.forgetSettledElsewhere(launch)
+      return false
+    }
+    launch.settling = false
+    return false
+  }
+
+  /**
+   * Another process claimed it, or delivered it and cleaned the launch
+   * directory up: `stdin` is written by the mod before the launch is recorded
+   * and removed only by `cleanupArgv`.
+   */
+  private async settledElsewhere(launch: LiveLaunch): Promise<boolean> {
+    for (const file of ['result', 'exit', 'pid'] as const) {
+      if (await this.host.exists(`${fileIn(launch.dir, file)}${CLAIMED_SUFFIX}`)) return true
+    }
+    return !(await this.host.exists(fileIn(launch.dir, 'stdin')))
+  }
+
+  private async forgetSettledElsewhere(launch: LiveLaunch): Promise<void> {
+    launch.settling = true
+    this.host.debug(`launch ${launch.id}: settled by another Claude Code process on this session`)
+    await this.forget(launch)
+  }
+
+  /**
+   * Whether this instance watches the launch (runs its bridge, delivers its
+   * decision): it holds the watcher lease, renewed every few ticks, unless
+   * another live process holds it. See `LEASE_STALE_MS`.
+   */
+  private async holdLease(launch: LiveLaunch): Promise<boolean> {
+    if (launch.leaseTick !== null && launch.ticks - launch.leaseTick < LEASE_EVERY_TICKS) return launch.leader
+    launch.leaseTick = launch.ticks
+    const path = fileIn(launch.dir, 'watcher')
+    const now = await this.host.now()
+    const lease = parseWatcherLease(await this.host.readFile(path).catch(() => ''))
+    if (lease?.owner && lease.owner !== this.instanceId && Math.abs(now - lease.at) < LEASE_STALE_MS) {
+      if (launch.leader) this.host.debug(`launch ${launch.id}: another Claude Code process watches it now`)
+      launch.leader = false
+      return false
+    }
+    await this.host.writeFile(path, JSON.stringify({ owner: this.instanceId, at: now })).catch(() => undefined)
+    if (!launch.leader) this.host.debug(`launch ${launch.id}: watching it (lease ${this.instanceId})`)
+    launch.leader = true
+    return true
   }
 
   private async settle(launch: LiveLaunch, record: HostResultRecord): Promise<void> {
@@ -952,6 +1142,7 @@ export class PlannotatorMod {
 
   private async forget(launch: LiveLaunch): Promise<void> {
     this.launches.delete(launch.id)
+    this.forgotten.add(launch.id)
     await this.persist()
     this.refreshStatus()
     this.stopTimerIfIdle()
@@ -966,10 +1157,39 @@ export class PlannotatorMod {
       baseUrl: bridgeBaseUrl(launch.port),
       token: launch.bridgeToken,
       turns: this.turns,
-      isLive: () => !this.disposed && this.launches.get(launch.id) === launch && !launch.settling && !launch.closedByAgent,
+      isLive: () =>
+        !this.disposed && this.launches.get(launch.id) === launch && !launch.settling && !launch.closedByAgent && launch.leader,
     })
     launch.bridge = bridge
-    void bridge.run()
+    this.host.debug(`bridge ${launch.id}: started`)
+    void bridge.run().then((end) => this.bridgeEnded(launch, bridge, end))
+  }
+
+  /**
+   * A bridge loop ended. The handle is cleared so the timer can start another:
+   * after a wait when the server stopped answering (a sleeping laptop, a
+   * paused server), never when it refused the bridge or is closing.
+   */
+  private async bridgeEnded(launch: LiveLaunch, bridge: BridgeHandle, end: BridgeEnd): Promise<void> {
+    if (launch.bridge !== bridge) return
+    launch.bridge = null
+    switch (end.reason) {
+      case 'failures': {
+        const wait =
+          end.connected || !launch.bridgeBackoffMs ? BRIDGE_RETRY_MS.first : Math.min(BRIDGE_RETRY_MS.max, launch.bridgeBackoffMs * 2)
+        launch.bridgeBackoffMs = wait
+        launch.bridgeRetryAt = (await this.host.now()) + wait
+        this.host.debug(`bridge ${launch.id}: the server stopped answering; starting again in ${wait} ms`)
+        return
+      }
+      case 'refused':
+      case 'closing':
+        launch.bridgeOff = true
+        this.host.debug(`bridge ${launch.id}: ${end.reason}${end.status ? ` (HTTP ${end.status})` : ''}; not started again`)
+        return
+      case 'ended':
+        return
+    }
   }
 
   /** A prompt entered the session (prompt.submit), from register.ts. */

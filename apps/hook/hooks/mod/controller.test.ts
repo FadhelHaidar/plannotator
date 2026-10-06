@@ -938,3 +938,236 @@ describe('the plannotator tool: several files', () => {
     expect(launches(host)[0]?.argv.slice(5)).toEqual(['plannotator', 'annotate', 'spec.md', 'notes.md'])
   })
 })
+
+describe('Ask this session survives a server that stops answering', () => {
+  const POLL = '/api/ai/bridge/poll'
+
+  /** Counts polls; while `silent`, every request fails like `$.http.fetch` timing out; otherwise a poll stays open. */
+  function pausableServer(host: FakeHost) {
+    const state = { silent: false, polls: 0 }
+    host.onFetch = (url) => {
+      if (!url.endsWith(POLL)) return { status: 200, ok: true, text: '{}' }
+      state.polls += 1
+      if (state.silent) throw new Error('The operation timed out.')
+      // A long poll the server holds open: the loop waits here.
+      return new Promise<never>(() => undefined)
+    }
+    return state
+  }
+
+  // The failure: the loop gave up after ~3 minutes of a paused server (a
+  // sleeping laptop) and nothing ever started another, so the page said the
+  // session was gone for good while decisions still arrived.
+  test('a bridge that gave up is started again after a backoff, which grows while the server stays silent', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const server = pausableServer(host)
+    server.silent = true
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.runCommand('annotate', 'notes.md')
+
+    await host.tick()
+    const firstLoop = server.polls
+    expect(firstLoop).toBe(6)
+
+    // Not again at once.
+    await host.tick()
+    expect(server.polls).toBe(firstLoop)
+
+    // 5 s later a new loop starts; still silent, so it gives up too.
+    host.clock += 5_000
+    await host.tick()
+    expect(server.polls).toBe(firstLoop * 2)
+
+    // The next wait has doubled: nothing at 5 s, a new loop at 10 s.
+    host.clock += 5_000
+    await host.tick()
+    expect(server.polls).toBe(firstLoop * 2)
+    host.clock += 5_000
+    server.silent = false
+    await host.tick()
+    // The server answers again: the new loop's poll is open, and stays the only one.
+    expect(server.polls).toBe(firstLoop * 2 + 1)
+    host.clock += 120_000
+    await host.tick()
+    expect(server.polls).toBe(firstLoop * 2 + 1)
+  })
+
+  test('a CLI without the bridge (404) is never polled again', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    let polls = 0
+    host.onFetch = (url) => {
+      if (url.endsWith(POLL)) polls += 1
+      return { status: 404, ok: false, text: '{"error":"Not found"}' }
+    }
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.runCommand('annotate', 'notes.md')
+
+    await host.tick()
+    expect(polls).toBe(1)
+    for (let index = 0; index < 5; index += 1) {
+      host.clock += 60_000
+      await host.tick()
+    }
+    expect(polls).toBe(1)
+  })
+})
+
+describe('two Claude Code processes on one session (claude --continue while the first runs)', () => {
+  /** A second process: same disk and store, its own timers, clock and instance id. */
+  function secondProcess(host: FakeHost): FakeHost {
+    const other = fakeHost()
+    other.files = host.files
+    other.store = host.store
+    other.clock = host.clock
+    other.randomHex = (bytes) => 'cd'.repeat(bytes)
+    return other
+  }
+
+  async function bothTick(a: FakeHost, b: FakeHost) {
+    await a.tick()
+    await b.tick()
+  }
+
+  // The failure: both processes delivered the decision (two turns), or the
+  // one that did not deliver showed "waiting for you" forever.
+  test('one watches and delivers; the other forgets the review quietly', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const first = new PlannotatorMod(host, SESSION)
+    await first.runCommand('annotate', 'notes.md')
+    const other = secondProcess(host)
+    const second = new PlannotatorMod(other, SESSION)
+    await second.restore()
+
+    await bothTick(host, other)
+    decide(host, launches(host)[0]!, { surface: 'annotate', decision: 'annotated', message: 'please fix', noop: false })
+    // The watcher looks first: it must not deliver.
+    await bothTick(other, host)
+    await bothTick(other, host)
+
+    expect(host.submits.filter((text) => text.includes('please fix'))).toHaveLength(1)
+    expect(other.submits).toEqual([])
+    expect(other.statuses.at(-1)).toBeUndefined()
+    expect(other.logs.filter((line) => line.includes('stopped') || line.includes('no longer running'))).toEqual([])
+  })
+
+  test('both checking the same decision at once still deliver it once', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const first = new PlannotatorMod(host, SESSION)
+    await first.runCommand('annotate', 'notes.md')
+    const other = secondProcess(host)
+    const second = new PlannotatorMod(other, SESSION)
+    await second.restore()
+
+    // No lease yet and the decision already on disk: both may take the lease; the claim decides.
+    decide(host, launches(host)[0]!, { surface: 'annotate', decision: 'annotated', message: 'please fix', noop: false })
+    await Promise.all([host.tick(), other.tick()])
+    await bothTick(host, other)
+
+    expect([...host.submits, ...other.submits].filter((text) => text.includes('please fix'))).toHaveLength(1)
+  })
+
+  test('when the watching process goes away, the other takes over and delivers', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const first = new PlannotatorMod(host, SESSION)
+    await first.runCommand('annotate', 'notes.md')
+    const other = secondProcess(host)
+    const second = new PlannotatorMod(other, SESSION)
+    await second.restore()
+    await bothTick(host, other)
+
+    // The first process is killed: no more ticks, no release. Its lease goes stale.
+    other.clock += 25_000
+    for (let index = 0; index < 5; index += 1) await other.tick()
+    decide(host, launches(host)[0]!, { surface: 'annotate', decision: 'annotated', message: 'please fix', noop: false })
+    await other.tick()
+
+    expect(other.submits.filter((text) => text.includes('please fix'))).toHaveLength(1)
+    expect(host.submits).toEqual([])
+  })
+
+  test('a process that exits hands its reviews over at once', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const first = new PlannotatorMod(host, SESSION)
+    await first.runCommand('annotate', 'notes.md')
+    const other = secondProcess(host)
+    const second = new PlannotatorMod(other, SESSION)
+    await second.restore()
+    await bothTick(host, other)
+
+    first.dispose()
+    for (let index = 0; index < 5; index += 1) await other.tick()
+    decide(host, launches(host)[0]!, { surface: 'annotate', decision: 'annotated', message: 'please fix', noop: false })
+    await other.tick()
+
+    expect(other.submits.filter((text) => text.includes('please fix'))).toHaveLength(1)
+  })
+
+  test('a review the other process launched stays in the store when this one settles its own', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const first = new PlannotatorMod(host, SESSION)
+    const other = secondProcess(host)
+    serveOnLaunch(other)
+    const second = new PlannotatorMod(other, SESSION)
+    await second.restore()
+    other.randomHex = (bytes) => 'ef'.repeat(bytes)
+    await second.runCommand('annotate', 'theirs.md')
+    await first.runCommand('annotate', 'mine.md')
+    decide(host, launches(host)[0]!, { surface: 'annotate', decision: 'annotated', message: 'done', noop: false })
+    await host.tick()
+
+    const stored = (host.store.get(STORE_LAUNCHES) as { subject: string }[]).map((record) => record.subject)
+    expect(stored).toEqual(['theirs.md'])
+  })
+})
+
+describe('stored launch records are pruned', () => {
+  test('records with nothing left are dropped at restore; live servers, pending decisions and young records stay', async () => {
+    const host = fakeHost()
+    const record = (id: string, sessionId: string, startedAt: number) => ({
+      id,
+      sessionId,
+      kind: 'annotate',
+      dir: `/data/claude-code-mod/${sessionId}/${id}`,
+      subject: `${id}.md`,
+      startedAt,
+    })
+    const old = host.clock - 10 * 60_000
+    host.store.set(STORE_LAUNCHES, [
+      record('cleaned', 'session-2', old),
+      record('dead', 'session-2', old),
+      record('live', 'session-2', old),
+      record('young', 'session-2', host.clock - 1_000),
+      record('mine', 'session-1', old),
+    ])
+    const probes: (readonly string[])[] = []
+    host.onRun = (call) => {
+      if (call.argv[3] !== 'plannotator-prune') return
+      probes.push(call.argv.slice(4))
+      return { exitCode: 0, stdout: '/data/claude-code-mod/session-2/cleaned\n/data/claude-code-mod/session-2/dead\n', stderr: '' }
+    }
+    host.files.set('/data/claude-code-mod/session-1/mine/pid', '4242\n')
+
+    await new PlannotatorMod(host, SESSION).restore()
+
+    // This session's records are pruned only when cleaned up, others' also when
+    // their server died (the script decides; launch.test.ts runs it). Young ones are not probed.
+    expect(probes).toEqual([
+      [
+        '/data/claude-code-mod/session-1/mine',
+        '--',
+        '/data/claude-code-mod/session-2/cleaned',
+        '/data/claude-code-mod/session-2/dead',
+        '/data/claude-code-mod/session-2/live',
+      ],
+    ])
+    const kept = (host.store.get(STORE_LAUNCHES) as { id: string }[]).map((entry) => entry.id)
+    expect(kept).toEqual(['live', 'young', 'mine'])
+  })
+})

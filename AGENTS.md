@@ -437,7 +437,8 @@ launch directory is `${PLANNOTATOR_DATA_DIR or ~/.plannotator}/claude-code-mod/<
 `stdin`, `ready` (`PLANNOTATOR_READY_FILE`), `result.json`
 (`PLANNOTATOR_HOST_RESULT_FILE`), `stdout`, `stderr`, `pid`, `exit` (written
 after the CLI exits), `revision.json` + `.ack` (plan revisions),
-`messages.json` (`PLANNOTATOR_HOST_MESSAGES_FILE`, `last`'s picker list) and
+`messages.json` (`PLANNOTATOR_HOST_MESSAGES_FILE`, `last`'s picker list),
+`watcher.json` and `<file>.claimed` (see "Two processes on one session" below) and
 `feedback.md` (oversized feedback). Waiting inside a hook (for the ready file, a
 revision ack) happens in a `$.process.run` shell loop (`waitForAny`), never a
 `$.clock` wait, which would spend the hook's budget and let the engine run the
@@ -446,7 +447,11 @@ call on without the mod. Once a review is open, a 1 s `$.clock.every` timer
 ("the review server stopped … your draft is saved"), and every 15 s checks the
 pid with `kill -0`. Open launches and a pending plan approval persist in
 `$.store` and reattach on `session.start` for the same session id
-(`--resume`, `--continue`, a restart). `session.start` does not fire for
+(`--resume`, `--continue`, a restart; on 2.1.290 `--continue` keeps the session
+id). The fork paths do NOT reattach: `--fork-session` and `/clear` start a new
+session id, so the reviews stay with the old id and come back only when that
+session is resumed (re-adopting them across a fork is a follow-up).
+`session.start` does not fire for
 `/clear` or an in-process resume (the process goes on under another session
 id), so `session.end` disposes the instance (timer and bridges stop; nothing is
 delivered into the next session) and the next hook that needs the mod makes a
@@ -458,6 +463,33 @@ crashed keeps its directory (its `stderr` explains why). Servers outlive Claude 
 the wrapper ignores SIGHUP and starts the CLI under `nohup` (a closing terminal
 otherwise took the server with it), so closing the terminal does not lose a
 review; verified live, `claude --continue` reattached and delivered it.
+
+*Two processes on one session.* `claude --continue` while the first process
+still runs gives two Claude Code processes the same session id, and both
+reattach the same launches. One of them watches each launch: `watcher.json` in
+the launch directory is a lease (`{ owner, at }`, the owner a random id per mod
+instance) renewed every 5 s; another process takes it over once it is 20 s old
+(`LEASE_STALE_MS`: the holder exited, slept or hung), and a disposed instance
+(`session.end`) releases it at once. Only the watcher runs the bridge (so the
+two never supersede each other) and delivers. Delivery is also claimed, so a
+lease race cannot deliver twice: before settling, the mod renames the file that
+settles the launch (`result.json`, `exit`, or `pid` for a server that died) to
+`<file>.claimed` (`claimArgv`; rename(2) in one directory has exactly one
+winner). A process that loses the claim, or finds a `.claimed` file or the
+launch's `stdin` gone (cleaned up after the other delivered), forgets the
+launch quietly, so its status line no longer says "waiting for you". A process
+restarted after a crash may wait up to 20 s for the dead holder's lease before
+delivering. `persist` keeps this session's records it does not know (the other
+process launched them) unless it settled them. At restore the stored launch
+records are pruned (`pruneArgv`, records older than a minute): any whose
+directory was cleaned up (no `stdin`), and, for other sessions, any whose
+server died without a decision (`kill -0` fails, no `result.json`, no `exit`).
+A live server, or a decision a resumed session would still deliver, keeps its
+record; this session's dead servers are left to the timer, which reports them.
+The debug log (`PLANNOTATOR_MOD_DEBUG=1`) is appended (`debugAppendArgv`,
+O_APPEND, rotated to `debug.log.1` past 1 MiB) with a per-process tag on every
+line, because rewriting the whole file from each process's own buffer clobbered
+the other's lines and left NUL bytes.
 
 **Host result file (`PLANNOTATOR_HOST_RESULT_FILE`).** New CLI side channel
 (`apps/hook/server/host-result.ts`), taken from the env at startup and scrubbed
@@ -869,8 +901,17 @@ otherwise. From the take-over on, a cancel closes only the question and an
 interrupt answers `ok: false`; Plannotator never aborts that turn. Plan review does not block the session
 under the mod, so the status is never `blocked` and plan review gets real turns
 too (verified live). Polls ask for 15 s (750 ms while our question streams, so
-deltas flush), and stop on 401/403/404/405/503 (`404` = an older CLI without
-the bridge), `closing`, or once the review settles.
+deltas flush), and stop for good on 401/403/404/405/503 (`404` = an older CLI
+without the bridge), `closing`, or once the review settles. A loop that stops
+because the server stopped answering (six failures in a row; `$.http.fetch`
+gives up after 30 s, so a sleeping laptop or a paused server gets there in
+about three minutes) is not the end: `run()` reports why it ended
+(`BridgeEnd`), the controller clears the handle, and the timer starts a new
+loop with the same token after 5 s, doubling to 60 s while the server stays
+silent (`BRIDGE_RETRY_MS`), so Ask AI comes back once the server answers again.
+A poll answered `superseded: true` (another client polled the server after us)
+waits 10-15 s before polling again, instead of taking the server back at once
+and starting a busy loop with the other client.
 
 **Tests.** Bun: `apps/hook/hooks/mod/*.test.ts` (controller flows over an
 in-memory `Host`, delivery, shell words, and `bridge.test.ts` against the REAL
