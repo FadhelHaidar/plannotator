@@ -948,6 +948,18 @@ export function resolveAgentTool(
   return parseAgentToolEnv(env) ?? parseConfigBoolean(config.agentTool) ?? AGENT_TOOL_DEFAULTS[host];
 }
 
+/**
+ * After a POST /api/config saveConfig: whether an `agentTool` change did NOT
+ * reach config.json. saveConfig logs a write failure and returns normally, so
+ * the handlers check the file and answer 500 instead of `ok`: the one-time
+ * "turn the tool on" offer and the Settings switch then report that nothing
+ * changed rather than promising the tool in the next session.
+ */
+export function agentToolSaveFailed(toSave: { agentTool?: unknown }): boolean {
+  if (typeof toSave.agentTool !== "boolean") return false;
+  return parseConfigBoolean(loadConfig().agentTool) !== toSave.agentTool;
+}
+
 /** The PLANNOTATOR_AUTO_UPDATE override, or undefined when it does not decide. */
 export function parseAutoUpdateEnv(env: NodeJS.ProcessEnv = process.env): boolean | undefined {
   const v = env.PLANNOTATOR_AUTO_UPDATE?.trim().toLowerCase();

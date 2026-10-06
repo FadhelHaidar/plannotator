@@ -21,6 +21,7 @@ import {
   resolveReviewProgress,
   resolveAgentTool,
   agentToolHostOf,
+  agentToolSaveFailed,
   AGENT_TOOL_DEFAULTS,
   resolveUseJina,
   resolveTodoProviderEnabled,
@@ -504,6 +505,24 @@ describe("getServerConfig agent tool advert", () => {
     expect(getServerConfig(null, "opencode").agentToolEnv).toBeUndefined();
     process.env.PLANNOTATOR_AGENT_TOOL = "0";
     expect(getServerConfig(null, "opencode")).toMatchObject({ agentTool: true, agentToolEnv: false, agentToolEnabled: false });
+  });
+
+  test("agentToolSaveFailed tells a write that reached config.json from one that did not", () => {
+    saveConfig({ agentTool: true });
+    expect(agentToolSaveFailed({ agentTool: true })).toBe(false);
+    expect(agentToolSaveFailed({ displayName: "x" } as { agentTool?: unknown })).toBe(false);
+    // A data dir that is a file: saveConfig logs and returns, nothing is written.
+    const blocker = join(dir, "not-a-dir");
+    writeFileSync(blocker, "");
+    process.env.PLANNOTATOR_DATA_DIR = blocker;
+    const savedWrite = process.stderr.write;
+    process.stderr.write = (() => true) as typeof process.stderr.write;
+    try {
+      saveConfig({ agentTool: true });
+    } finally {
+      process.stderr.write = savedWrite;
+    }
+    expect(agentToolSaveFailed({ agentTool: true })).toBe(true);
   });
 });
 

@@ -89,6 +89,15 @@ import {
   markAskSessionAnnouncementSeen,
 } from '@plannotator/ui/utils/askSessionAnnouncement';
 import { useFirstRunAnnouncementWindow } from '@plannotator/ui/hooks/useFirstRunAnnouncementWindow';
+import { AgentToolAnnouncementDialog } from '@plannotator/ui/components/AgentToolAnnouncementDialog';
+import {
+  agentToolAnnouncementEligible,
+  agentToolAnnouncementPendingThisLoad,
+  agentToolOfferHostOf,
+  markAgentToolAnnouncementSeen,
+} from '@plannotator/ui/utils/agentToolAnnouncement';
+import { useAgentToolSetting } from '@plannotator/ui/hooks/useAgentToolSetting';
+import { useLatchedTrue } from '@plannotator/ui/hooks/useLatchedTrue';
 import { buildDefaultPrompt, useAIChat } from '@plannotator/ui/hooks/useAIChat';
 import { getUIPreferences, type UIPreferences, type PlanWidth } from '@plannotator/ui/utils/uiPreferences';
 import { getEditorMode, saveEditorMode } from '@plannotator/ui/utils/editorMode';
@@ -805,6 +814,14 @@ const App: React.FC = () => {
   const [askSessionIntroPending, setAskSessionIntroPending] = useState(
     askSessionAnnouncementPendingThisLoad,
   );
+  // The `plannotator` agent tool switch (Settings row + one-time offer on Pi
+  // and OpenCode 2), from the server's serverConfig.
+  const agentTool = useAgentToolSetting();
+  // One-time offer to turn the agent tool on, after the terminal-tools
+  // announcement (never on the same load). Latched at mount for the same reason.
+  const [agentToolIntroPending, setAgentToolIntroPending] = useState(
+    agentToolAnnouncementPendingThisLoad,
+  );
   const isMobile = useIsMobile();
   const isBelowAgentTerminalBreakpoint = useIsMobile(AGENT_TERMINAL_LG_BREAKPOINT);
   const isCompactTouchLayout = useCompactTouchLayout();
@@ -1173,6 +1190,19 @@ const App: React.FC = () => {
     markAskSessionAnnouncementSeen();
     setAskSessionIntroPending(false);
   }, []);
+
+  const dismissAgentToolAnnouncement = useCallback(() => {
+    markAgentToolAnnouncementSeen();
+    setAgentToolIntroPending(false);
+  }, []);
+
+  // "Turn it on": the offer stays open to show the outcome, so only the
+  // cookie is written here; Done closes it.
+  const saveAgentTool = agentTool.save;
+  const turnOnAgentTool = useCallback(async () => {
+    await saveAgentTool(true);
+    markAgentToolAnnouncementSeen();
+  }, [saveAgentTool]);
 
   const dismissLookAndFeelAnnouncement = useCallback(() => {
     // Persist even when the user accepts the displayed default without first
@@ -3727,6 +3757,7 @@ const App: React.FC = () => {
         // Only the compiled CLI running the installer-managed binary offers the
         // toggle; OpenCode, Pi and dev runs send no autoUpdateSupported.
         setAutoUpdateSetting(data.autoUpdateSupported === true && typeof data.serverConfig?.autoUpdate === 'boolean' ? { env: data.serverConfig.autoUpdateEnv } : undefined);
+        agentTool.adopt(data.serverConfig);
         setAutoUpdateActive(data.autoUpdateActive === true);
         setAutoUpdateNotice(parseAutoUpdateNotice(data.autoUpdateNotice));
         if (data.mode === 'goal-setup' && data.goalSetup) {
@@ -3892,10 +3923,18 @@ const App: React.FC = () => {
     return () => stream.close();
   }, [annotateMode, isSharedSession, submitted, clientLease]);
 
+  // Which capabilities request has settled, keyed by the inputs that decide
+  // it: on the render where an input changes the key no longer matches, so
+  // nothing reads a stale "settled" (the agent tool offer waits on this to
+  // know whether the "Ask this session" announcement can still take the load).
+  const aiCapabilitiesKey = `${aiSessionEnabled}|${isApiMode}|${isSharedSession}|${origin}`;
+  const [aiCapabilitiesSettledKey, setAiCapabilitiesSettledKey] = useState<string | null>(null);
+  const aiCapabilitiesSettled = aiCapabilitiesSettledKey === aiCapabilitiesKey;
   useEffect(() => {
     if (!aiSessionEnabled || !isApiMode || isSharedSession) {
       setAiAvailable(false);
       setAiProviders([]);
+      setAiCapabilitiesSettledKey(aiCapabilitiesKey);
       return;
     }
 
@@ -3915,16 +3954,18 @@ const App: React.FC = () => {
           setAiAvailable(false);
           setAiProviders([]);
         }
+        setAiCapabilitiesSettledKey(aiCapabilitiesKey);
       })
       .catch(() => {
         if (!cancelled) {
           setAiAvailable(false);
           setAiProviders([]);
+          setAiCapabilitiesSettledKey(aiCapabilitiesKey);
         }
       });
 
     return () => { cancelled = true; };
-  }, [aiSessionEnabled, isApiMode, isSharedSession, origin]);
+  }, [aiSessionEnabled, isApiMode, isSharedSession, origin, aiCapabilitiesKey]);
 
   // Auto-save to notes apps on plan arrival (each gated by its autoSave toggle)
   const autoSaveAttempted = useRef(false);
@@ -6473,23 +6514,54 @@ const App: React.FC = () => {
   // only open before the reader starts working (useFirstRunAnnouncementWindow);
   // otherwise it waits for a later load. Same deferrals as the one above.
   const askSessionAgent = connectedAskSessionAgent(aiProviders);
+  const askSessionEligibleNow = askSessionAnnouncementEligible({
+    announcementPending: askSessionIntroPending,
+    isLoading,
+    connectedAgent: askSessionAgent,
+    askAIUsable: canUseAI && !isAgentTerminalReady,
+    readOnlySession: isSharedSession || archive.archiveMode || !isApiMode,
+    compact: isCompactTouchLayout,
+    otherFirstRunDialogVisible:
+      shouldShowLookAndFeelAnnouncement
+      || goalSetupMode
+      || showPermissionModeSetup
+      || shouldShowTerminalToolsAnnouncement,
+  });
   const showAskSessionAnnouncement = useFirstRunAnnouncementWindow({
     pending: askSessionIntroPending,
     armed: !isLoading,
-    eligible: askSessionAnnouncementEligible({
-      announcementPending: askSessionIntroPending,
+    eligible: askSessionEligibleNow,
+  });
+  const askSessionShownThisLoad = useLatchedTrue(showAskSessionAnnouncement);
+  // LAST: the one-time offer to turn the `plannotator` agent tool on (Pi and
+  // OpenCode 2, where it is off by default). It waits while the "Ask this
+  // session" announcement can still take this load (its capabilities answer
+  // is outstanding, or it is eligible), so a reader never gets both on one
+  // load; one who is never connected still gets the offer. Same deferrals and
+  // the same first-run window as the others.
+  const showAgentToolAnnouncement = useFirstRunAnnouncementWindow({
+    pending: agentToolIntroPending,
+    armed: !isLoading,
+    eligible: agentToolAnnouncementEligible({
+      announcementPending: agentToolIntroPending,
       isLoading,
-      connectedAgent: askSessionAgent,
-      askAIUsable: canUseAI && !isAgentTerminalReady,
+      setting: agentTool.setting,
       readOnlySession: isSharedSession || archive.archiveMode || !isApiMode,
       compact: isCompactTouchLayout,
       otherFirstRunDialogVisible:
         shouldShowLookAndFeelAnnouncement
         || goalSetupMode
         || showPermissionModeSetup
-        || shouldShowTerminalToolsAnnouncement,
+        || shouldShowTerminalToolsAnnouncement
+        || showAskSessionAnnouncement,
+      earlierAnnouncementMayShow:
+        askSessionShownThisLoad
+        || (askSessionIntroPending && (!aiCapabilitiesSettled || askSessionEligibleNow)),
     }),
   });
+  // Read from the host alone, not agentToolOfferApplies: once "Turn it on"
+  // succeeds the setting is on, and the open offer must stay to say so.
+  const agentToolOfferHost = agentToolOfferHostOf(agentTool.setting);
   const compactNavigatorTabs: SidebarTab[] = [
     ...(hasTocEntries ? ['toc' as const] : []),
     ...(!isHtmlSurface && activeDiffVersionInfo !== null && activeDiffVersionInfo.totalVersions > 1
@@ -6786,6 +6858,8 @@ const App: React.FC = () => {
           mobileSettingsOpen={mobileSettingsOpen}
           gitUser={gitUser}
           autoUpdateSetting={autoUpdateSetting}
+          agentToolSetting={agentTool.setting}
+          onAgentToolChange={agentTool.save}
           agentTerminalAvailable={showAgentTerminalControls}
           webmcpAvailable={webmcp.available}
           agentConnected={webmcpActivity.calls > 0}
@@ -7727,6 +7801,16 @@ const App: React.FC = () => {
             isOpen
             agent={askSessionAgent}
             onDismiss={dismissAskSessionAnnouncement}
+          />
+        )}
+
+        {/* One-time offer to turn the agent tool on (Pi, OpenCode 2), last. */}
+        {showAgentToolAnnouncement && agentToolOfferHost && (
+          <AgentToolAnnouncementDialog
+            isOpen
+            host={agentToolOfferHost}
+            onTurnOn={turnOnAgentTool}
+            onDismiss={dismissAgentToolAnnouncement}
           />
         )}
 

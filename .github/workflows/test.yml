@@ -143,6 +143,7 @@ jobs:
           packages/editor/editableDocumentsHook.test.tsx
           packages/review-editor/components/ReviewSubmissionDialog.ui.test.tsx
           packages/review-editor/App.panelView.test.tsx
+          packages/review-editor/App.agentTool.test.tsx
           packages/review-editor/App.commitsJj.test.tsx
           packages/review-editor/components/AnnotationToolbar.placement.test.tsx
           packages/review-editor/dock/panels/ReviewPROverviewPanel.ui.test.tsx
@@ -208,6 +209,8 @@ jobs:
           packages/editor/App.terminalToolsAnnouncement.test.tsx
           packages/ui/components/AskSessionAnnouncementDialog.test.tsx
           packages/editor/App.askSessionAnnouncement.test.tsx
+          packages/ui/components/AgentToolAnnouncementDialog.test.tsx
+          packages/editor/App.agentTool.test.tsx
           packages/ui/hooks/useFirstRunAnnouncementWindow.test.tsx
           packages/review-editor/components/ReviewSidebar.generalComment.test.tsx
           packages/review-editor/components/ReviewSidebar.outdated.test.tsx
@@ -265,6 +268,7 @@ jobs:
           packages/ui/components/Settings.vim.test.tsx
           packages/ui/components/Settings.annotateParity.test.tsx
           packages/ui/components/Settings.compactDisplay.test.tsx
+          packages/ui/components/Settings.agentTool.test.tsx
           packages/ui/components/AnnotationToolbar.touchTargets.test.tsx
           packages/ui/components/AnnotationToolbar.modeShortcutGuard.test.tsx
           packages/ui/components/PermissionModeSetup.mobile.test.tsx

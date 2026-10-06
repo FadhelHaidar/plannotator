@@ -43,7 +43,7 @@ import {
 } from "./storage";
 import { getRepoInfo } from "./repo";
 import { detectProjectName } from "./project";
-import { loadConfig, saveConfig, detectGitUser, getServerConfig, resolveAIEnabled, resolveFeedbackHistory } from "./config";
+import { agentToolSaveFailed, loadConfig, saveConfig, detectGitUser, getServerConfig, resolveAIEnabled, resolveFeedbackHistory } from "./config";
 import { getAutoUpdateAdvert } from "./auto-update";
 import { appendFeedbackRecord, type FeedbackDecision } from "@plannotator/shared/feedback-archive";
 import { isFaviconStyle, type FaviconStyle } from "@plannotator/shared/favicon";
@@ -87,6 +87,13 @@ export interface ServerOptions {
   plan: string;
   /** Origin identifier (e.g., "claude-code", "opencode") */
   origin: Origin;
+  /**
+   * The OpenCode host can register the `plannotator` agent tool, so the
+   * serverConfig advert names it. Set by the OpenCode 2 plugin's in-process
+   * plan review; a CLI it launches carries OPENCODE_TOOL_CAPABLE_ENV instead
+   * (packages/server/ai-runtime.ts).
+   */
+  opencodeToolCapable?: boolean;
   /** HTML content to serve for the UI */
   htmlContent: string;
   /** Current permission mode to preserve (Claude Code only) */
@@ -424,11 +431,11 @@ export async function startPlannotatorServer(
                 sharingEnabled,
                 shareBaseUrl,
                 isWSL: wslFlag,
-                serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge)),
+                serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge, options.opencodeToolCapable)),
                 ...getAutoUpdateAdvert(),
               });
             }
-            return Response.json({ plan, origin, permissionMode, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, ...(options.planRevisions ? { planRevision } : {}), projectRoot: process.cwd(), planDir: planFile?.dir, isWSL: wslFlag, serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge)), ...getAutoUpdateAdvert() });
+            return Response.json({ plan, origin, permissionMode, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, ...(options.planRevisions ? { planRevision } : {}), projectRoot: process.cwd(), planDir: planFile?.dir, isWSL: wslFlag, serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge, options.opencodeToolCapable)), ...getAutoUpdateAdvert() });
           }
 
           // API: The live plan revision (open reviews that receive revised plans)
@@ -486,6 +493,7 @@ export async function startPlannotatorServer(
               if (body.conventionalLabels !== undefined) toSave.conventionalLabels = body.conventionalLabels;
               if (body.pfmReminder !== undefined) toSave.pfmReminder = body.pfmReminder;
               if (Object.keys(toSave).length > 0) saveConfig(toSave as Parameters<typeof saveConfig>[0]);
+              if (agentToolSaveFailed(toSave)) return Response.json({ error: "Could not save the setting to config.json." }, { status: 500 });
               return Response.json({ ok: true });
             } catch {
               return Response.json({ error: "Invalid request" }, { status: 400 });

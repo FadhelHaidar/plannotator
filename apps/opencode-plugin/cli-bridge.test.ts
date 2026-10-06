@@ -151,6 +151,13 @@ process.exit(1);
     });
   });
 
+  test("marks a host that can register the plannotator tool, and only that one", () => {
+    // What lets the child's Settings offer the agent tool switch: a host
+    // without a tool domain (or OpenCode 1) must not get it.
+    expect(buildCliBridgeEnv({ toolCapable: true })).toEqual({ PLANNOTATOR_OPENCODE_TOOL_CAPABLE: "1" });
+    expect(buildCliBridgeEnv({ sharingEnabled: true })).not.toHaveProperty("PLANNOTATOR_OPENCODE_TOOL_CAPABLE");
+  });
+
   test("builds annotate CLI args without folding flags into the path", () => {
     const args = buildAnnotateCliArgs({
       filePath: "https://example.com/docs",

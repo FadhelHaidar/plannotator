@@ -1339,6 +1339,48 @@ compiled CLI, real review app) whose model calls went to a scripted local stand-
 Messages API, so the question, the Read tool call and the streamed answer are real traffic with
 scripted model text. Offline it says the video could not load; reduced motion waits on the poster.
 
+### Agent tool switch: Settings row and first-run offer
+
+The `plannotator` agent tool (off by default on Pi and OpenCode 2, on for the Claude Code mod)
+has a switch in Settings → General on plan review, annotate and code review, and a one-time
+offer on Pi and OpenCode 2. Both read `parseAgentToolSetting(serverConfig)`
+(`packages/ui/utils/agentToolSetting.ts`): present only when the server reports
+`agentToolHost` and `agentToolEnabled` (the integration that launched the server has the tool),
+so OpenCode 1, Codex, the classic hook and `@plannotator/ui` hosts (which pass neither
+`agentToolSetting` nor `onAgentToolChange` to `Settings`) get nothing. An OpenCode bridge
+alone is not enough: the plugin also reports that its host can register the tool (a
+`tool.transform` domain) as `PLANNOTATOR_OPENCODE_TOOL_CAPABLE=1` on the CLI it launches and
+`opencodeToolCapable` on its in-process plan server (`agentToolHostForServer` in
+`packages/server/ai-runtime.ts`), so an OpenCode host without the domain, or an older plugin,
+gets no switch and no offer. The row says when a change applies: the next Pi session, the next
+time Claude Code / OpenCode starts (the mod and the OpenCode plugin decide once per process).
+Writes go through
+`saveAgentToolSetting` (POST `/api/config` `{ agentTool }`, awaited, not the settings registry's
+debounced best-effort write-back); the handlers answer 500 when the value did not reach
+config.json (`agentToolSaveFailed`), and both surfaces show that. The row is locked with a note
+when `agentToolEnv` is set. One `useAgentToolSetting` per App feeds both, so a change in one
+shows in the other.
+
+The offer (`AgentToolAnnouncementDialog`, `packages/ui/utils/agentToolAnnouncement.ts`, cookie
+`plannotator-announce-agent-tool-seen`, a plain storage key for the registry-seeding reason)
+follows the announcement shell (portal, `z-[100]`, Escape / Tab wrap / focus restore, backdrop
+dismiss, capture-phase `Mod+Enter` swallow) but collects a decision. Approved design ("Loop",
+`.product/approved/agent-tool-dialog/`): a theme-token SVG of the round trip over the question
+"Do you use Plannotator as a skill?", two example requests, one line of why, the token cost,
+and the buttons "No, I’ll just use slash commands" (initial focus) and "Yes, turn it on"; change
+copy there first. The dialog cannot close while a save is in flight, a failure shows the reason
+with "Try again", success says when it starts and offers Done. Declining, Escape, the backdrop
+and a successful save write the cookie; a failed
+save does not. It shows only for a Pi / OpenCode 2 host whose next-session value is off, never
+chosen in config.json (`agentToolConfigured`), and not set by the env. Ordering: LAST in each
+app's chain, after terminal tools (latched, `agentToolAnnouncementPendingThisLoad`) and after
+"Ask this session" per load (`earlierAnnouncementMayShow`: that one was shown this load, or is
+pending and its capabilities answer is outstanding or eligible), so never two announcements on
+one load, while a reader who is never connected still gets the offer. Same deferrals as the
+others (archive, shared, no server, compact, loading) and the same
+`useFirstRunAnnouncementWindow`. Code review's destination spotlight, auto-viewed toast and
+history-shortcut guard defer behind it.
+
 ### Review drafts and PR pushes (#1590)
 
 Code-review drafts (`/api/draft`) are keyed by `contentHash(rawPatch)`, so a local review whose diff changes still starts without its old draft (unchanged, out of scope). **PR mode only** additionally stores the draft under a stable target key, `prDraftTargetKey(meta, scope)` = `pr-` + hash of platform + host + repo (`owner/repo` or GitLab `projectPath`, lower-cased) + PR number + diff scope (`layer` / `full-stack` are different patches). All of it lives in `packages/shared/review-draft.ts` (vendored to Pi); both review servers hold one `createReviewDraftSession()` and route `/api/draft`, `/api/feedback` and `/api/exit` through it (without a target key every call is the plain `draft.ts` call, including the historical always-`ok` save response).

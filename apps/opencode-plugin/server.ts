@@ -73,6 +73,7 @@ type EmbeddedRuntimeModule = {
     abortSignal?: AbortSignal;
     logReady: (url: string, isRemote: boolean, port: number) => void;
     sessionBridge?: SessionBridge;
+    opencodeToolCapable?: boolean;
   }) => Promise<OpenCodePlanReviewResult>;
 };
 
@@ -111,10 +112,17 @@ const serverPlugin = {
     // Every review this plugin opens, per OpenCode session: the `plannotator`
     // tool's list/close read it, and the slash commands record theirs too.
     const launches = new OpenCodeLaunchRegistry();
+    // OpenCode 1.18 also runs this setup, with its Promise-plugin context that
+    // has no `session` or `tool` domain (and posts no notices). Every use of
+    // those domains is probed, so setup completes there instead of throwing.
+    const hasSessionHooks = typeof (ctx.session as { hook?: unknown } | undefined)?.hook === "function";
+    const hasToolTransform = typeof (ctx.tool as { transform?: unknown } | undefined)?.transform === "function";
     const nativeDeps: NativeCommandDeps = {
       ctx: v2,
       getAgents,
-      getBridgeContext: () => getBridgeContext(getAgents),
+      // Whether this host could register the `plannotator` tool rides along,
+      // so the reviews it opens offer the tool's switch only where it exists.
+      getBridgeContext: () => getBridgeContext(getAgents, hasToolTransform),
       launches,
     };
     try {
@@ -122,12 +130,6 @@ const serverPlugin = {
     } catch (error) {
       console.error(`[Plannotator] Could not register the OpenCode 2 slash commands: ${error instanceof Error ? error.message : String(error)}`);
     }
-
-    // OpenCode 1.18 also runs this setup, with its Promise-plugin context that
-    // has no `session` or `tool` domain (and posts no notices). Every use of
-    // those domains is probed, so setup completes there instead of throwing.
-    const hasSessionHooks = typeof (ctx.session as { hook?: unknown } | undefined)?.hook === "function";
-    const hasToolTransform = typeof (ctx.tool as { transform?: unknown } | undefined)?.transform === "function";
 
     // The session-URL notice is for the person, never the model: once promoted
     // it could land after a plan decision's tool result and be answered
@@ -279,7 +281,7 @@ const serverPlugin = {
         execute: async (input, toolContext) => {
           const session = await ctx.session.get({ sessionID: toolContext.sessionID });
           const directory = session.location.directory;
-          const bridge = await getBridgeContext(getAgents);
+          const bridge = await getBridgeContext(getAgents, hasToolTransform);
           // Same client the native command path uses, and for the same reason:
           // `sessionID` is what lets the session URL reach a remote reviewer, who
           // gets no browser opened and cannot see the plugin's console output.
@@ -376,12 +378,15 @@ function allowSubagents(): boolean {
 
 async function getBridgeContext(
   getAgents: () => Promise<OpenCodeBridgeAgent[]>,
+  /** The host has a tool domain, so it can register the `plannotator` tool. */
+  toolCapable: boolean,
 ): Promise<OpenCodeBridgeContext> {
   return {
     sharingEnabled: resolveSharingEnabled(loadConfig()),
     shareBaseUrl: process.env.PLANNOTATOR_SHARE_URL || undefined,
     pasteApiUrl: process.env.PLANNOTATOR_PASTE_URL || undefined,
     agents: await getAgents(),
+    ...(toolCapable ? { toolCapable: true } : {}),
   };
 }
 
@@ -482,6 +487,7 @@ async function runPlanReview(input: {
         abortSignal: input.abortSignal,
         logReady: createPlanReadyNotifier(input.client, input.launch?.observer.onServer),
         sessionBridge: input.sessionBridge,
+        ...(input.bridge.toolCapable ? { opencodeToolCapable: true } : {}),
       });
     } catch (error) {
       if (input.runtime === "embedded") throw error;

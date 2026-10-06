@@ -13,6 +13,7 @@ export {
   resolveGitRemoteCheck,
   parseReviewAnalysisConfig,
   isAgentTerminalSide,
+  agentToolSaveFailed,
   type PlannotatorConfig,
   type DiffOptions,
 } from "@plannotator/shared/config";

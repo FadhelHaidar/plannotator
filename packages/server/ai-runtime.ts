@@ -86,12 +86,30 @@ export function launchingSessionHost(): SessionBridgeHost | undefined {
 }
 
 /**
+ * Set to "1" by the OpenCode 2 plugin on the CLI it launches when its host can
+ * register the `plannotator` tool (a `tool.transform` domain). An OpenCode
+ * plugin also bridges sessions where it cannot register the tool (a host
+ * without the domain, or a plugin release from before the tool), so the
+ * opencode advert needs this positive capability; without it the session
+ * reports no tool host and the UI offers no switch for a tool that cannot
+ * exist there.
+ */
+export const OPENCODE_TOOL_CAPABLE_ENV = "PLANNOTATOR_OPENCODE_TOOL_CAPABLE";
+
+/**
  * The host the `plannotator` agent tool advert describes for a server: its
  * in-process bridge's host (OpenCode 2's embedded plan review), else the host
- * that launched the process. Only those integrations register the tool.
+ * that launched the process. Only those integrations register the tool, and an
+ * OpenCode host only when it says it can (`opencodeToolCapable`, the plugin's
+ * in-process plan server; else OPENCODE_TOOL_CAPABLE_ENV on the CLI).
  */
-export function agentToolHostForServer(sessionBridge?: { host: SessionBridgeHost } | null): SessionBridgeHost | undefined {
-  return sessionBridge?.host ?? launchingSessionHost();
+export function agentToolHostForServer(
+  sessionBridge?: { host: SessionBridgeHost } | null,
+  opencodeToolCapable?: boolean,
+): SessionBridgeHost | undefined {
+  const host = sessionBridge?.host ?? launchingSessionHost();
+  if (host === "opencode" && !(opencodeToolCapable ?? process.env[OPENCODE_TOOL_CAPABLE_ENV] === "1")) return undefined;
+  return host;
 }
 
 /**
