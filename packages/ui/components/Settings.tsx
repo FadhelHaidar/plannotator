@@ -7,6 +7,12 @@ import type { TokenHoverDelay } from '@plannotator/core/token-hover';
 import { configStore, useConfigValue, setReviewPanelView, setReviewDefaultDiffType, setReviewAutoViewed } from '../config';
 import { setWebMcpToolsEnabled, useWebMcpToolsEnabled } from '../webmcp/preference';
 import { DIAGRAM_SHADOW_OPTIONS } from '../utils/diagramShadow';
+import {
+  agentToolAppliesWhen,
+  agentToolCostNote,
+  agentToolHostName,
+  type AgentToolSetting,
+} from '../utils/agentToolSetting';
 import { loadDiffFont } from '../utils/diffFonts';
 import { TaterSpritePullup } from './TaterSpritePullup';
 import { getIdentity, regenerateIdentity, setCustomIdentity, isIdentityEditable } from '../utils/identity';
@@ -106,6 +112,14 @@ interface SettingsProps {
    *  `env` is PLANNOTATOR_AUTO_UPDATE when it overrides the config file.
    *  Hosts that omit it get no toggle. */
   autoUpdateSetting?: { env?: boolean };
+  /** The `plannotator` agent tool switch, as the server reports it
+   *  (parseAgentToolSetting of serverConfig: present only when the session's
+   *  host registers the tool). Shown only together with onAgentToolChange;
+   *  hosts that omit them get no row. */
+  agentToolSetting?: AgentToolSetting;
+  /** Saves the agent tool switch (saveAgentToolSetting); rejects with a
+   *  readable Error, which the row shows. */
+  onAgentToolChange?: (enabled: boolean) => Promise<void>;
   /** Current session is a local git review where since-base ISN'T offered
    *  (base ref unresolvable) — the Git tab shows a note that the Git-status
    *  preference can't take effect in THIS repo. */
@@ -265,6 +279,53 @@ function ToggleSwitch({ checked, onChange, label, description, disabled = false 
           }`}
         />
       </button>
+    </div>
+  );
+}
+
+/**
+ * The `plannotator` agent tool switch. The value is the one the NEXT session
+ * uses (the tool list is part of the model's prompt, so a running session
+ * never changes it). Writes go straight to POST /api/config and wait for the
+ * answer, so a failed save is reported and the switch stays where it was.
+ */
+function AgentToolSettingRow({ setting, onChange }: {
+  readonly setting: AgentToolSetting;
+  readonly onChange: (enabled: boolean) => Promise<void>;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const locked = setting.env !== undefined;
+  const change = async (next: boolean) => {
+    if (saving || locked) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await onChange(next);
+    } catch (e) {
+      setError(e instanceof Error && e.message ? e.message : 'Could not save the setting.');
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div data-agent-tool-setting={setting.host} aria-busy={saving}>
+      <ToggleSwitch
+        checked={setting.enabled}
+        onChange={(next) => void change(next)}
+        disabled={locked}
+        label="Let the agent open reviews (plannotator tool)"
+        description={
+          locked
+            ? `Set by PLANNOTATOR_AGENT_TOOL in your environment, so it is ${setting.enabled ? 'on' : 'off'} here.`
+            : `${agentToolHostName(setting.host)} can open reviews itself and keep working. ${agentToolCostNote(setting.host)} Applies from ${agentToolAppliesWhen(setting.host)}.`
+        }
+      />
+      {error && (
+        <p role="alert" data-agent-tool-setting-error className="mt-1 text-xs text-destructive">
+          {error}
+        </p>
+      )}
     </div>
   );
 }
@@ -941,7 +1002,7 @@ const CommentsTab: React.FC = () => {
   );
 };
 
-export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', annotateParity = false, onUIPreferencesChange, externalOpen, onExternalClose, aiProviders = [], gitUser, autoUpdateSetting, sinceBaseUnavailable, isCompactTouchLayout = false, onDetectObsidianVaults, agentTerminalAvailable = false, webmcpAvailable = false }) => {
+export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', annotateParity = false, onUIPreferencesChange, externalOpen, onExternalClose, aiProviders = [], gitUser, autoUpdateSetting, agentToolSetting, onAgentToolChange, sinceBaseUnavailable, isCompactTouchLayout = false, onDetectObsidianVaults, agentTerminalAvailable = false, webmcpAvailable = false }) => {
   const webmcpTools = useWebMcpToolsEnabled();
   const autoUpdate = useConfigValue('autoUpdate');
   const [showDialog, setShowDialog] = useState(false);
@@ -1400,6 +1461,17 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
                               : 'Installs new releases in the background, at most once a day, never while another review is open.'
                           }
                         />
+                      </>
+                    )}
+
+                    {/* The `plannotator` agent tool switch: only where the
+                        server reports a tool host (Claude Code mod, Pi,
+                        OpenCode 2). Writes agentTool to config.json; applies
+                        to the next session. */}
+                    {agentToolSetting && onAgentToolChange && (
+                      <>
+                        <div className="border-t border-border" />
+                        <AgentToolSettingRow setting={agentToolSetting} onChange={onAgentToolChange} />
                       </>
                     )}
 

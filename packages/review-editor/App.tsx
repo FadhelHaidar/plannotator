@@ -65,6 +65,15 @@ import {
   markAskSessionAnnouncementSeen,
 } from '@plannotator/ui/utils/askSessionAnnouncement';
 import { useFirstRunAnnouncementWindow } from '@plannotator/ui/hooks/useFirstRunAnnouncementWindow';
+import { AgentToolAnnouncementDialog } from '@plannotator/ui/components/AgentToolAnnouncementDialog';
+import {
+  agentToolAnnouncementEligible,
+  agentToolAnnouncementPendingThisLoad,
+  agentToolOfferHostOf,
+  markAgentToolAnnouncementSeen,
+} from '@plannotator/ui/utils/agentToolAnnouncement';
+import { useAgentToolSetting } from '@plannotator/ui/hooks/useAgentToolSetting';
+import { useLatchedTrue } from '@plannotator/ui/hooks/useLatchedTrue';
 import { CodeAnnotation, CodeAnnotationType, SelectedLineRange, TokenAnnotationMeta, ConventionalLabel, ConventionalDecoration, Annotation, CommentAnnotation, AgentJobInfo, type ArtifactAnnotationMeta, type CallFlowAnnotationTarget } from '@plannotator/ui/types';
 import type { CommentAskAIHandler } from '@plannotator/ui/components/CommentPopover';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
@@ -1266,6 +1275,25 @@ const ReviewApp: React.FC = () => {
     markAskSessionAnnouncementSeen();
     setAskSessionIntroPending(false);
   }, []);
+  // The `plannotator` agent tool switch (Settings row + the one-time offer on
+  // Pi and OpenCode 2), from the server's serverConfig.
+  const agentTool = useAgentToolSetting();
+  // One-time offer to turn the agent tool on, after the terminal-tools
+  // announcement (never on the same load). Latched at mount for the same reason.
+  const [agentToolIntroPending, setAgentToolIntroPending] = useState(
+    agentToolAnnouncementPendingThisLoad,
+  );
+  const dismissAgentToolIntro = useCallback(() => {
+    markAgentToolAnnouncementSeen();
+    setAgentToolIntroPending(false);
+  }, []);
+  // "Turn it on": the offer stays open to show the outcome, so only the
+  // cookie is written here; Done closes it.
+  const saveAgentTool = agentTool.save;
+  const turnOnAgentTool = useCallback(async () => {
+    await saveAgentTool(true);
+    markAgentToolAnnouncementSeen();
+  }, [saveAgentTool]);
   const aiChat = useAIChat({
     patch: diffData?.rawPatch ?? '',
     diffType,
@@ -1372,14 +1400,22 @@ const ReviewApp: React.FC = () => {
     }
   }, [closeTokenHover, codeNav.resolve, dockApi, isAllFilesActive, isCallFlowActive, isSemanticDiffActive, gitContext, agentCwd]);
 
+  // Which capabilities request has settled, keyed by its input: on the render
+  // where aiUIEnabled changes the key no longer matches, so nothing reads a
+  // stale "settled" (the agent tool offer waits on this to know whether the
+  // "Ask this session" announcement can still take the load).
+  const [aiCapabilitiesSettledFor, setAiCapabilitiesSettledFor] = useState<boolean | null>(null);
+  const aiCapabilitiesSettled = aiCapabilitiesSettledFor === aiUIEnabled;
   // Check AI capabilities only after /api/diff confirms AI is enabled.
   useEffect(() => {
     if (!aiUIEnabled) {
       setAiAvailable(false);
       setAiProviders([]);
       setAiDefaultProvider(null);
+      setAiCapabilitiesSettledFor(false);
       return;
     }
+    let cancelled = false;
     fetch('/api/ai/capabilities')
       .then(r => r.ok ? r.json() : null)
       .then(data => {
@@ -1390,7 +1426,11 @@ const ReviewApp: React.FC = () => {
           setAiDefaultProvider(data.defaultProvider ?? null);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setAiCapabilitiesSettledFor(true);
+      });
+    return () => { cancelled = true; };
   }, [aiUIEnabled]);
 
   // Provider/model/effort selection logic lives in the shared hook above; the
@@ -1734,14 +1774,38 @@ const ReviewApp: React.FC = () => {
   // button is there. It may only open before the reviewer starts working
   // (useFirstRunAnnouncementWindow); otherwise it waits for a later load.
   const askSessionAgent = connectedAskSessionAgent(aiProviders);
+  const askSessionEligibleNow = askSessionAnnouncementEligible({
+    announcementPending: askSessionIntroPending,
+    isLoading,
+    connectedAgent: askSessionAgent,
+    askAIUsable: aiAvailable,
+    readOnlySession: false,
+    compact: isCompactTouchLayout,
+    otherFirstRunDialogVisible:
+      guideIntroVisible
+      || showLookAndFeel
+      || editModeIntroVisible
+      || tokenHoverIntroVisible
+      || terminalToolsIntroVisible,
+  });
   const askSessionIntroVisible = useFirstRunAnnouncementWindow({
     pending: askSessionIntroPending,
     armed: !isLoading,
-    eligible: askSessionAnnouncementEligible({
-      announcementPending: askSessionIntroPending,
+    eligible: askSessionEligibleNow,
+  });
+  const askSessionShownThisLoad = useLatchedTrue(askSessionIntroVisible);
+  // LAST: the one-time offer to turn the `plannotator` agent tool on (Pi and
+  // OpenCode 2, where it is off by default). It waits while the "Ask this
+  // session" announcement can still take this load (its capabilities answer
+  // is outstanding, or it is eligible), so a reviewer never gets both on one
+  // load; one who is never connected still gets the offer.
+  const agentToolIntroVisible = useFirstRunAnnouncementWindow({
+    pending: agentToolIntroPending,
+    armed: !isLoading,
+    eligible: agentToolAnnouncementEligible({
+      announcementPending: agentToolIntroPending,
       isLoading,
-      connectedAgent: askSessionAgent,
-      askAIUsable: aiAvailable,
+      setting: agentTool.setting,
       readOnlySession: false,
       compact: isCompactTouchLayout,
       otherFirstRunDialogVisible:
@@ -1749,9 +1813,16 @@ const ReviewApp: React.FC = () => {
         || showLookAndFeel
         || editModeIntroVisible
         || tokenHoverIntroVisible
-        || terminalToolsIntroVisible,
+        || terminalToolsIntroVisible
+        || askSessionIntroVisible,
+      earlierAnnouncementMayShow:
+        askSessionShownThisLoad
+        || (askSessionIntroPending && (!aiCapabilitiesSettled || askSessionEligibleNow)),
     }),
   });
+  // Read from the host alone: once "Turn it on" succeeds the setting is on,
+  // and the open offer must stay to say so.
+  const agentToolOfferHost = agentToolOfferHostOf(agentTool.setting);
   const hoveredTokenSymbol = tokenHover.hover?.request.symbol;
   const startTokenHover = tokenHover.onTokenHoverEnter;
   // Stitching lives here, not in the diff views: rebuilding a fragmented
@@ -2258,6 +2329,7 @@ const ReviewApp: React.FC = () => {
         // Only the compiled CLI running the installer-managed binary offers the
         // toggle; OpenCode, Pi and dev runs send no autoUpdateSupported.
         setAutoUpdateSetting(data.autoUpdateSupported === true && typeof data.serverConfig?.autoUpdate === 'boolean' ? { env: data.serverConfig.autoUpdateEnv } : undefined);
+        agentTool.adopt(data.serverConfig);
         setAutoUpdateActive(data.autoUpdateActive === true);
         setAutoUpdateNotice(parseAutoUpdateNotice(data.autoUpdateNotice));
         setSnapshotId(data.snapshotId);
@@ -2720,7 +2792,7 @@ const ReviewApp: React.FC = () => {
     // (not lost) behind the guide takeover or a first-run dialog — the file
     // still marks and the next auto-view retries the toast.
     if (!needsAutoViewedNotice()) return;
-    if (guideOpen || guideIntroVisible || showLookAndFeel || editModeIntroVisible || tokenHoverIntroVisible || terminalToolsIntroVisible || askSessionIntroVisible) return;
+    if (guideOpen || guideIntroVisible || showLookAndFeel || editModeIntroVisible || tokenHoverIntroVisible || terminalToolsIntroVisible || askSessionIntroVisible || agentToolIntroVisible) return;
     markAutoViewedNoticeSeen();
     toast('Files are marked viewed as you scroll', {
       description: "Scroll past a file or move on to the next and it's checked off. Turn this off in Settings → Git, or from the gear above the file list.",
@@ -2740,7 +2812,7 @@ const ReviewApp: React.FC = () => {
         },
       },
     });
-  }, [guideOpen, guideIntroVisible, showLookAndFeel, editModeIntroVisible, tokenHoverIntroVisible, terminalToolsIntroVisible, askSessionIntroVisible]);
+  }, [guideOpen, guideIntroVisible, showLookAndFeel, editModeIntroVisible, tokenHoverIntroVisible, terminalToolsIntroVisible, askSessionIntroVisible, agentToolIntroVisible]);
   const { handleReadingFileChange: handleAutoViewReadingFile, handleFileScrolledPast } = useAutoViewed({
     enabled: autoViewedEnabled,
     // Rule 4 — only the review target. The guide takeover CSS-hides the dock
@@ -4487,7 +4559,7 @@ const ReviewApp: React.FC = () => {
     if (event.defaultPrevented || isNativeHistoryOwner(event)) return false;
     if (submitted || isSendingFeedback || isApproving || isExiting || isPlatformActioning || isLoadingDiff) return false;
     if (guideOpen || openSettingsMenu || showDestinationMenu || platformCommentDialog || showExportModal || showWorktreeDialog || showNoAnnotationsDialog || showExitWarning) return false;
-    if (showLookAndFeel || showGuideIntro || editModeIntroVisible || tokenHoverIntroVisible || terminalToolsIntroVisible || askSessionIntroVisible || tourDialogJobId) return false;
+    if (showLookAndFeel || showGuideIntro || editModeIntroVisible || tokenHoverIntroVisible || terminalToolsIntroVisible || askSessionIntroVisible || agentToolIntroVisible || tourDialogJobId) return false;
     return !hasActiveHistoryOverlay(document);
   }, [
     guideOpen,
@@ -4500,6 +4572,7 @@ const ReviewApp: React.FC = () => {
     tokenHoverIntroVisible,
     terminalToolsIntroVisible,
     askSessionIntroVisible,
+    agentToolIntroVisible,
     openSettingsMenu,
     platformCommentDialog,
     showDestinationMenu,
@@ -5749,6 +5822,8 @@ const ReviewApp: React.FC = () => {
             aiProviders={aiProviders}
             gitUser={gitUser}
             autoUpdateSetting={autoUpdateSetting}
+            agentToolSetting={agentTool.setting}
+            onAgentToolChange={agentTool.save}
             externalOpen={openSettingsMenu}
             onExternalClose={() => setOpenSettingsMenu(false)}
             // Local git session where since-base isn't offered (base ref
@@ -5917,12 +5992,23 @@ const ReviewApp: React.FC = () => {
           />
         )}
 
+        {/* One-time offer to turn the agent tool on (Pi, OpenCode 2). LAST in
+            the dialog chain, never on the same load as another announcement. */}
+        {agentToolIntroVisible && agentToolOfferHost && (
+          <AgentToolAnnouncementDialog
+            isOpen
+            host={agentToolOfferHost}
+            onTurnOn={turnOnAgentTool}
+            onDismiss={dismissAgentToolIntro}
+          />
+        )}
+
         {/* One-time PR feedback-destination spotlight. Strictly AFTER the
             first-run dialog chain (guide intro → look-and-feel → edit mode →
-            token hover → terminal tools → Ask this session): it only mounts
-            once none of the six is showing, so it never stacks with them. PR mode only — the
+            token hover → terminal tools → Ask this session → agent tool offer): it
+            only mounts once none of the seven is showing, so it never stacks with them. PR mode only — the
             switcher it points at doesn't render otherwise. */}
-        {showDestSpotlight && !isCompactTouchLayout && !!prMetadata && !isLoading && !showLookAndFeel && !guideIntroVisible && !editModeIntroVisible && !tokenHoverIntroVisible && !terminalToolsIntroVisible && !askSessionIntroVisible && (
+        {showDestSpotlight && !isCompactTouchLayout && !!prMetadata && !isLoading && !showLookAndFeel && !guideIntroVisible && !editModeIntroVisible && !tokenHoverIntroVisible && !terminalToolsIntroVisible && !askSessionIntroVisible && !agentToolIntroVisible && (
           <DestinationSpotlight
             targetRef={destToggleRef}
             platformLabel={platformLabel}

@@ -11,6 +11,7 @@ import { Settings } from '@plannotator/ui/components/Settings';
 import { PlanHeaderMenu } from '@plannotator/ui/components/PlanHeaderMenu';
 import type { CallbackConfig } from '@plannotator/ui/utils/callback';
 import type { UIPreferences } from '@plannotator/ui/utils/uiPreferences';
+import type { AgentToolSetting } from '@plannotator/ui/utils/agentToolSetting';
 import { SparklesIcon } from '@plannotator/ui/components/SparklesIcon';
 import type { CompactPlanAction } from '@plannotator/ui/components/PlanHeaderMenu';
 import { HtmlSurfaceControls } from '@plannotator/ui/components/HtmlSurfaceControls';
@@ -109,6 +110,11 @@ interface AppHeaderProps {
   taterMode: boolean;
   mobileSettingsOpen: boolean;
   gitUser: string | undefined;
+  /** Present when the server advertises the auto-update setting; Settings shows its switch. */
+  autoUpdateSetting?: { env?: boolean };
+  /** The `plannotator` agent tool switch (parseAgentToolSetting of serverConfig); Settings shows its row. */
+  agentToolSetting?: AgentToolSetting;
+  onAgentToolChange?: (enabled: boolean) => Promise<void>;
   /** This session offers the Agent TUI, so Settings shows its Position row. */
   agentTerminalAvailable: boolean;
   /** The browser exposes WebMCP, so Settings shows the "Agent tools" opt-out.
@@ -204,6 +210,9 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   taterMode,
   mobileSettingsOpen,
   gitUser,
+  autoUpdateSetting,
+  agentToolSetting,
+  onAgentToolChange,
   agentTerminalAvailable,
   webmcpAvailable = false,
   agentConnected = false,
@@ -496,6 +505,9 @@ export const AppHeader = React.memo<AppHeaderProps>(({
             externalOpen={mobileSettingsOpen}
             onExternalClose={onCloseSettings}
             gitUser={gitUser}
+            autoUpdateSetting={autoUpdateSetting}
+            agentToolSetting={agentToolSetting}
+            onAgentToolChange={onAgentToolChange}
             agentTerminalAvailable={agentTerminalAvailable}
             webmcpAvailable={webmcpAvailable}
           />
