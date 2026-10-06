@@ -21,6 +21,7 @@ import {
   isSeveralFilePaths,
   launchArgv,
   launchDirOf,
+  modTargetFor,
   openedText,
   parseReadyFile,
   pickerFile,
@@ -51,6 +52,8 @@ import {
 import {
   isOlderCliBundleRefusal,
   parsePlannotatorToolInput,
+  plannotatorDistinctSubjects,
+  plannotatorSameTarget,
   plannotatorBundleSubject,
   plannotatorSessionId,
   plannotatorToolArgs,
@@ -64,6 +67,7 @@ import {
   scriptOnlyAnnotateFlagText,
   type PlannotatorCloseOutcome,
   type PlannotatorSessionSummary,
+  type PlannotatorTarget,
 } from './tool'
 import { TurnTracker, type EnteredPrompt } from './turns'
 
@@ -73,7 +77,18 @@ export interface LaunchRecord {
   sessionId: string
   kind: SessionKind
   dir: string
+  /** How the launch is named now: `baseSubject`, told apart from same-named open launches. */
   subject: string
+  /** The subject before same-named launches were told apart (`plannotatorDistinctSubjects`). */
+  baseSubject?: string
+  /**
+   * What the launch shows, in full. From the ready file when the CLI names it
+   * (`targetFromServer`), else the mod's own resolution of the words: the
+   * fallback a decision from an older CLI (no `target` in its record) is named by.
+   */
+  target?: string | string[]
+  /** `target` came from the server's ready file, not the mod's guess. */
+  targetFromServer?: boolean
   startedAt: number
   url?: string
   port?: number
@@ -209,6 +224,7 @@ export class PlannotatorMod {
     const records = Array.isArray(stored) ? (stored as LaunchRecord[]) : []
     const mine = records.filter((record) => record && record.sessionId === this.session.sessionId && typeof record.dir === 'string')
     for (const record of mine) this.adopt(record)
+    this.refreshSubjects()
     const approvals = await this.host.storeGet(STORE_APPROVALS)
     const approval = approvals && typeof approvals === 'object' ? (approvals as Record<string, PendingApproval>)[this.session.sessionId] : undefined
     if (approval && typeof approval.hash === 'string') this.approval = approval
@@ -305,10 +321,14 @@ export class PlannotatorMod {
     const id = await this.newLaunchId()
     const dir = launchDirOf(this.session.dataDir, this.session.sessionId, id)
     const bridgeToken = this.host.randomHex(32)
+    let cwd: string | undefined
     try {
       // Owner-only before anything lands in it (stdin holds the plan or message).
       const made = await this.host.run(privateDirArgv(dir), { timeoutMs: 5_000 })
       if (made.exitCode !== 0) return { error: made.stderr.trim() || `could not create ${dir}` }
+      // The session's working directory (the CLI runs there too): what the
+      // mod's fallback target resolves relative words against.
+      cwd = made.stdout.trim().split('\n').pop()?.trim() || undefined
       await this.host.writeFile(fileIn(dir, 'stdin'), typeof stdin === 'function' ? stdin(dir) : stdin)
       // `last`'s picker list. A CLI that predates the variable ignores it and
       // opens the newest message from stdin, as before.
@@ -321,6 +341,8 @@ export class PlannotatorMod {
           PLANNOTATOR_SESSION_BRIDGE_TOKEN: bridgeToken,
           PLANNOTATOR_SESSION_BRIDGE_HOST: BRIDGE_HOST,
           PLANNOTATOR_SESSION_BRIDGE_MODES: BRIDGE_MODES,
+          // The review's pn- id, for the `sessions/` registry (`plannotator sessions`).
+          PLANNOTATOR_HOST_REVIEW_ID: sessionIdOf({ id }),
         },
         timeoutMs: 15_000,
       })
@@ -328,8 +350,21 @@ export class PlannotatorMod {
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) }
     }
-    const record: LaunchRecord = { id, sessionId: this.session.sessionId, kind, dir, subject, startedAt: await this.host.now(), bridgeToken, ...extra }
+    const target = extra.target ?? modTargetFor(kind, cliArgv.slice(2), cwd)
+    const record: LaunchRecord = {
+      id,
+      sessionId: this.session.sessionId,
+      kind,
+      dir,
+      subject,
+      baseSubject: subject,
+      startedAt: await this.host.now(),
+      bridgeToken,
+      ...extra,
+      ...(target !== undefined ? { target } : {}),
+    }
     const live = this.adopt(record)
+    this.refreshSubjects()
     this.host.debug(`launched ${kind} ${id}: ${cliArgv.join(' ')}`)
     await this.persist()
     this.ensureTimer()
@@ -375,6 +410,15 @@ export class PlannotatorMod {
     if (!ready) return false
     launch.url = ready.url
     launch.port = ready.port
+    if (ready.target !== undefined) {
+      // The server's own answer: it may have found a bare name elsewhere in the project.
+      if (launch.target !== undefined && !plannotatorSameTarget(launch.target, ready.target)) {
+        this.host.debug(`ready ${launch.id}: the server opened ${JSON.stringify(ready.target)}, not ${JSON.stringify(launch.target)}`)
+      }
+      launch.target = ready.target
+      launch.targetFromServer = true
+      this.refreshSubjects()
+    }
     await this.persist()
     this.refreshStatus()
     return true
@@ -459,9 +503,9 @@ export class PlannotatorMod {
         if (bundle && isOlderCliBundleRefusal(opened.text)) return { deny: PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT }
         return { deny: opened.text }
       case 'starting':
-        return { text: plannotatorToolOpenedText(opened.subject, undefined, gate, opened.sessionId) }
+        return { text: plannotatorToolOpenedText(opened.subject, undefined, gate, opened.sessionId, opened.target) }
       case 'ready':
-        return { text: plannotatorToolOpenedText(opened.subject, opened.url, gate, opened.sessionId) }
+        return { text: plannotatorToolOpenedText(opened.subject, opened.url, gate, opened.sessionId, opened.target) }
     }
   }
 
@@ -635,8 +679,8 @@ export class PlannotatorMod {
     record: Partial<LaunchRecord> = {},
   ): Promise<
     | { state: 'error'; text: string }
-    | { state: 'starting'; subject: string; sessionId: string }
-    | { state: 'ready'; subject: string; url: string; sessionId: string; extra?: string }
+    | { state: 'starting'; subject: string; sessionId: string; target?: PlannotatorTarget }
+    | { state: 'ready'; subject: string; url: string; sessionId: string; extra?: string; target?: PlannotatorTarget }
   > {
     if (kind === 'annotate') {
       // Strict gates and --hook answer on the CLI's exit code, stdout or result
@@ -669,8 +713,10 @@ export class PlannotatorMod {
     const outcome = await this.awaitReady(started, kind === 'review' ? READY_WAIT_MS.review : READY_WAIT_MS.other)
     if (outcome === 'exited') return { state: 'error', text: await this.startupFailure(started) }
     const sessionId = sessionIdOf(started)
-    if (outcome === 'timeout') return { state: 'starting', subject, sessionId }
-    return { state: 'ready', subject, url: started.url as string, sessionId, ...(extra ? { extra } : {}) }
+    // The launch's subject, told apart from a same-named open review, and its full target.
+    const named = { subject: started.subject, ...(started.target !== undefined ? { target: started.target } : {}) }
+    if (outcome === 'timeout') return { state: 'starting', sessionId, ...named }
+    return { state: 'ready', url: started.url as string, sessionId, ...named, ...(extra ? { extra } : {}) }
   }
 
   // --- Plan review -------------------------------------------------------------
@@ -733,7 +779,11 @@ export class PlannotatorMod {
     const version = this.planVersion + 1
     const subject = subjectFor('plan', '', version)
     const stdin = (dir: string) => JSON.stringify({ plan, planFilePath, revisionFile: fileIn(dir, 'revision') })
-    const started = await this.launch('plan', ['plannotator', 'claude-mod-plan'], subject, stdin, { version, revisionSeq: 0 })
+    const started = await this.launch('plan', ['plannotator', 'claude-mod-plan'], subject, stdin, {
+      version,
+      revisionSeq: 0,
+      ...(planFilePath ? { target: planFilePath } : {}),
+    })
     if ('error' in started) {
       // Fall back to Claude Code's own flow (and the classic hook) rather than strand the plan.
       this.host.log(`Could not open the plan review (${started.error}).`)
@@ -773,6 +823,8 @@ export class PlannotatorMod {
             this.planVersion = version
             open.version = version
             open.subject = subjectFor('plan', '', version)
+            open.baseSubject = open.subject
+            this.refreshSubjects()
             await this.persist()
             this.refreshStatus()
             this.host.toast(`Plan v${version} replaced v${version - 1} in the open tab`)
@@ -924,12 +976,21 @@ export class PlannotatorMod {
       }
       await this.persistApproval()
     }
+    if (record.target !== undefined && launch.target !== undefined && !plannotatorSameTarget(record.target, launch.target)) {
+      // The decision's own server names the target, and its message says so.
+      // A difference means the mod's idea of this review was wrong: say it.
+      const text = (target: PlannotatorTarget) => (typeof target === 'string' ? target : target.join(', '))
+      this.host.log(
+        `The decision for ${launch.subject} (${sessionIdOf(launch)}) is about ${text(record.target)}, not ${text(launch.target)} as recorded when it opened. The message to Claude names ${text(record.target)}.`,
+      )
+    }
     await this.forget(launch)
     const delivery = deliveryFor(record, {
       subject: launch.subject,
       sessionId: sessionIdOf(launch),
       overflowPath: fileIn(launch.dir, 'overflow'),
       deliverApproval: launch.deliverApproval === true,
+      ...(launch.target !== undefined ? { target: launch.target } : {}),
     })
     // Several decisions are delivered one by one, in the order they arrived.
     this.delivering = this.delivering.then(async () => {
@@ -1019,6 +1080,26 @@ export class PlannotatorMod {
 
   private pushBridgeStatus(): void {
     for (const launch of this.launches.values()) launch.bridge?.pushStatus()
+  }
+
+  // --- Names ----------------------------------------------------------------------
+
+  /**
+   * Tell same-named open reviews apart (two `QUESTIONS.md` in different
+   * folders become `a/QUESTIONS.md` and `b/QUESTIONS.md`) in the status line,
+   * toasts and decision headings. Recomputed whenever a launch opens, learns
+   * its server's target, or is renamed; the full path is always in the
+   * message's Target line.
+   */
+  private refreshSubjects(): void {
+    const launches = [...this.launches.values()].filter((launch) => !launch.closedByAgent)
+    const subjects = plannotatorDistinctSubjects(
+      launches.map((launch) => ({ subject: launch.baseSubject ?? launch.subject, ...(launch.target !== undefined ? { target: launch.target } : {}) })),
+    )
+    launches.forEach((launch, index) => {
+      launch.baseSubject ??= launch.subject
+      launch.subject = subjects[index] ?? launch.subject
+    })
   }
 
   // --- Status line ---------------------------------------------------------------

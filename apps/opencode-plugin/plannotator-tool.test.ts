@@ -32,7 +32,7 @@ const isWindows = process.platform === "win32";
 // the host-control paths answer: a current CLI, an older one without them, or
 // a current one with host control turned off (remote mode).
 // ---------------------------------------------------------------------------
-type StubBehavior = "current" | "older" | "disabled" | "disabled-remote" | "fail" | "slowfail" | "nobundle";
+type StubBehavior = "current" | "older" | "disabled" | "disabled-remote" | "fail" | "slowfail" | "nobundle" | "targets";
 
 function writeStub(root: string, behavior: StubBehavior): string {
   const binary = path.join(root, `cli-${behavior}.ts`);
@@ -89,7 +89,11 @@ const server = Bun.serve({
     return Response.json({ error: "Not found" }, { status: 404 });
   },
 });
-appendFileSync(process.env.PLANNOTATOR_READY_FILE, JSON.stringify({ url: "http://localhost:" + server.port, port: server.port, isRemote: ${JSON.stringify(behavior)} === "disabled-remote" }) + "\\n");
+// "targets": a CLI that names what it opened, in full, as the real one does.
+const readyTarget = ${JSON.stringify(behavior)} === "targets" && process.argv[2] === "annotate"
+  ? (await import("node:path")).resolve(process.env.PLANNOTATOR_CWD ?? process.cwd(), process.argv[3])
+  : undefined;
+appendFileSync(process.env.PLANNOTATOR_READY_FILE, JSON.stringify({ url: "http://localhost:" + server.port, port: server.port, isRemote: ${JSON.stringify(behavior)} === "disabled-remote", ...(readyTarget ? { target: readyTarget } : {}) }) + "\\n");
 const outcome = await decision;
 // Let the answer to the request that decided reach its caller first.
 await Bun.sleep(100);
@@ -408,6 +412,33 @@ describe.skipIf(isWindows)("the tool through the real launch path (stub CLI)", (
     await decide(portOf(text), { decision: "approved" });
     const delivered = await waitFor(() => host.prompts[0]);
     expect(delivered.text).toBe(`Plannotator: notes.md (${sessionIdOf(text)}) — Approved.`);
+  }, 30_000);
+
+  // Failure caught (a real report): two open reviews of a QUESTIONS.md in
+  // different folders, and a bare approval headed only "QUESTIONS.md", so the
+  // agent acted on the other file. Each decision must name its own full path.
+  test("two same-named files: subjects are told apart and each decision names its own path", async () => {
+    process.env.PLANNOTATOR_BIN = writeStub(root, "targets");
+    for (const folder of ["releases-2026-09-20", "releases-2026-10-04"]) {
+      mkdirSync(path.join(root, folder));
+      writeFileSync(path.join(root, folder, "QUESTIONS.md"), "# Q\n");
+    }
+    const host = makeHost(root);
+    const oldText = await runPlannotatorTool({ action: "annotate", target: "releases-2026-09-20/QUESTIONS.md", gate: true }, { sessionID: "ses_a" }, host.toolDeps);
+    const newText = await runPlannotatorTool({ action: "annotate", target: "releases-2026-10-04/QUESTIONS.md", gate: true }, { sessionID: "ses_a" }, host.toolDeps);
+    const oldPath = path.join(root, "releases-2026-09-20", "QUESTIONS.md");
+    const newPath = path.join(root, "releases-2026-10-04", "QUESTIONS.md");
+    expect(oldText).toContain(`Target: ${oldPath}`);
+    expect(newText).toContain(`Target: ${newPath}`);
+    expect(newText).toContain("Opened releases-2026-10-04/QUESTIONS.md in Plannotator");
+
+    // The record's target (the CLI's) is named; without one, the ready line's.
+    await decide(portOf(oldText), { decision: "annotated", feedback: "Fix Q1.", annotationCount: 1, target: oldPath });
+    await waitFor(() => host.prompts[0]);
+    await decide(portOf(newText), { decision: "approved" });
+    const approval = await waitFor(() => host.prompts[1]);
+    expect(host.prompts[0]!.text).toContain(`Target: ${oldPath}`);
+    expect(approval.text).toBe(`Plannotator: releases-2026-10-04/QUESTIONS.md (${sessionIdOf(newText)}) — Approved.\nTarget: ${newPath}`);
   }, 30_000);
 
   // Failure caught: a list of files opened as one file, split again, reordered,

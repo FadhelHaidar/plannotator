@@ -305,13 +305,14 @@ export const SUBCOMMAND_HELP: Record<string, string> = {
   ].join("\n"),
   sessions: [
     "Usage:",
-    "  plannotator sessions [--open [N]] [--clean]",
+    "  plannotator sessions [--open [N]] [--clean] [--json]",
     "",
     "List active Plannotator server sessions.",
     "",
     "Options:",
     "  --open [N]    Reopen session #N (default 1) in the browser",
     "  --clean       Remove stale session entries",
+    "  --json        Print the sessions as a JSON array on stdout (index, mode, reviewId, target, url, ...)",
   ].join("\n"),
   uninstall: [
     "Usage:",

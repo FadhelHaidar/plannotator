@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { annotateHostResult, isAllowedHostResultPath, reviewHostResult, takeHostResultPath, HOST_RESULT_FILE_ENV } from "./host-result";
+import { annotateHostResult, isAllowedHostResultPath, planHostResult, reviewHostResult, takeHostResultPath, HOST_RESULT_FILE_ENV } from "./host-result";
 import { buildReviewOutput } from "./review-output";
 import { deliveryFor } from "../hooks/mod/delivery";
 
@@ -137,5 +137,45 @@ describe("host close", () => {
     expect(reviewHostResult(review, buildReviewOutput(review, "claude-code"))).toMatchObject({ decision: "dismissed", noop: true, closedBy: "agent", unsentAnnotations: 2 });
     expect(annotateHostResult({ feedback: "", exit: true, closedBy: "agent", unsentAnnotations: 0 }, { kind: "file", target: "/a.md" })).toMatchObject({ decision: "dismissed", closedBy: "agent", unsentAnnotations: 0 });
     expect(annotateHostResult({ feedback: "", exit: true }, { kind: "file", target: "/a.md" })).not.toHaveProperty("closedBy");
+  });
+});
+
+// The failure this guards: a bare approval record carried no path, so the
+// agent named the decision after an earlier one about a different file of the
+// same name. Every record now names the target the SUBMITTING server resolved.
+describe("decision target", () => {
+  test("annotate records name the file, folder, URL or bundle in full; annotate-last names none", () => {
+    expect(annotateHostResult({ approved: true, feedback: "" }, { kind: "file", target: "/w/releases-2026-10-04/QUESTIONS.md" }))
+      .toMatchObject({ decision: "approved", noop: true, target: "/w/releases-2026-10-04/QUESTIONS.md" });
+    expect(annotateHostResult({ feedback: "x" }, { kind: "folder", target: "/w/docs" }).target).toBe("/w/docs");
+    expect(annotateHostResult({ feedback: "x" }, { kind: "url", target: "https://example.com/a" }).target).toBe("https://example.com/a");
+    expect(annotateHostResult({ feedback: "", exit: true }, { kind: "bundle", bundlePaths: ["/w/a.md", "/w/b.md"] }).target)
+      .toEqual(["/w/a.md", "/w/b.md"]);
+    expect(annotateHostResult({ feedback: "x" }, { kind: "last", target: "/ignored" })).not.toHaveProperty("target");
+  });
+
+  test("review and plan records name the reviewed directory or PR and the plan file", () => {
+    const lgtm = { approved: true, feedback: "", annotations: [] };
+    expect(reviewHostResult(lgtm, buildReviewOutput(lgtm, "claude-code"), { target: "https://github.com/o/r/pull/7" }).target)
+      .toBe("https://github.com/o/r/pull/7");
+    expect(reviewHostResult(lgtm, buildReviewOutput(lgtm, "claude-code"))).not.toHaveProperty("target");
+    expect(planHostResult({ approved: true }, { approvedPlan: "# p", planFilePath: "/home/u/.claude/plans/p.md" }).target)
+      .toBe("/home/u/.claude/plans/p.md");
+    expect(planHostResult({ approved: false, feedback: "no" }, { approvedPlan: "# p" })).not.toHaveProperty("target");
+  });
+
+  test("the mod's turn for a bare gated approval names the full path, not just the file name", () => {
+    const record = annotateHostResult({ approved: true, feedback: "" }, { kind: "file", target: "/w/releases-2026-10-04/QUESTIONS.md" });
+    const delivery = deliveryFor(JSON.parse(JSON.stringify(record)), {
+      subject: "QUESTIONS.md",
+      sessionId: "pn-abc123",
+      overflowPath: "/tmp/feedback.md",
+      deliverApproval: true,
+    });
+    expect(delivery.action).toBe("submit");
+    expect(delivery.text.split("\n").slice(0, 2)).toEqual([
+      "Plannotator: QUESTIONS.md (pn-abc123) — Approved.",
+      "Target: /w/releases-2026-10-04/QUESTIONS.md",
+    ]);
   });
 });

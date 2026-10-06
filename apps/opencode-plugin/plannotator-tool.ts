@@ -35,6 +35,7 @@ import {
 import {
   PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT,
   parsePlannotatorToolInput,
+  plannotatorDistinctSubjects,
   plannotatorSessionId,
   plannotatorToolArgs,
   plannotatorToolCloseText,
@@ -60,7 +61,12 @@ export interface TrackedLaunch {
   /** The OpenCode session that opened it; `list` and `close` filter on it. */
   readonly owner: string;
   readonly kind: LaunchKind;
-  readonly subject: string;
+  /** How it is named: `baseSubject`, told apart from the owner's same-named open launches. */
+  subject: string;
+  /** The subject it was opened under. */
+  readonly baseSubject: string;
+  /** What it shows, in full, once its server named it (the ready file). */
+  target?: string | string[];
   readonly startedAt: number;
   url?: string;
   port?: number;
@@ -116,6 +122,7 @@ export class OpenCodeLaunchRegistry {
       owner,
       kind,
       subject,
+      baseSubject: subject,
       startedAt: this.now(),
       closedByAgent: false,
     };
@@ -133,16 +140,27 @@ export class OpenCodeLaunchRegistry {
 
     const observer: CliLaunch = {
       sessionId: launch.id,
-      subject,
+      // Read when the decision is delivered: the subject may have been told
+      // apart from a same-named launch since, and the target learned.
+      get subject() {
+        return launch.subject;
+      },
+      get target() {
+        return launch.target;
+      },
       ...(options.deliverApproval ? { deliverApproval: true } : {}),
       onSpawn: ({ token, terminate }) => {
         launch.token = token;
         launch.terminate = terminate;
       },
-      onServer: ({ url, port, isRemote }) => {
+      onServer: ({ url, port, isRemote, target }) => {
         launch.url = url;
         launch.port = port ?? portFromUrl(url);
         launch.isRemote = isRemote;
+        if (target !== undefined) {
+          launch.target = target;
+          this.relabel(owner);
+        }
         settle({ state: "ready", url });
       },
       onFailure: (message) => settle({ state: "failed", message }),
@@ -158,6 +176,17 @@ export class OpenCodeLaunchRegistry {
         settle({ state: "ended" });
       },
     };
+  }
+
+  /** Tell `owner`'s same-named open launches apart by enough of their paths (`a/QUESTIONS.md`). */
+  private relabel(owner: string): void {
+    const open = this.openFor(owner);
+    const subjects = plannotatorDistinctSubjects(
+      open.map((launch) => ({ subject: launch.baseSubject, ...(launch.target !== undefined ? { target: launch.target } : {}) })),
+    );
+    open.forEach((launch, index) => {
+      launch.subject = subjects[index] ?? launch.subject;
+    });
   }
 
   /** The reviews `owner` opened that are still open (not ended, not closed by the agent). */
@@ -460,11 +489,12 @@ export async function runPlannotatorTool(
         // Best effort: the failure is already in the plugin's log.
       }
     });
-    return plannotatorToolOpenedText(subject, undefined, gate, handle.launch.id);
+    return plannotatorToolOpenedText(handle.launch.subject, undefined, gate, handle.launch.id, handle.launch.target);
   }
   switch (start.state) {
     case "ready":
-      return plannotatorToolOpenedText(subject, start.url, gate, handle.launch.id);
+      // The server named what it opened, in full; the subject may now be told apart from a same-named review.
+      return plannotatorToolOpenedText(handle.launch.subject, start.url, gate, handle.launch.id, handle.launch.target);
     case "failed":
       // An older CLI's answer to a list of files: the update text, as is.
       if (start.message === PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT) return start.message;

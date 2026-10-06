@@ -94,6 +94,7 @@ import {
 	plannotatorDecisionHeading,
 	plannotatorToolArgs,
 	plannotatorToolOpenedText,
+	type PlannotatorTarget,
 } from "./generated/plannotator-tool.ts";
 import {
 	agentClosedNotice,
@@ -904,7 +905,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 
 	/** A decision message for the agent: the heading naming subject, id and outcome, then the prompt. */
 	function withDecisionHeading(review: PiOpenReview, outcome: string, body: string): string {
-		return `${plannotatorDecisionHeading(review.subject, review.id, outcome)}\n\n${body}`;
+		return `${plannotatorDecisionHeading(review.subject, review.id, outcome, review.target)}\n\n${body}`;
 	}
 
 	/**
@@ -916,7 +917,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		ctx: ExtensionContext,
 		origin: PiSessionIdentity,
 		kind: Exclude<PiReviewKind, "plan">,
-		names: { subject: string; userSubject?: string },
+		names: { subject: string; userSubject?: string; target?: PlannotatorTarget },
 		session: BrowserDecisionSession<T>,
 		errors: { send: string; session: string },
 		deliver: (result: T, review: PiOpenReview) => Promise<void>,
@@ -986,11 +987,15 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			const subject = reviewArgs.patchFile
 				? `patch ${basename(reviewArgs.patchFile)}`
 				: reviewSubject(reviewArgs.prUrl, reviewTarget.directory);
+			// What was reviewed, in full: the PR URL, the patch file or the directory.
+			const target = reviewArgs.prUrl
+				?? (reviewArgs.patchFile && reviewArgs.patchFile !== "-" ? resolve(ctx.cwd, reviewArgs.patchFile) : undefined)
+				?? (reviewArgs.patchFile ? undefined : resolve(reviewTarget.directory ?? ctx.cwd));
 			const errors = {
 				send: "Plannotator code review feedback could not be sent",
 				session: "Plannotator code review session failed",
 			};
-			const review = trackReview(ctx, origin, "review", { subject }, session, errors, async (result, tracked) => {
+			const review = trackReview(ctx, origin, "review", { subject, ...(target ? { target } : {}) }, session, errors, async (result, tracked) => {
 				if (result.feedback) result.feedback = withReviewDirectory(result.feedback, result.reviewDirectory);
 				const outcome = classifyReviewOutcome(result);
 				if (outcome.kind === "closed") {
@@ -1326,7 +1331,9 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			};
 			const bundlePaths = bundleFiles?.map((file) => file.path);
 			const subject = bundlePaths ? plannotatorBundleSubject(bundlePaths) : annotateSubject(absolutePath);
-			const review = trackReview(ctx, origin, "annotate", { subject }, session, errors, async (result, tracked) => {
+			// What is annotated, in full: the bundle's files, the folder, the file or the URL.
+			const target = bundlePaths ?? folderPath ?? absolutePath;
+			const review = trackReview(ctx, origin, "annotate", { subject, target }, session, errors, async (result, tracked) => {
 				const outcome = classifyAnnotateOutcome(result);
 				if (outcome.notification === "closed") {
 					safeNotify(ctx, "Annotation session closed.", "info", origin);
@@ -1627,7 +1634,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		if (!launched.ok) throw new Error(`Plannotator did not open: ${launched.error}`);
 		const { review } = launched;
 		return {
-			text: plannotatorToolOpenedText(review.subject, review.url, gate, review.id),
+			text: plannotatorToolOpenedText(review.subject, review.url, gate, review.id, review.target),
 			details: { action: call.action, session: review.id, url: review.url },
 			terminate: true,
 		};
@@ -1942,6 +1949,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			review.tracked = openReviews.add({
 				kind: "plan",
 				subject: planSubject(planVersion),
+				target: resolve(ctx.cwd, inputPath),
 				url: session.url,
 				owner: ownerOf(ctx),
 				hostControl: session.hostControl,

@@ -62,6 +62,15 @@ export interface HostResultRecord {
   unsentAnnotations?: number;
   /** Annotate of several files (a bundle): each file, in review order, with how many comments were made on it. */
   documents?: { path: string; annotationCount: number }[];
+  /**
+   * What the decision is about, in full, as THIS server resolved it: the
+   * absolute file or folder path or the URL (annotate), the files in review
+   * order (a bundle), the reviewed directory, patch file or PR URL (review),
+   * the plan file (plan, when the host gave one). Absent for annotate-last.
+   * A host names it in the message it delivers, so two files that share a
+   * name can never be confused.
+   */
+  target?: string | string[];
 }
 
 /** The `closedBy` / `unsentAnnotations` pair a host close adds to a dismissal. */
@@ -139,7 +148,18 @@ interface ReviewOutcomeLike {
  * Review: `output` is what the CLI prints (buildReviewOutput), so the message
  * is byte-identical to the plaintext a skill-run review hands the agent.
  */
-export function reviewHostResult(result: ReviewOutcomeLike, output: ReviewOutput): HostResultRecord {
+export function reviewHostResult(result: ReviewOutcomeLike, output: ReviewOutput, context: { target?: string } = {}): HostResultRecord {
+  return withTarget(reviewHostRecord(result, output), context.target);
+}
+
+/** `record` with `target` added when there is one. */
+function withTarget(record: HostResultRecord, target: string | readonly string[] | undefined): HostResultRecord {
+  if (target === undefined) return record;
+  if (typeof target === "string") return target.trim() ? { ...record, target } : record;
+  return target.length > 0 ? { ...record, target: [...target] } : record;
+}
+
+function reviewHostRecord(result: ReviewOutcomeLike, output: ReviewOutput): HostResultRecord {
   const annotationCount = result.annotations.length;
   const hasFeedback = !!result.feedback && result.feedback.trim() !== "";
   if (output.decision === "dismissed") {
@@ -195,7 +215,10 @@ export interface AnnotateHostContext {
  * framing the OpenCode and Pi hosts use.
  */
 export function annotateHostResult(result: AnnotateOutcomeLike, context: AnnotateHostContext): HostResultRecord {
-  const record = annotateHostRecord(result, context);
+  const record = withTarget(
+    annotateHostRecord(result, context),
+    context.kind === "last" ? undefined : context.kind === "bundle" ? context.bundlePaths : context.target,
+  );
   if (context.kind !== "bundle") return record;
   // A bundle names each file with its comment count, in review order.
   return {
@@ -249,6 +272,13 @@ interface PlanDecisionLike {
 
 /** Plan review in a host that does not block on ExitPlanMode (the Claude Code mod). */
 export function planHostResult(
+  result: PlanDecisionLike,
+  context: { approvedPlan: string; planFilePath?: string; config?: PlannotatorConfig },
+): HostResultRecord {
+  return withTarget(planHostRecord(result, context), context.planFilePath);
+}
+
+function planHostRecord(
   result: PlanDecisionLike,
   context: { approvedPlan: string; planFilePath?: string; config?: PlannotatorConfig },
 ): HostResultRecord {

@@ -163,10 +163,10 @@ Guided Reviews are AI-generated walkthroughs of a diff, produced inside the code
 ## plannotator sessions
 
 ```bash
-plannotator sessions [--open [N]] [--clean]
+plannotator sessions [--open [N]] [--clean] [--json]
 ```
 
-Lists active Plannotator server sessions. `--open` reopens session N (default 1) in the browser, useful when a tab was closed mid-review. `--clean` drops stale entries.
+Lists active Plannotator server sessions, each with its full target (absolute path, URL, PR URL or reviewed directory) and, for a review a host opened, its `pn-` id. `--open` reopens session N (default 1) in the browser, useful when a tab was closed mid-review. `--clean` drops stale entries. `--json` prints the list as a JSON array on stdout.
 
 ## Other subcommands
 

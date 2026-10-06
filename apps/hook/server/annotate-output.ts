@@ -37,9 +37,21 @@ export function supportsAnnotateClientLease(
   return options.gate && options.json && !options.hook && !options.isRemote;
 }
 
+/**
+ * Per-session facts a `--json` record adds. `target` is what the session
+ * was of, in full (absolute path, URL, or a bundle's files), so a consumer
+ * that delivers the decision as a message (the OpenCode CLI bridge) names it
+ * from the CLI's own resolution, never from the words it passed in. Additive:
+ * plaintext and `--hook` output never carry it.
+ */
+export interface AnnotateOutcomeExtra {
+  target?: string | readonly string[];
+}
+
 export function formatAnnotateOutcome(
   result: AnnotateOutcome,
   options: AnnotateOutputOptions,
+  extra: AnnotateOutcomeExtra = {},
 ): string | null {
   if (options.hook) {
     if (result.approved || result.exit) return null;
@@ -53,14 +65,18 @@ export function formatAnnotateOutcome(
     // the count in the message it delivers (the OpenCode bridge's decision
     // heading). Absent when the decision carried no annotations list.
     const count = Array.isArray(result.annotations) ? { annotationCount: result.annotations.length } : {};
+    const target = extra.target === undefined || extra.target.length === 0
+      ? {}
+      : { target: typeof extra.target === "string" ? extra.target : [...extra.target] };
     if (result.approved) {
       return JSON.stringify({
         decision: "approved",
         ...(result.feedback ? { feedback: result.feedback } : {}),
         ...count,
+        ...target,
       });
     }
-    if (result.exit) return JSON.stringify({ decision: "dismissed" });
+    if (result.exit) return JSON.stringify({ decision: "dismissed", ...target });
     return JSON.stringify({
       decision: "annotated",
       feedback: result.feedback || "",
@@ -69,6 +85,7 @@ export function formatAnnotateOutcome(
       // OpenCode CLI bridge) skips the turn (#1701).
       ...(result.nothingToSend === true ? { nothingToSend: true } : {}),
       ...count,
+      ...target,
     });
   }
 
@@ -79,9 +96,9 @@ export function formatAnnotateOutcome(
 
 export function createAnnotateOutcomeEmitter(
   options: AnnotateOutputOptions,
-): (result: AnnotateOutcome) => void {
-  return (result) => {
-    const output = formatAnnotateOutcome(result, options);
+): (result: AnnotateOutcome, extra?: AnnotateOutcomeExtra) => void {
+  return (result, extra) => {
+    const output = formatAnnotateOutcome(result, options, extra);
     if (output !== null) console.log(output);
   };
 }

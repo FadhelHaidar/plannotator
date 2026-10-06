@@ -249,14 +249,50 @@ export function plannotatorToolArgs(input: PlannotatorToolInput): string[] {
   }
 }
 
-/** The tool's result once the session is open (`url`) or still starting (no url). `sessionId` leads it when given. */
-export function plannotatorToolOpenedText(subject: string, url: string | undefined, gate: boolean, sessionId?: string): string {
+/**
+ * What a review is OF, in full: the absolute file or folder path, the URL, the
+ * files of a bundle (in review order), the reviewed directory or the PR URL.
+ * Taken from the server that shows (and later submits) the review, never
+ * guessed from the words the agent typed: two files can share a name.
+ */
+export type PlannotatorTarget = string | readonly string[]
+
+/**
+ * The line(s) naming a review's full target: `Target: /abs/path/notes.md`, or
+ * for several files `Targets:` and one `- path` line each. Empty for no target
+ * (the last-message surface has none). Every decision message and the tool's
+ * opened text carry it, so an agent never has to guess which of two
+ * same-named files a decision is about.
+ */
+export function plannotatorTargetLines(target: PlannotatorTarget | undefined): string {
+  if (target === undefined) return ''
+  if (typeof target === 'string') return target.trim() ? `Target: ${target}` : ''
+  const paths = target.filter((path) => path.trim() !== '')
+  if (paths.length === 0) return ''
+  if (paths.length === 1) return `Target: ${paths[0]}`
+  return ['Targets:', ...paths.map((path) => `- ${path}`)].join('\n')
+}
+
+/**
+ * The tool's result once the session is open (`url`) or still starting (no
+ * url). `sessionId` leads it when given; `target` (the full path or URL the
+ * server opened, when known) follows it.
+ */
+export function plannotatorToolOpenedText(
+  subject: string,
+  url: string | undefined,
+  gate: boolean,
+  sessionId?: string,
+  target?: PlannotatorTarget,
+): string {
   const where = url ? `Opened ${subject} in Plannotator: ${url}` : `Plannotator is starting for ${subject}; it opens in the browser when ready.`
   const outcome = gate
     ? 'If they approve, an approval message arrives; if they send annotations, the feedback arrives. Closing it sends nothing.'
     : 'When they send annotations, the feedback arrives. Closing it with nothing to send sends nothing.'
+  const targetLines = plannotatorTargetLines(target)
   return [
     ...(sessionId ? [`Session: ${sessionId}`] : []),
+    ...(targetLines ? [targetLines] : []),
     where,
     'The reviewer is looking at it now. End your turn now and wait: their decision arrives later as a message in this conversation that starts with "Plannotator:".',
     outcome,
@@ -273,10 +309,78 @@ export const PLANNOTATOR_OUTCOME_REVIEW_POSTED = 'Review posted'
 
 /**
  * The first line of every decision message a host delivers: what was
- * reviewed, its session id, and the outcome (`Feedback · 3 comments`).
+ * reviewed, its session id, and the outcome (`Feedback · 3 comments`). With a
+ * `target` (the full path, URL or files the SUBMITTING server reviewed) the
+ * heading is followed by its `Target:` line(s), so even a bare approval names
+ * exactly which file it approves.
  */
-export function plannotatorDecisionHeading(subject: string, sessionId: string | undefined, outcome: string): string {
-  return `Plannotator: ${subject}${sessionId ? ` (${sessionId})` : ''} — ${outcome}.`
+export function plannotatorDecisionHeading(
+  subject: string,
+  sessionId: string | undefined,
+  outcome: string,
+  target?: PlannotatorTarget,
+): string {
+  const heading = `Plannotator: ${subject}${sessionId ? ` (${sessionId})` : ''} — ${outcome}.`
+  const targetLines = plannotatorTargetLines(target)
+  return targetLines ? `${heading}\n${targetLines}` : heading
+}
+
+/** A target as a list of trimmed entries, trailing separators dropped. */
+function targetEntries(target: PlannotatorTarget): string[] {
+  return (typeof target === 'string' ? [target] : [...target]).map((value) => value.trim().replace(/[\\/]+$/, ''))
+}
+
+/** Whether two targets name the same thing (a list compares entry by entry, in order). */
+export function plannotatorSameTarget(a: PlannotatorTarget | undefined, b: PlannotatorTarget | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b
+  const left = targetEntries(a)
+  const right = targetEntries(b)
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
+function pathSegments(path: string): string[] {
+  return path.split(/[\\/]+/).filter((segment) => segment !== '')
+}
+
+/**
+ * Subjects that tell open reviews apart. Reviews whose subjects are equal and
+ * whose targets are different paths (two `QUESTIONS.md` in different folders)
+ * are each named by the shortest trailing part of their path, two segments at
+ * least, that none of the others shares (`releases-2026-10-04/QUESTIONS.md`).
+ * A subject that ends in the path's last segment keeps its other words
+ * (`changes in app/web`). Every other subject is returned as is, in order.
+ */
+export function plannotatorDistinctSubjects(
+  reviews: readonly { subject: string; target?: PlannotatorTarget }[],
+): string[] {
+  const subjects = reviews.map((review) => review.subject)
+  const groups = new Map<string, number[]>()
+  reviews.forEach((review, index) => {
+    if (typeof review.target !== 'string' || /^https?:\/\//i.test(review.target)) return
+    const group = groups.get(review.subject) ?? []
+    group.push(index)
+    groups.set(review.subject, group)
+  })
+  for (const [subject, members] of groups) {
+    const paths = members.map((index) => pathSegments(targetEntries(reviews[index]?.target as string)[0] as string))
+    const joined = paths.map((segments) => segments.join('/'))
+    if (new Set(joined).size < 2) continue
+    const tail = (segments: readonly string[], depth: number) => segments.slice(-depth).join('/')
+    members.forEach((index, position) => {
+      const segments = paths[position] as string[]
+      const last = segments[segments.length - 1]
+      if (!last || !subject.endsWith(last)) return
+      let depth = 2
+      while (
+        depth < segments.length &&
+        paths.some((other, at) => joined[at] !== joined[position] && tail(other, depth) === tail(segments, depth))
+      ) {
+        depth += 1
+      }
+      subjects[index] = `${subject.slice(0, subject.length - last.length)}${tail(segments, depth)}`
+    })
+  }
+  return subjects
 }
 
 /** What a host answers a list of several files with when its Plannotator CLI is too old to open them as one review. */

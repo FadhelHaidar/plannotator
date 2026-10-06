@@ -5,6 +5,8 @@ import {
   plannotatorBundleSubject,
   parsePlannotatorToolInput,
   plannotatorDecisionHeading,
+  plannotatorDistinctSubjects,
+  plannotatorSameTarget,
   plannotatorToolArgs,
   plannotatorToolCloseText,
   plannotatorToolListText,
@@ -144,6 +146,55 @@ describe('plannotator tool v2: list, close, reply', () => {
     expect(normalizePlannotatorSessionId('3F2A9C')).toBe('pn-3f2a9c')
     expect(normalizePlannotatorSessionId('pn-3f2a9')).toBeNull()
     expect(normalizePlannotatorSessionId('pn-3f2a9cz')).toBeNull()
+  })
+})
+
+// The failure (a real report): two files named QUESTIONS.md, and a decision
+// heading that named only the base name, so the agent acted on the other one.
+describe('targets: every heading and opened text can name the full path', () => {
+  test('a target follows the heading line; a bundle lists every file; no target keeps the old heading', () => {
+    expect(plannotatorDecisionHeading('QUESTIONS.md', 'pn-3f2a9c', 'Approved', '/w/releases-2026-10-04/QUESTIONS.md')).toBe(
+      'Plannotator: QUESTIONS.md (pn-3f2a9c) — Approved.\nTarget: /w/releases-2026-10-04/QUESTIONS.md',
+    )
+    expect(plannotatorDecisionHeading('2 files: a.md, b.md', 'pn-3f2a9c', 'Feedback', ['/w/a.md', '/w/b.md'])).toBe(
+      'Plannotator: 2 files: a.md, b.md (pn-3f2a9c) — Feedback.\nTargets:\n- /w/a.md\n- /w/b.md',
+    )
+    expect(plannotatorDecisionHeading('notes.md', 'pn-3f2a9c', 'Approved', '')).toBe('Plannotator: notes.md (pn-3f2a9c) — Approved.')
+    const opened = plannotatorToolOpenedText('QUESTIONS.md', 'http://localhost:1', true, 'pn-3f2a9c', '/w/r/QUESTIONS.md').split('\n')
+    expect(opened.slice(0, 2)).toEqual(['Session: pn-3f2a9c', 'Target: /w/r/QUESTIONS.md'])
+  })
+
+  test('same-named open reviews of different files are told apart by the shortest distinct tail of their paths', () => {
+    expect(
+      plannotatorDistinctSubjects([
+        { subject: 'QUESTIONS.md', target: '/w/releases-2026-10-04/QUESTIONS.md' },
+        { subject: 'QUESTIONS.md', target: '/w/releases-2026-09-20/QUESTIONS.md' },
+        { subject: 'notes.md', target: '/w/notes.md' },
+        { subject: 'PR #3', target: 'https://github.com/o/r/pull/3' },
+      ]),
+    ).toEqual(['releases-2026-10-04/QUESTIONS.md', 'releases-2026-09-20/QUESTIONS.md', 'notes.md', 'PR #3'])
+    // Parents with the same name: go up until the paths differ.
+    expect(
+      plannotatorDistinctSubjects([
+        { subject: 'changes in web', target: '/a/app/web' },
+        { subject: 'changes in web', target: '/b/app/web' },
+      ]),
+    ).toEqual(['changes in a/app/web', 'changes in b/app/web'])
+    // The same file twice, or no target: nothing to tell apart.
+    expect(
+      plannotatorDistinctSubjects([
+        { subject: 'QUESTIONS.md', target: '/w/QUESTIONS.md' },
+        { subject: 'QUESTIONS.md', target: '/w/QUESTIONS.md/' },
+        { subject: 'QUESTIONS.md' },
+      ]),
+    ).toEqual(['QUESTIONS.md', 'QUESTIONS.md', 'QUESTIONS.md'])
+  })
+
+  test('targets compare by entry, trailing separators ignored', () => {
+    expect(plannotatorSameTarget('/w/a/', '/w/a')).toBe(true)
+    expect(plannotatorSameTarget(['/w/a', '/w/b'], ['/w/a', '/w/b'])).toBe(true)
+    expect(plannotatorSameTarget(['/w/a', '/w/b'], ['/w/b', '/w/a'])).toBe(false)
+    expect(plannotatorSameTarget('/w/a', undefined)).toBe(false)
   })
 })
 

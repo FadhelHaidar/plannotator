@@ -69,7 +69,7 @@ export { isRemoteSession, getServerPort } from "./remote";
 export { openBrowser } from "./browser";
 export * from "./integrations";
 export * from "./storage";
-export { handleServerReady } from "./shared-handlers";
+export { handleServerReady, setServerReadyTarget } from "./shared-handlers";
 export { type VaultNode, buildFileTree } from "@plannotator/shared/reference-common";
 
 // --- Types ---

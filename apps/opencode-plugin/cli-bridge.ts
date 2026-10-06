@@ -136,8 +136,12 @@ export interface CliLaunchObserver {
    * running; it is the older-CLI close fallback, never a first resort.
    */
   onSpawn?: (info: { pid: number | undefined; token: string | undefined; terminate: () => boolean }) => void;
-  /** The server is up (from the ready file). `port` is absent from a CLI that does not write it. */
-  onServer?: (info: { url: string; port?: number; isRemote: boolean }) => void;
+  /**
+   * The server is up (from the ready file). `port` is absent from a CLI that
+   * does not write it; `target` (what the server shows, in full) from a CLI
+   * older than the field.
+   */
+  onServer?: (info: { url: string; port?: number; isRemote: boolean; target?: string | string[] }) => void;
 }
 
 /** A launch a host tracks: the observer, plus what its decision message names. */
@@ -146,6 +150,12 @@ export interface CliLaunch extends CliLaunchObserver {
   sessionId: string;
   /** What the review shows, as that line names it (`notes.md`, `PR #12`, `local changes`). */
   subject: string;
+  /**
+   * What the review shows, in full, once its server named it (the ready
+   * file): the fallback for the decision's `Target:` line when the CLI's
+   * record carries none.
+   */
+  readonly target?: string | string[];
   /**
    * Deliver a bare approval as a message. A gate the agent opened itself (the
    * tool's `gate: true`) was told to wait for the sign-off; a slash command's
@@ -183,6 +193,8 @@ export interface CliAnnotateOutcome {
   nothingToSend?: boolean;
   /** How many annotations the decision carried (absent from an older CLI). */
   annotationCount?: number;
+  /** What was annotated, in full, as the CLI resolved it (absent from an older CLI and for the last message). */
+  target?: string | string[];
 }
 
 export interface CliReviewOutcome {
@@ -195,6 +207,17 @@ export interface CliReviewOutcome {
   isPRMode?: boolean;
   /** The PR-platform status post (always a boolean from a CLI that knows it; absent from an older one). */
   platform?: boolean;
+  /** What was reviewed, in full: the PR URL, patch file or directory (absent from an older CLI). */
+  target?: string;
+}
+
+/** A well-formed target from a CLI record or ready line, or undefined. */
+export function cliTargetOf(value: unknown): string | string[] | undefined {
+  if (typeof value === "string") return value.trim() ? value : undefined;
+  if (Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "string" && item.trim() !== "")) {
+    return value as string[];
+  }
+  return undefined;
 }
 
 export interface RecentAssistantMessage {
@@ -420,7 +443,7 @@ function logReadyFile(
   readyLabel: string,
   loggedUrls: Set<string>,
   toastedUrls: Set<string>,
-  onServer?: (metadata: { url: string; port?: number; isRemote: boolean }) => void,
+  onServer?: (metadata: { url: string; port?: number; isRemote: boolean; target?: string | string[] }) => void,
 ): void {
   if (!existsSync(readyFile)) return;
 
@@ -428,12 +451,14 @@ function logReadyFile(
   for (const line of contents.split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
-      const metadata = JSON.parse(line) as { url?: string; port?: unknown; isRemote?: unknown };
+      const metadata = JSON.parse(line) as { url?: string; port?: unknown; isRemote?: unknown; target?: unknown };
       if (!metadata.url || loggedUrls.has(metadata.url)) continue;
+      const target = cliTargetOf(metadata.target);
       onServer?.({
         url: metadata.url,
         ...(typeof metadata.port === "number" ? { port: metadata.port } : {}),
         isRemote: metadata.isRemote === true,
+        ...(target !== undefined ? { target } : {}),
       });
       loggedUrls.add(metadata.url);
       log(client, "info", `[Plannotator] Open ${readyLabel}: ${metadata.url}`);
@@ -470,6 +495,12 @@ function signalChildProcess(
   child.kill(signal);
 }
 
+/** The `pn-` id of a tracked launch's observer (a plain observer has none). */
+function reviewIdOf(observer: CliLaunchObserver | undefined): string | undefined {
+  const id = (observer as Partial<CliLaunch> | undefined)?.sessionId;
+  return typeof id === "string" && /^pn-[0-9a-f]{6}$/.test(id) ? id : undefined;
+}
+
 async function runPlannotatorCli(options: RunCliOptions): Promise<RunCliResult> {
   options.abortSignal?.throwIfAborted();
   const readyFile = path.join(
@@ -484,7 +515,7 @@ async function runPlannotatorCli(options: RunCliOptions): Promise<RunCliResult> 
   const bridgeClient = new AbortController();
   let bridgeClientStarted = false;
   // The server is up: start answering its "Ask this session" questions.
-  const onServer = (metadata: { url: string; port?: number; isRemote: boolean }) => {
+  const onServer = (metadata: { url: string; port?: number; isRemote: boolean; target?: string | string[] }) => {
     try {
       options.observer?.onServer?.(metadata);
     } catch {
@@ -512,6 +543,8 @@ async function runPlannotatorCli(options: RunCliOptions): Promise<RunCliResult> 
     PLANNOTATOR_ORIGIN: "opencode",
     PLANNOTATOR_CWD: cwd,
     PLANNOTATOR_READY_FILE: readyFile,
+    // A tracked launch's pn- id, for the CLI's `sessions/` registry.
+    ...(reviewIdOf(options.observer) ? { PLANNOTATOR_HOST_REVIEW_ID: reviewIdOf(options.observer) } : {}),
     ...(sessionBridge && bridgeToken
       ? {
           [SESSION_BRIDGE_TOKEN_ENV]: bridgeToken,
@@ -890,9 +923,15 @@ export type DisposableSessionBridge = SessionBridge & { dispose?: () => void };
  * (`plannotatorDecisionHeading`): what was reviewed, its session id, and the
  * outcome, so the agent can tell which of its reviews answered.
  */
-export function withDecisionHeading(launch: CliLaunch | undefined, outcome: string, message: string): string {
+export function withDecisionHeading(
+  launch: CliLaunch | undefined,
+  outcome: string,
+  message: string,
+  /** The decision record's own target (the CLI's resolution); the launch's is the fallback. */
+  recordTarget?: string | string[],
+): string {
   if (!launch) return message;
-  const heading = plannotatorDecisionHeading(launch.subject, launch.sessionId, outcome);
+  const heading = plannotatorDecisionHeading(launch.subject, launch.sessionId, outcome, cliTargetOf(recordTarget) ?? launch.target);
   return message.trim() ? `${heading}\n\n${message}` : heading;
 }
 
@@ -1048,7 +1087,7 @@ export async function handleCliCommand(input: {
         await injectSessionPrompt(
           input.client,
           input.sessionId,
-          withDecisionHeading(launch, reviewDecisionOutcome(outcome), prompt.message),
+          withDecisionHeading(launch, reviewDecisionOutcome(outcome), prompt.message, outcome.target),
           { agent: targetAgent },
         );
       }
@@ -1105,12 +1144,16 @@ export async function handleCliCommand(input: {
 
       logCliWarnings(input.client, result.stderr);
       const outcome = parseLastJson<CliAnnotateOutcome>(result.stdout);
+      // The CLI's own resolution of the file (absolute) wins over the words
+      // the plugin passed it: a bare name may have resolved anywhere.
+      const resolvedTarget = cliTargetOf(outcome.target);
+      const filePath = typeof resolvedTarget === "string" ? resolvedTarget : parsed.filePath;
       let prompt = buildAnnotatePromptFromBridgeOutcome(outcome, bundlePaths
         ? { kind: "file", fileHeader: "Files", filePath: annotateBundleTargetText(bundlePaths) }
         : {
             kind: "file",
-            fileHeader: getAnnotateFileHeader(parsed.filePath, input.cwd),
-            filePath: parsed.filePath,
+            fileHeader: getAnnotateFileHeader(filePath, input.cwd),
+            filePath,
           });
       // A gate the agent opened itself waits for the sign-off: a bare
       // approval is still a message (its heading says "Approved").
@@ -1126,7 +1169,7 @@ export async function handleCliCommand(input: {
         await injectSessionPrompt(
           input.client,
           input.sessionId,
-          withDecisionHeading(launch, annotateDecisionOutcome(outcome), prompt),
+          withDecisionHeading(launch, annotateDecisionOutcome(outcome), prompt, outcome.target),
           { agent },
         );
       }

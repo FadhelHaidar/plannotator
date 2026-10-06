@@ -104,9 +104,14 @@ describe("annotate Done with nothing to send", () => {
     await post(await run.base(), "/api/feedback", EMPTY_DONE);
     const { code, stdout, record } = await run.finish();
     expect(code).toBe(0);
-    // Two additive fields: nothingToSend (#1701) and annotationCount (the OpenCode bridge's heading).
-    expect(JSON.parse(stdout.trim())).toEqual({ decision: "annotated", feedback: NO_FEEDBACK, nothingToSend: true, annotationCount: 0 });
+    // Three additive fields: nothingToSend (#1701), annotationCount (the
+    // OpenCode bridge's heading) and target (the file as the CLI resolved it,
+    // which the bridge names instead of the words it passed).
+    const printed = JSON.parse(stdout.trim());
+    expect(printed).toEqual({ decision: "annotated", feedback: NO_FEEDBACK, nothingToSend: true, annotationCount: 0, target: expect.any(String) });
+    expect(printed.target).toMatch(/\/notes\.md$/);
     expect(record.noop).toBe(true);
+    expect(record.target).toBe(printed.target);
   }, 30_000);
 
   test("a flag next to annotations is ignored: feedback with comments still starts a turn", async () => {
@@ -154,5 +159,44 @@ describe("annotate folder session", () => {
       join(docs, "a.md"),
       join(docs, "b.md"),
     ]);
+  }, 30_000);
+});
+
+// Two files can share a name (`QUESTIONS.md` in two release folders): the
+// process names the file it resolved, in full, in the ready line, the
+// sessions registry and the decision record, and `plannotator sessions`
+// prints it with the host's pn- id.
+describe("decision target", () => {
+  test("ready line, registry, `sessions --json` and the record name the resolved file; the pn- id rides along", async () => {
+    const nested = (root: string) => {
+      mkdirSync(join(root, "releases-2026-10-04"), { recursive: true });
+      writeFileSync(join(root, "releases-2026-10-04", "QUESTIONS.md"), "# Questions\n");
+    };
+    const run = start(["releases-2026-10-04/QUESTIONS.md"], nested, { PLANNOTATOR_HOST_REVIEW_ID: "pn-abc123" });
+    const base = await run.base();
+    const file = join(run.root, "releases-2026-10-04", "QUESTIONS.md");
+
+    const readyLine = readFileSync(join(run.root, "data", "claude-code-mod", "session-1", "launch-1", "ready"), "utf8").split("\n")[0]!;
+    expect(JSON.parse(readyLine).target).toBe(file);
+
+    const listed = Bun.spawnSync([process.execPath, "run", entry, "sessions", "--json"], {
+      cwd: run.root,
+      env: { ...process.env, PLANNOTATOR_DATA_DIR: join(run.root, "data") },
+    });
+    const sessions = JSON.parse(listed.stdout.toString()) as { index: number; reviewId?: string; target?: string; url: string }[];
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({ index: 1, reviewId: "pn-abc123", target: file });
+    expect(sessions[0]!.url).toContain(new URL(base).port);
+    // The table names the full target too (stderr, as before).
+    const table = Bun.spawnSync([process.execPath, "run", entry, "sessions"], {
+      cwd: run.root,
+      env: { ...process.env, PLANNOTATOR_DATA_DIR: join(run.root, "data") },
+    });
+    expect(table.stderr.toString()).toContain(file);
+    expect(table.stderr.toString()).toContain("pn-abc123");
+
+    await post(base, "/api/feedback", { feedback: "Answer Q2 first.", annotations: [{ id: "a" }] });
+    const { record } = await run.finish();
+    expect(record).toMatchObject({ decision: "annotated", noop: false, target: file });
   }, 30_000);
 });

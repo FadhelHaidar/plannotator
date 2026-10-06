@@ -23,12 +23,14 @@
 import { randomBytes } from "node:crypto";
 import type { HostControl } from "./generated/host-control.ts";
 import {
+	plannotatorDistinctSubjects,
 	plannotatorSessionId,
 	plannotatorToolCloseText,
 	plannotatorToolListText,
 	plannotatorUnknownSessionText,
 	type PlannotatorCloseOutcome,
 	type PlannotatorSessionSummary,
+	type PlannotatorTarget,
 } from "./generated/plannotator-tool.ts";
 
 export type PiReviewKind = PlannotatorSessionSummary["kind"];
@@ -37,8 +39,17 @@ export interface PiOpenReview {
 	/** `pn-` + 6 hex, unique among this registry's open reviews. */
 	id: string;
 	kind: PiReviewKind;
-	/** How the agent-facing texts (list, close, decision heading) name it. */
+	/** How the agent-facing texts (list, close, decision heading) name it: told apart from same-named open reviews. */
 	subject: string;
+	/** The subject before same-named open reviews were told apart. */
+	baseSubject?: string;
+	/**
+	 * What the review shows, in full, as the in-process server resolved it
+	 * (absolute path, URL, a bundle's files, reviewed directory or PR URL).
+	 * Every decision heading names it (`Target:`), so two same-named files
+	 * are never confused.
+	 */
+	target?: PlannotatorTarget;
 	/** How user-facing notices name it, when that differs ("the agent's last message"). */
 	userSubject?: string;
 	url: string;
@@ -53,7 +64,7 @@ export interface PiOpenReview {
 
 export interface PiReviewRegistry {
 	/** Record a review that just opened and give it a session id. */
-	add(entry: Pick<PiOpenReview, "kind" | "subject" | "userSubject" | "url" | "owner" | "hostControl">): PiOpenReview;
+	add(entry: Pick<PiOpenReview, "kind" | "subject" | "userSubject" | "url" | "owner" | "hostControl" | "target">): PiOpenReview;
 	/** Forget a review once its decision settled or its server stopped. */
 	remove(review: PiOpenReview): void;
 	/** The open reviews `owner` opened (not closed by the agent), oldest first. */
@@ -117,8 +128,17 @@ export function createPiReviewRegistry(
 
 	return {
 		add(entry) {
-			const review: PiOpenReview = { ...entry, id: newId(), startedAt: now(), closedByAgent: false };
+			const review: PiOpenReview = { ...entry, baseSubject: entry.subject, id: newId(), startedAt: now(), closedByAgent: false };
 			reviews.set(review.id, review);
+			// Two open reviews of a `QUESTIONS.md` in different folders are named
+			// by enough of their paths to tell them apart.
+			const open = openFor(review.owner);
+			const subjects = plannotatorDistinctSubjects(
+				open.map((item) => ({ subject: item.baseSubject ?? item.subject, ...(item.target !== undefined ? { target: item.target } : {}) })),
+			);
+			open.forEach((item, index) => {
+				item.subject = subjects[index] ?? item.subject;
+			});
 			return review;
 		},
 		remove(review) {

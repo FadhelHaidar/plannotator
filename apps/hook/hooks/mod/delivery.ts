@@ -1,4 +1,4 @@
-import { plannotatorDecisionHeading } from './tool'
+import { plannotatorDecisionHeading, type PlannotatorTarget } from './tool'
 
 /**
  * What to do with a decision the CLI published (the host result record,
@@ -25,6 +25,21 @@ export interface HostResultRecord {
   /** A dismissal the host asked for (the tool's `close`), not the reviewer's. */
   closedBy?: 'agent'
   unsentAnnotations?: number
+  /**
+   * What the decision is about, in full, as the server that took it resolved
+   * it (absolute path, URL, a bundle's files, reviewed directory or PR URL).
+   * Absent from a CLI older than the field and for annotate-last.
+   */
+  target?: string | string[]
+}
+
+/** A well-formed `target`, or undefined (a malformed one is dropped, never trusted). */
+function targetOf(value: unknown): string | string[] | undefined {
+  if (typeof value === 'string') return value.trim() ? value : undefined
+  if (Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'string' && item.trim() !== '')) {
+    return value as string[]
+  }
+  return undefined
 }
 
 /** Feedback longer than this goes to a file Claude reads, never truncated. */
@@ -49,7 +64,9 @@ export function parseHostResult(text: string): HostResultRecord | null {
   if (typeof record.surface !== 'string' || !surfaces.includes(record.surface)) return null
   if (typeof record.decision !== 'string' || !decisions.includes(record.decision)) return null
   if (typeof record.message !== 'string' || typeof record.noop !== 'boolean') return null
-  return record as unknown as HostResultRecord
+  const { target: rawTarget, ...rest } = record
+  const target = targetOf(rawTarget)
+  return { ...(rest as unknown as HostResultRecord), ...(target !== undefined ? { target } : {}) }
 }
 
 function plural(count: number, one: string, many: string): string {
@@ -88,6 +105,11 @@ export interface DeliveryContext {
   inlineLimitBytes?: number
   /** Deliver an approval even when it carries nothing (a gate the `plannotator` tool opened). */
   deliverApproval?: boolean
+  /**
+   * The launch's own idea of the target (from the ready file, else the mod's
+   * resolution of the words): named when the record carries none (an older CLI).
+   */
+  target?: PlannotatorTarget
 }
 
 function byteLength(text: string): number {
@@ -155,7 +177,8 @@ export function deliveryFor(record: HostResultRecord, context: DeliveryContext):
     return { action: 'log', text: `${subject} ${what}. Nothing was sent to Claude.` }
   }
 
-  const prefix = plannotatorDecisionHeading(subject, context.sessionId, outcomeOf(record))
+  // The record's target is the submitting server's own: it wins over the launch's.
+  const prefix = plannotatorDecisionHeading(subject, context.sessionId, outcomeOf(record), record.target ?? context.target)
   const nextStep = record.surface === 'plan' && record.decision === 'approved' ? `\n\n${PLAN_APPROVAL_NEXT_STEP}` : ''
   const body = record.message.trim()
   const inline = body ? `${prefix}\n\n${body}${nextStep}` : `${prefix}${nextStep}`

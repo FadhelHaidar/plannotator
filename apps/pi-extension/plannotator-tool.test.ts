@@ -337,6 +337,30 @@ describe("plannotator tool on Pi", () => {
 		expect(firstLine(harness.sent[0]!.text)).toBe(`Plannotator: spec.md (${id}) — Approved.`);
 	});
 
+	// A real report: two QUESTIONS.md in different folders, and a bare approval
+	// headed only "QUESTIONS.md", so the agent acted on the other file.
+	test("two same-named files: subjects are told apart and each decision names its own full path", async () => {
+		const harness = createHarness();
+		const { mkdirSync } = await import("node:fs");
+		mkdirSync(join(harness.cwd, "releases-2026-09-20"));
+		mkdirSync(join(harness.cwd, "releases-2026-10-04"));
+		const oldFile = harness.writeFile("releases-2026-09-20/QUESTIONS.md", "# Q\n");
+		const newFile = harness.writeFile("releases-2026-10-04/QUESTIONS.md", "# Q\n");
+		const first = (await harness.call({ action: "annotate", target: "releases-2026-09-20/QUESTIONS.md", gate: true })).content[0]!.text;
+		const second = (await harness.call({ action: "annotate", target: "releases-2026-10-04/QUESTIONS.md", gate: true })).content[0]!.text;
+		expect(first).toContain(`Target: ${oldFile}`);
+		expect(second).toContain(`Target: ${newFile}`);
+		expect(second).toContain("Opened releases-2026-10-04/QUESTIONS.md in Plannotator");
+
+		expect((await postJson(`${harness.launches[1]!.url}/api/approve`, {})).status).toBe(200);
+		await until(() => harness.sent.length > 0);
+		expect(harness.sent[0]!.text.split("\n").slice(0, 2)).toEqual([
+			`Plannotator: releases-2026-10-04/QUESTIONS.md (${sessionIdIn(second)}) — Approved.`,
+			`Target: ${newFile}`,
+		]);
+		expect(harness.sent[0]!.text).not.toContain(oldFile);
+	});
+
 	test("list and close cover this Pi session's reviews only; close keeps the draft and sends nothing", async () => {
 		const harness = createHarness();
 		harness.writeFile("notes.md", "# Notes\n");
