@@ -95,7 +95,7 @@ Pass any subset of these to `configurePlannotatorUI({ ... })`. Anything omitted 
 | `mathRendererLoader` | `() => Promise<MathRenderer>` | How KaTeX is loaded when no renderer is registered before the first math node renders (see "Lazy renderers and eager entries"). Once registered, the package default is never called, not even as a fallback after a rejected load, and `resetMathRenderer()` keeps the registration (0.34.0); a default load already in flight at registration still fills the slot (pre-existing, see `setMathRendererLoader`), so register before the first math render | `utils/math-default-loader`'s `import('katex')`, JS only; CSS stays yours |
 | `identityGenerator` | `() => string` | The synchronous generator behind the default "tater" display name when no `identityProvider` is installed | A built-in 16 x 16 word pool of the same `adjective-noun-tater` shape; Plannotator registers the full dictionary via `utils/identity-tater` |
 | `alertIconRenderer` | `(name: string) => ReactNode | null` | The icon rendered for a GitHub alert whose title line carries `<!-- icon: name -->` (0.38.0; grammar in `utils/alertTitle`). Called only for a title line with an icon comment and no leading emoji; a null return falls back to the type icon | `null` for every name: the type's own icon, the package bundles no icon set |
-| `fenceTheme` | `(colorTheme: string, mode: 'light' \| 'dark') => string \| undefined` | The Shiki theme every fence-style surface renders in (Viewer fences, `CodeBlock`, the code-file hover preview, the plan diff view, code review suggestion snippets: everything that reads `useFenceTheme` / `resolveFenceTheme`). Return a theme name to use it, `undefined` to keep the default for that (palette, mode); a throw or an empty string also falls through, and a name Shiki does not know renders the block as plain text. Install it before the first render; it is read on every render, so a later change applies the next time a fence re-renders. The code-review diff pane's dark/light pair (`resolveSyntaxTheme`) is not affected. Also `setFenceThemeResolver` / `resetFenceThemeResolver` on `utils/syntaxTheme` (unreleased) | The palette's `SHIKI_THEME_MAP` entry, else `pierre-dark` / `pierre-light`. Replaces mutating the exported `SHIKI_THEME_MAP`, which keeps working but is not a supported seam |
+| `fenceTheme` | `(colorTheme: string, mode: 'light' \| 'dark') => string \| undefined` | The Shiki theme every fence-style surface renders in (Viewer fences, `CodeBlock`, the code-file hover preview, the plan diff view, code review suggestion snippets: everything that reads `useFenceTheme` / `resolveFenceTheme`). Return a theme name to use it, `undefined` to keep the default for that (palette, mode); a throw or an empty string also falls through, and a name Shiki does not know renders the block as plain text. Install it before the first render; it is read on every render, so a later change applies the next time a fence re-renders. The code-review diff pane's dark/light pair (`resolveSyntaxTheme`) is not affected. Also `setFenceThemeResolver` / `resetFenceThemeResolver` on `utils/syntaxTheme` (0.50.0) | The palette's `SHIKI_THEME_MAP` entry, else `pierre-dark` / `pierre-light`. Replaces mutating the exported `SHIKI_THEME_MAP`, which keeps working but is not a supported seam |
 
 ### Interface details worth knowing
 
@@ -1636,18 +1636,18 @@ Additive. What a host that keeps question answers ITSELF needs (Workspaces store
 
 Not here (dropped with the owner's Q2 answer): record lines inside the block (`Other:`, `Answer:`, `Note:`, `Answered:`) and a `writeQuestionAnswer` byte rewriter.
 
-## Fence theme seam and srcdoc frame height (unreleased)
+## Fence theme seam and srcdoc frame height (0.50.0)
 
 Additive; Plannotator passes nothing, so its output is unchanged.
 
 - **`fenceTheme` on `configurePlannotatorUI`** (row in the seam catalog above; `FenceThemeResolver` type exported from `configure` and `utils/syntaxTheme`). Hosts that mutated `SHIKI_THEME_MAP` to pick their own code colors should move to it.
 - **`HtmlViewer` frame height.** The bridge measured `document.body.scrollHeight`, which leaves out a first child's top margin (and a last child's bottom margin) that collapses through a margin-less body, so a page like `body{margin:0}` + a card with `margin-top` was cut short by its margins. It now measures body's box in document coordinates plus the bottom margins that can collapse through it (`measureContentHeight` in `bridge-script.ts`). It deliberately does not use `documentElement.scrollHeight`: that never drops below the frame's own viewport (and an `html{height:100%}` root is the frame's height), so the frame could grow but never shrink. Content sized by the frame itself (`html,body{height:100%}`, `min-height:100vh`, a `100vh` section) plus a margin around it always measures taller than the frame, so a feedback guard (`nextResizeHeight`) stops growing when the first measure after a grow the parent applied still overflows by as much as before: such a page settles one or two grows above its old height (e.g. 600 → 640) instead of growing forever, and a later content change still resizes the frame. Absolutely positioned content whose containing block is the root (not body) is still not measured, as before. No `BRIDGE_PROTOCOL_VERSION` bump: the `resize` message shape is unchanged, only the value is more accurate, so a cached older asset keeps the old measure and nothing misreads.
 
-## Ask this session (shipped in 0.50.0; bridge-only change in the next ui release, BREAKING for 0.50.0 consumers)
+## Ask this session (shipped in 0.50.0; bridge-only change in 0.51.0, BREAKING for 0.50.0 consumers)
 
 Ask AI can be answered by the agent session that opened Plannotator ("Ask this session"), when the server registers a `session-bridge` provider. A host whose backend never advertises one sees the same provider list, default selection, requests and DOM as before, and has nothing to pass.
 
-As shipped in 0.50.0 the bridge sat beside the SDK providers: an explicit saved pick won over it, and a gone or blocked session offered "Ask a separate AI instead". **The next ui release makes the bridge the ONLY Ask AI choice** (Plannotator's servers now register nothing else for Ask AI while a bridge is present):
+As shipped in 0.50.0 the bridge sat beside the SDK providers: an explicit saved pick won over it, and a gone or blocked session offered "Ask a separate AI instead". **ui 0.51.0 makes the bridge the ONLY Ask AI choice** (Plannotator's servers now register nothing else for Ask AI while a bridge is present):
 
 - **`utils/aiProvider`:** `resolveAIProviderSelection` selects a bridge in the list in every status (ready, busy, blocked, gone), ahead of any saved pick; the saved cookies are not rewritten, and with no bridge in the list the order is unchanged. New export `findSessionBridge(providers)`. Kept from 0.50.0: `AIProviderOption.label` / `sessionBridge`, `SESSION_BRIDGE_PROVIDER_NAME`, `SESSION_ASK_ERROR_CODES`, `isSessionBridgeProvider`.
 - **`components/ai/SessionAskNotice`:** `SessionAskActions` keeps the busy actions ("Ask when it finishes" / "Interrupt and ask now", rendered only with `onAction`); for a gone or blocked session it renders a plain note (`[data-session-ask-unreachable]`, with or without `onAction`) instead of a fallback button.
@@ -1666,9 +1666,51 @@ As shipped in 0.50.0 the bridge sat beside the SDK providers: an explicit saved 
 
 Unchanged from 0.50.0: `hooks/useAIChat` (`AskAIParams.busyPolicy`, `retry(questionId, AIRetryOptions)`, `AIResponse.errorCode` / `status`; `AIRetryOptions.providerId` still exists for hosts that offer another provider), `hooks/useAIProviderConfig`'s `applyConfigChange(config, { persist: false })`, and `components/ProviderIcons`' `getProviderMeta(name, label?)`.
 
+Also in 0.51.0 (#1703, additive): an answer the session stopped because another message took its turn over arrives as the error code `session_taken_over` (`SESSION_ASK_ERROR_CODES.takenOver`). `useAIChat` no longer treats it as an error: the streamed text stays, `AIResponse.notice` carries the server's note, `error` stays unset, and `DocumentAIChatPanel` renders the note under the answer through the new `SessionAskNote` (`components/ai/SessionAskNotice`, `[data-session-ask-note="taken-over"]`). A backend that never sends the code sees no change.
+
+## Questions, restore, drafts and the rest (ui 0.51.0, core 0.25.11)
+
+Everything host-facing that changed between ui 0.50.0 / core 0.25.10 and this pair, apart from the three sections above (Ask this session, composer trim, diagram Ask AI). Plannotator's own app needs nothing; a host that passes nothing new gets the fixes below and the noted behavior changes.
+
+**Question cards (#1683, #1699, #1702).**
+
+- **Pinpoint inside a card targets what was clicked (#1683).** The card (`fieldset.question-block`) is now one block target whose prompt, context and each choice's text are child targets, marked `data-question-part="prompt" | "context" | "choice"`. Before, every pinpoint hover or click in a card resolved to the prompt. Clicking the radio/checkbox still answers.
+- **Plain-bullet choices keep their wrapped lines (#1699, core).** A `:::question` / `:::question-multi` with no task-list items reads each plain bullet the way CommonMark reads a list item (indented lines, lazy lines, an indented paragraph after a blank line), and those lines no longer leak into `context`. A bullet written `- **Name:** prose` (bold name set off by punctuation, `**` only) takes `Name` as its label and the prose as its description; a label longer than `MAX_QUESTION_CHOICE_LABEL_CHARS` (200) is cut at its first sentence, the rest leading the description; two bullets never end up with the same label. A `Recommended:` line continues onto the next line only when that line wraps the same sentence. **Task-list choices (`- [ ]`) parse exactly as before**, and `questionKey` does not change.
+- **Behavior change for hosts that store answers themselves:** the labels of PLAIN-BULLET choices can differ from what core 0.25.10 produced (the wrapped text joins the label, or a bold lead becomes the label). An answer stores the labels it picked, so core 0.25.11 adds **`QuestionChoice.aliases?: string[]`** (the older names of a plain-bullet choice: its full text, its first line, that line's earlier label) and **`canonicalQuestionAnswer(question, answer)`** (`@plannotator/core/question-block`), which maps a stored label that names exactly one choice by an alias to its current label and returns the same object when nothing maps; an ambiguous label stays as stored. `QuestionBlock`, the Questions panel rows (`utils/questionAnswers`), WebMCP `read_document` and `formatQuestionAnswersSection` all read answers through it, so a host that renders `QuestionBlock` with its stored answer sees the right pick without changes. **A host that reads stored answers on its own (turning an answer into a decision, its own export) should run them through `canonicalQuestionAnswer` too.** `QuestionExportItem` gains an optional `choices` (label + aliases) so the export prints current labels.
+- **Context renders with the document's block renderers (#1699).** A card's context goes through `parseMarkdownToBlocks` + `BlockRenderer` (new `components/blocks/QuestionContext`), so tables, lists, fences, quotes, headings and images look as they do in the document. Those blocks carry no `data-block-id`. Its styles are a `<style href="plannotator-question-context" precedence="default">` that React 19 hoists into `<head>` once, so a host needs no Tailwind change. `useActiveSection` observes only headings that have a block id, so a heading inside a card never stalls the table of contents.
+
+**Restore after an edit (#1717).**
+
+- **`AnnotationRestoreReport.moved?: RestoredAnchor[]`** (`hooks/useAnnotationHighlighter`, additive): when a restore re-anchors comments by their text after the document changed, each comment whose stored `blockId` no longer holds its text is listed with `{ id, blockId, startOffset?, positionsStale }`, where `blockId` is the block the highlight landed in or `''` when the text is gone, and `positionsStale` says the stored `startMeta`/`endMeta` should be dropped. An unchanged document reports nothing here. **A host that derives line numbers from `blockId` (an export, a gutter) should write these back**; Plannotator does so in `packages/editor/restoredAnchors.ts`. A restore that paints nothing is now reported unanchored even when there were no stored positions to try.
+- **`utils/annotationOwnsHighlight`** (new): `annotationOwnsHighlight(annotation)` is false for diff-view comments, general comments, checkbox toggles (`CHECKBOX_ANNOTATION_PREFIX`) and question answers, which the text highlighter never draws. The highlighter skips them itself; a host that re-applies a stored list through `ViewerHandle.applySharedAnnotations` should filter with it, as `useLinkedDoc` now does, or those rows come back unanchored.
+
+**Drafts (#1710).** `DraftTransport.save` may now resolve `{ staleGeneration }` (`DraftSaveRefused`, `hooks/useAnnotationDraft`) when the store refused the body as stale; the hook raises its counter above that generation and saves once more. Resolving nothing (the old `Promise<void>`) keeps the old behavior, so a host transport needs no change. Also documented in the seam catalog above. The hook's return value gains `flushPendingSave()`, which sends a pending debounced save now. Plannotator's DEFAULT transport now reads a `409 { draftGeneration }` as that refusal (never when the body says `decided: true`).
+
+**The agent closes a review (#1709).** `ExternalAnnotationEvent` (`@plannotator/core/external-annotation`) gains a member that is not an annotation change: `{ type: "session-closed"; by: "agent"; unsentAnnotations: number }`. `useExternalAnnotations` takes an optional `onSessionClosed({ unsentAnnotations })` and calls it when the stream delivers that event (the polling fallback never does). A host transport that never emits it is unaffected. **A host with an exhaustive `switch` over `ExternalAnnotationEvent['type']` (a `never` check) must add the case.** `utils/agentClosed` (new) holds the copy Plannotator shows (`AGENT_CLOSED_TITLE`, `agentClosedSubtitle(count, surface)`).
+
+**HTML pinpoints and exports (#1694, #1700).**
+
+- A text-less pinpoint's quote (`originalText`) now names the element, not just its kind: `[element: Image "Team photo" (team.jpg)]` instead of `[element: Image]` (hover label, accessible name, and for media the scrubbed file name). Restore never reads the quote, so older pins keep restoring.
+- `HtmlElementContext.sourceName?` (ui `types` and core `html-anchor`, additive, validated by `parseHtmlElementContext`): the file a media element shows, resolved by the bridge the same way the quote names it. The export heading reads it, falling back to the `src` attribute for older contexts. Core exports the shed order as `ELEMENT_CONTEXT_SHED_ORDER`; `sourceName` is shed last.
+- Ask AI from an HTML pinpoint composer sends the element's identity: `CommentAskAIContext.detail?` / `AIQuestion.scope.detail?` (additive), built by the new `elementIdentityForAskAI(targets)` (`utils/parser`), which `buildDefaultPrompt` appends under "Selected element:". It is not shown in the chat.
+- Export order: comments made in the plan/version diff view (`blockId` `diff-block-N`) now print AFTER the document's other comments, in diff order (they printed first). A list with no diff comments sorts exactly as before.
+
+**Linked documents and several-file reviews (#1696, #1718).**
+
+- `useLinkedDoc` gains `getFeedbackDocuments()` → `FeedbackDocuments { root, documents }`: the root once and every other document once. `getDocAnnotations()` also carries the active document's live state (for counts), so an export that used it beside the host's own live annotations printed the open document twice. Export from `getFeedbackDocuments()`.
+- `exportLinkedDocAnnotations(docAnnotations, heading?)` takes an optional heading (`LINKED_DOC_EXPORT_HEADING` default, `FOLDER_DOC_EXPORT_HEADING`, `BUNDLE_DOC_EXPORT_HEADING`) and renders every document through the same entry renderer as `exportAnnotations`: document order, `[In diff content]`, quick labels with their tip and Label Summary, threaded replies. Plain comment, deletion and global output is unchanged.
+- `groupAnnotationsByDocument` / `buildAnnotationDocumentGroups` (`utils/annotationScope`) take an optional fixed `order` of paths. `DocBadges`' `linkedDocInfo.onBack` is optional (absent: no Close pill). `PlanHeaderMenu` item ids gain `'bundle-previous' | 'bundle-next'`. Core: `AnnotateAgentTerminalMode` gains `"annotate-bundle"` (and `supportsAnnotateAgentTerminalMode` accepts it); `AnnotateContext.bundlePosition?: { index, total }`.
+
+**Smaller changes.**
+
+- **`DecisionControl` / `DecisionNoteDialog` (#1711):** the keyboard hint under the decision note composer is gone; keys unchanged.
+- **Pi thinking levels (#1704):** core `model-catalog` adds `PI_THINKING_LEVELS`, `PI_SESSION_SCOPED_THINKING_VERSION`, `piThinkingLevelsSupported`, `piSupportedThinkingLevels`, `piCatalogFromRpc`, `PiRpcModel`, and an `off` entry in `EFFORT_LABELS`. `AgentsTab`'s `PI_THINKING` is now derived from them (same values and labels as before).
+- **"Ask this session" announcement (#1690):** new `components/AskSessionAnnouncementDialog`, `utils/askSessionAnnouncement` (cookie `plannotator-announce-ask-session-seen`) and `hooks/useFirstRunAnnouncementWindow`. Plannotator's apps mount it; nothing in the library mounts it for a host.
+- **gruvbox palette (#1721):** sets `--diffs-addition-color-override` (dark `#b8bb26`, light `#79740e`), so added diff lines draw in gruvbox green instead of the text colour. This changed the guides.show viewer stylesheet (see "Publishing & versioning").
+
 ## Publishing & versioning
 
-- **Next ui release (after 0.50.0): BREAKING for 0.50.0 consumers of the "Ask this session" exports.** It removes `findUsableSessionBridge`, `resolveSessionBridgeFallback`, the `'fallback'` `SessionAskAction` member, `SessionAskActions`' `fallbackLabel` and `DocumentAIChatPanel`'s `sessionAskFallbackLabel`, and makes a listed bridge the only Ask AI selection. Release notes must say so; see "Ask this session (shipped in 0.50.0; …)". No core change.
+- **core 0.25.11 / ui 0.51.0: both change. Order: guides.show deploy, then `core` 0.25.11, then `ui` 0.51.0.** ui imports `canonicalQuestionAnswer` and `PI_THINKING_LEVELS`, which no published core before 0.25.11 has, and pins core `0.25.11` exactly. core 0.25.11 pins a new guides.show viewer stylesheet (`viewer.DuqkfIUz.css`, from the gruvbox fix #1721; the viewer JS `viewer.BYGvfCcj.js` is unchanged), which guides.show serves only after a deploy, so run the deploy by hand first (next bullet). **ui 0.51.0 is BREAKING for 0.50.0 consumers of the "Ask this session" exports**: it removes `findUsableSessionBridge`, `resolveSessionBridgeFallback`, the `'fallback'` `SessionAskAction` member, `SessionAskActions`' `fallbackLabel` and `DocumentAIChatPanel`'s `sessionAskFallbackLabel`, and makes a listed bridge the only Ask AI selection. Release notes must say so. Everything else is additive or a fix; see "Ask this session (shipped in 0.50.0; …)", "Comment composer trim (0.51.0; …)", "Ask AI from a diagram comment (0.51.0; …)" and "Questions, restore, drafts and the rest (ui 0.51.0, core 0.25.11)".
 - **guides.show before a core publish that moves the viewer pin.** guides.show deploys on Plannotator release tags only. When a core publish carries a new `guide-viewer-manifest` hash (any change to the shared CSS or the guide chain) and no release tag has shipped it yet, run the deploy by hand first (`gh workflow run guides-show-deploy.yml --ref main`), then check that `curl -I https://guides.show/v1/<css>` and `<js>` from the manifest answer 200. Otherwise every host's guide pages load without that asset (core 0.25.9 hit this; fixed by a manual deploy). The deploy is add-only.
 - **core 0.25.9 / ui 0.49.0 (question host seams): both change. Publish `core` first**: ui imports the new `@plannotator/core/markdown-structure` subpath and the new `findQuestionBlocks` / decision fields, so a ui on a published core 0.25.8 fails to compile in a consumer. See "Question host seams (ui 0.49.0, core 0.25.9)".
 - **core 0.25.8 / ui 0.48.0 (questions in documents): both change. Publish `core` 0.25.8 first, then `ui` 0.48.0**, which pins core `0.25.8` exactly and imports the new `@plannotator/core/question-block` subpath. Core is a patch bump because its change is additive and pre-1.0 caret ranges would not accept a minor. See "Questions in documents (0.48.0, core 0.25.8)".
@@ -1714,7 +1756,7 @@ unaffected by the prop. Purely additive: no export, share or archive change.
 
 ---
 
-## Diff file tree (next ui release; no core change)
+## Diff file tree (0.50.0; no core change)
 
 Asked for by a host that shows a read-only per-file diff list (one Pierre
 `FileDiff` per file) and wants Plannotator's file tree beside it. The tree used
@@ -1759,7 +1801,7 @@ this branch with the same static patch (merged chains, A/D/R/M marks, nested
 folders), at rest, after two `j` presses and after collapsing a folder: the
 sidebar screenshots and its `outerHTML` were byte-identical.
 
-## Comment composer trim (next ui release; not breaking)
+## Comment composer trim (0.51.0; not breaking)
 
 The visible submit hint added noise and is gone from `components/CommentPopover`.
 The composer's one-click thumbs-up was removed in the same change and then
@@ -1794,7 +1836,7 @@ clamp is untouched.
 
 ---
 
-## Ask AI from a diagram comment (next ui release; additive, no core change)
+## Ask AI from a diagram comment (0.51.0; additive, no core change)
 
 The diagram composer can offer the same "Ask AI" the markdown and HTML
 composers offer. All new props are optional; a host that passes none of them
