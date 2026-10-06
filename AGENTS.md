@@ -490,14 +490,28 @@ or finds a `settled/` claim naming someone else or the launch's `stdin` gone
 (cleaned up after the other delivered), forgets the launch quietly, so its
 status line no longer says "waiting for you". A per-launch in-flight flag keeps
 the 1 s timer, which never waits for a slow check, from checking one launch
-twice at once. Residual window: a process that dies between its claim and its
-`$.prompt.submit` loses that decision (nobody else delivers a claimed launch).
+twice at once. Residual window: `$.prompt.submit` resolves only once Claude
+is idle, so a claimed decision can wait for the whole of Claude's current turn,
+and a process that quits or dies in that time takes the delivery with it
+(nobody else delivers a claimed launch: the claimant may still be waiting to
+deliver it, so a second delivery could never be ruled out). It is not lost
+silently: the claimant keeps the launch's record in the store and renews its
+lease while it waits, writes `settled/delivered` once `$.prompt.submit`
+returns, and releases the lease at `session.end`. A restore of the session
+(and any process that watched the launch and saw the claim) checks a claimed,
+undelivered launch whose decision is still on disk: while its claimant's lease
+is fresh it waits; once the lease is released or 60 s stale
+(`UNDELIVERED_AFTER_MS`) it logs once, with a toast, "A decision for <subject>
+arrived but wasn't delivered — it's saved in <dir>/result.json" (`stdout` for an
+older CLI) and writes `settled/reported`, so it is said once.
 `cleanupArgv` removes `stdin` first and keeps `settled/` while `feedback.md`
 keeps the directory, so a claim made after cleanup started loses.
 `persist` keeps this session's records it does not know (the other process
 launched them) unless it settled them. After restore, off the session-start
 path (5 s cap), the stored launch records older than a minute are pruned
-(`pruneArgv`): any settled or cleaned up (`settled/`, no `stdin`); for other
+(`pruneArgv`): any cleaned up (no `stdin`) or settled for good (`settled/`
+marked delivered or reported, or with no decision on disk; a claimed,
+undelivered decision stays for its session to report); for other
 sessions, any whose server died without a decision (`kill -0` fails, no
 `result.json`, no `exit`); and for other sessions older than 14 days
 (`LAUNCH_EXPIRED_MS`, a session nobody resumed), any whose server is gone, decision

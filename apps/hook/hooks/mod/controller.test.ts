@@ -1327,3 +1327,109 @@ describe('stored launch records are pruned', () => {
     expect(kept).toEqual(['live', 'young', 'mine', 'meanwhile'])
   })
 })
+
+// $.prompt.submit waits for Claude to be idle, so a claimed decision can wait
+// as long as Claude's current turn runs. A claimant that quits meanwhile must
+// not leave the decision stranded with nobody saying where it is.
+describe('a decision claimed but never delivered', () => {
+  const UNDELIVERED = "arrived but wasn't delivered"
+
+  function secondProcess(host: FakeHost, later = 1_000): FakeHost {
+    const other = fakeHost()
+    other.files = host.files
+    other.store = host.store
+    other.clock = host.clock + later
+    other.randomHex = (bytes) => 'cd'.repeat(bytes)
+    return other
+  }
+
+  /** A process whose $.prompt.submit waits (Claude mid-turn) until `finish()`. */
+  async function claimantWaitingForIdle() {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    let finish: () => void = () => undefined
+    host.submit = (text) =>
+      new Promise<void>((resolve) => {
+        finish = () => {
+          host.submits.push(text)
+          resolve()
+        }
+      })
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.runCommand('annotate', 'notes.md')
+    const dir = launchDirOf(launches(host)[0]!)
+    decide(host, launches(host)[0]!, { surface: 'annotate', decision: 'annotated', message: 'please fix', noop: false })
+    await host.tick()
+    return { host, mod, dir, finish: () => finish() }
+  }
+
+  test('a claimant that quit while Claude was busy: the next restore reports where the decision is, once, and delivers nothing', async () => {
+    const { host, mod, dir } = await claimantWaitingForIdle()
+    // The record stays while the decision waits.
+    expect((host.store.get(STORE_LAUNCHES) as unknown[]).length).toBe(1)
+    mod.dispose()
+
+    const other = secondProcess(host)
+    await new PlannotatorMod(other, SESSION).restore()
+
+    const reports = other.logs.filter((line) => line.includes(UNDELIVERED))
+    expect(reports).toHaveLength(1)
+    expect(reports[0]).toContain(`${dir}/result.json`)
+    expect(other.toasts).toHaveLength(1)
+    expect(other.submits).toEqual([])
+
+    const third = secondProcess(host, 2_000)
+    third.randomHex = (bytes) => 'ef'.repeat(bytes)
+    await new PlannotatorMod(third, SESSION).restore()
+    expect(third.logs.filter((line) => line.includes(UNDELIVERED))).toEqual([])
+  })
+
+  test('a claimant still waiting is not reported; once it delivers, nothing is said', async () => {
+    const { host, dir, finish } = await claimantWaitingForIdle()
+    const other = secondProcess(host)
+    await new PlannotatorMod(other, SESSION).restore()
+    for (let index = 0; index < 10; index += 1) {
+      host.clock += 1_000
+      other.clock += 1_000
+      await host.tick()
+      await other.tick()
+    }
+    expect(other.logs.filter((line) => line.includes(UNDELIVERED))).toEqual([])
+
+    finish()
+    await host.tick()
+    expect(host.submits.filter((text) => text.includes('please fix'))).toHaveLength(1)
+    expect(host.files.has(`${dir}/settled/delivered`)).toBe(true)
+    expect(host.store.get(STORE_LAUNCHES)).toEqual([])
+    other.clock += 120_000
+    for (let index = 0; index < 10; index += 1) await other.tick()
+    expect(other.logs.filter((line) => line.includes(UNDELIVERED))).toEqual([])
+  })
+
+  test('a claimant killed while Claude was busy: the process watching it reports once its lease goes stale', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const first = new PlannotatorMod(host, SESSION)
+    await first.runCommand('annotate', 'notes.md')
+    const other = secondProcess(host)
+    const second = new PlannotatorMod(other, SESSION)
+    await second.restore()
+    // The person works in the first process again; it claims, and Claude is mid-turn there.
+    host.clock = other.clock + 1_000
+    host.submit = () => new Promise<void>(() => undefined)
+    first.onPromptEntered({ text: 'back here', fromUs: false, originKind: 'composer' })
+    await host.tick()
+    decide(host, launches(host)[0]!, { surface: 'annotate', decision: 'annotated', message: 'please fix', noop: false })
+    await host.tick()
+    expect(host.files.get(`${launchDirOf(launches(host)[0]!)}/settled/by`)).toBe('abababababababab')
+    await other.tick()
+    expect(other.logs.filter((line) => line.includes(UNDELIVERED))).toEqual([])
+
+    // Killed: no ticks, no release. Its heartbeat stops.
+    other.clock = host.clock + 61_000
+    for (let index = 0; index < 10; index += 1) await other.tick()
+
+    expect(other.logs.filter((line) => line.includes(UNDELIVERED))).toHaveLength(1)
+    expect(other.submits).toEqual([])
+  })
+})

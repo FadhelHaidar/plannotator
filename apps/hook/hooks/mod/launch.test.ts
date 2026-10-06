@@ -126,6 +126,7 @@ describe('the scripts several Claude Code processes share', () => {
 
     const removed = launchDir(root, 'removed', { stdin: '', 'result.json': '{}' })
     expect((await run(claimArgv(removed, 'process-a'))).code).toBe(CLAIM_EXIT.won)
+    writeFileSync(join(removed, 'settled', 'delivered'), '1')
     await run(cleanupArgv(removed))
     expect(existsSync(removed)).toBe(false)
     expect((await run(claimArgv(removed, 'process-b'))).code).toBe(CLAIM_EXIT.lost)
@@ -139,8 +140,15 @@ describe('the scripts several Claude Code processes share', () => {
     const root = tempDir()
     const cleaned = launchDir(root, 'cleaned', { 'feedback.md': 'kept for Claude' })
     const removed = join(root, 'removed')
+    // A claim on a server that stopped without a decision, and a delivered claim: done.
     const settled = launchDir(root, 'settled-own', { stdin: '', pid: '999995' })
     mkdirSync(join(settled, 'settled'))
+    const delivered = launchDir(root, 'delivered', { stdin: '', pid: '999994', 'result.json': '{}' })
+    mkdirSync(join(delivered, 'settled'))
+    writeFileSync(join(delivered, 'settled', 'delivered'), '1')
+    // Claimed but never marked delivered (its claimant quit while Claude was busy): kept for its session to report.
+    const stranded = launchDir(root, 'stranded', { stdin: '', pid: '999993', 'result.json': '{}' })
+    mkdirSync(join(stranded, 'settled'))
     const ownDead = launchDir(root, 'own-dead', { stdin: '', pid: '999999' })
     const live = launchDir(root, 'live', { stdin: '', pid: String(process.pid) })
     const dead = launchDir(root, 'dead', { stdin: '', pid: '999998' })
@@ -152,14 +160,14 @@ describe('the scripts several Claude Code processes share', () => {
 
     const { code, stdout } = await run(
       pruneArgv({
-        cleaned: [cleaned, removed, settled, ownDead],
+        cleaned: [cleaned, removed, settled, delivered, stranded, ownDead],
         dead: [live, dead, decided, exited],
         expired: [expiredDecided, expiredExited, expiredLive],
       }),
     )
 
     expect(code).toBe(0)
-    expect(stdout.trim().split('\n').sort()).toEqual([cleaned, dead, expiredDecided, expiredExited, removed, settled].sort())
+    expect(stdout.trim().split('\n').sort()).toEqual([cleaned, dead, delivered, expiredDecided, expiredExited, removed, settled].sort())
   })
 
   test('debug lines from several writers are appended, never overwritten', async () => {

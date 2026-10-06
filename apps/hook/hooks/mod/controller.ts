@@ -190,6 +190,35 @@ export const LEASE_STALE_MS = 20_000
 export const LAUNCH_SETTLED_AGE_MS = 60_000
 /** Another session's launch this old whose server is gone is pruned even with a decision waiting. */
 export const LAUNCH_EXPIRED_MS = 14 * 24 * 60 * 60_000
+/**
+ * A claimed decision whose claimant has not renewed its watcher lease for
+ * this long (or released it at `session.end`) and never marked it delivered
+ * is reported as undelivered: the claimant quit (or crashed) while
+ * `$.prompt.submit` waited for Claude to go idle.
+ */
+export const UNDELIVERED_AFTER_MS = 60_000
+export const SETTLED_DELIVERED = `${SETTLED_DIR}/delivered`
+export const SETTLED_REPORTED = `${SETTLED_DIR}/reported`
+
+/** A stored record minus the in-memory watch state. */
+function recordOf(launch: LiveLaunch): LaunchRecord {
+  const {
+    pidMisses: _misses,
+    ticks: _ticks,
+    settling: _settling,
+    starting: _starting,
+    bridge: _bridge,
+    bridgeRetryAt: _retryAt,
+    bridgeBackoffMs: _backoff,
+    bridgeOff: _off,
+    leader: _leader,
+    leaseTick: _leaseTick,
+    touchedAt: _touchedAt,
+    checking: _checking,
+    ...record
+  } = launch
+  return record
+}
 
 interface LiveLaunch extends LaunchRecord {
   pidMisses: number
@@ -268,6 +297,16 @@ export class PlannotatorMod {
   private readonly instanceId: string
   /** The store housekeeping started at restore (awaited by tests only). */
   pruning: Promise<void> = Promise.resolve()
+  /**
+   * Launches this instance claimed whose decision waits for Claude to go idle
+   * (`$.prompt.submit`): their records stay in the store and their lease is
+   * renewed until `settled/delivered` is written, so another process can tell
+   * a claimant still waiting from one that quit.
+   */
+  private awaitingIdle = new Map<string, LaunchRecord>()
+  /** Launches another process claimed: watched until delivered, or reported once its claimant is gone. */
+  private claimedElsewhere = new Map<string, LaunchRecord>()
+  private tickCount = 0
 
   constructor(
     private readonly host: Host,
@@ -293,8 +332,12 @@ export class PlannotatorMod {
     const now = await this.host.now()
     const mine: LaunchRecord[] = []
     for (const record of records) {
-      // Already settled (by another process) or cleaned up: nothing to reattach.
-      if (await this.host.exists(`${record.dir}/${SETTLED_DIR}`)) continue
+      // Already settled: delivered, still on its way, or stranded (reported).
+      if (await this.host.exists(`${record.dir}/${SETTLED_DIR}`)) {
+        await this.watchClaimedElsewhere(record)
+        continue
+      }
+      // Cleaned up: nothing to reattach.
       if (!(await this.host.exists(fileIn(record.dir, 'stdin')))) continue
       mine.push(record)
     }
@@ -308,9 +351,9 @@ export class PlannotatorMod {
     if (mine.length > 0) {
       const names = mine.map((record) => record.subject).join(', ')
       this.host.log(`Reattached ${mine.length} open ${mine.length === 1 ? 'session' : 'sessions'} (${names}).`)
-      this.ensureTimer()
       this.refreshStatus()
     }
+    this.ensureTimer()
     // Housekeeping off the session-start path.
     this.pruning = this.pruneStoredLaunches().catch(() => undefined)
   }
@@ -338,17 +381,66 @@ export class PlannotatorMod {
     let adopted = 0
     for (const record of records) {
       if (!record || record.sessionId !== this.session.sessionId || typeof record.dir !== 'string') continue
-      if (this.launches.has(record.id) || this.forgotten.has(record.id)) continue
-      if (await this.host.exists(`${record.dir}/${SETTLED_DIR}`)) continue
+      if (this.launches.has(record.id) || this.forgotten.has(record.id) || this.claimedElsewhere.has(record.id)) continue
+      if (await this.host.exists(`${record.dir}/${SETTLED_DIR}`)) {
+        await this.watchClaimedElsewhere(record)
+        continue
+      }
       if (!(await this.host.exists(fileIn(record.dir, 'stdin')))) continue
       const live = this.adopt(record, now)
       if (live.kind === 'plan') this.planVersion = Math.max(this.planVersion, live.version ?? 0)
       adopted += 1
     }
-    if (adopted > 0) {
-      this.ensureTimer()
-      this.refreshStatus()
+    if (adopted > 0) this.refreshStatus()
+    this.ensureTimer()
+  }
+
+  /**
+   * Where a claimed launch's decision stands: delivered (or nothing to
+   * deliver), on its way (its claimant renews its lease, or it is this
+   * instance's own), or stranded (its claimant quit while waiting for Claude to
+   * go idle), with the file holding the decision.
+   */
+  private async claimedState(record: LaunchRecord): Promise<'done' | 'waiting' | { stranded: string }> {
+    const dir = record.dir
+    if (!(await this.host.exists(`${dir}/${SETTLED_DIR}`))) return 'done'
+    if (await this.host.exists(`${dir}/${SETTLED_DELIVERED}`)) return 'done'
+    if (await this.host.exists(`${dir}/${SETTLED_REPORTED}`)) return 'done'
+    if (!(await this.host.exists(fileIn(dir, 'stdin')))) return 'done'
+    let decision: string | null = null
+    if (await this.host.exists(fileIn(dir, 'result'))) decision = fileIn(dir, 'result')
+    else if ((await this.host.readFile(fileIn(dir, 'exit')).catch(() => '')).trim() === '0') decision = fileIn(dir, 'stdout')
+    // A claim on a server that stopped without a decision: nothing was lost.
+    if (!decision) return 'done'
+    const by = (await this.host.readFile(`${dir}/${SETTLED_BY}`).catch(() => '')).trim()
+    if (by === this.instanceId) return this.awaitingIdle.has(record.id) ? 'waiting' : 'done'
+    const lease = parseWatcherLease(await this.host.readFile(fileIn(dir, 'watcher')).catch(() => ''))
+    const now = await this.host.now()
+    if (lease?.owner && lease.owner === by && now - lease.at < UNDELIVERED_AFTER_MS) return 'waiting'
+    return { stranded: decision }
+  }
+
+  /**
+   * A launch another process claimed: report it now if its decision was
+   * stranded, else watch it until it is delivered or stranded. Never
+   * delivered from here: the claimant may still be waiting to deliver it, so
+   * only a report is strictly at most once.
+   */
+  private async watchClaimedElsewhere(record: LaunchRecord): Promise<void> {
+    const state = await this.claimedState(record)
+    if (state === 'done') {
+      this.claimedElsewhere.delete(record.id)
+      return
     }
+    if (state === 'waiting') {
+      this.claimedElsewhere.set(record.id, record)
+      this.ensureTimer()
+      return
+    }
+    this.claimedElsewhere.delete(record.id)
+    await this.host.writeFile(`${record.dir}/${SETTLED_REPORTED}`, String(await this.host.now())).catch(() => undefined)
+    this.host.log(`A decision for ${record.subject} arrived but wasn't delivered — it's saved in ${state.stranded}.`)
+    this.host.toast(`${record.subject}: a decision wasn't delivered; it is saved on disk`)
   }
 
   /**
@@ -381,6 +473,10 @@ export class PlannotatorMod {
       if (!launch.leader) continue
       launch.leader = false
       void this.host.writeFile(fileIn(launch.dir, 'watcher'), JSON.stringify({ owner: null, at: 0, touchedAt: 0 })).catch(() => undefined)
+    }
+    // A decision still waiting for Claude to go idle: say at once that nobody waits for it any more.
+    for (const record of this.awaitingIdle.values()) {
+      void this.host.writeFile(fileIn(record.dir, 'watcher'), JSON.stringify({ owner: null, at: 0, touchedAt: 0 })).catch(() => undefined)
     }
   }
 
@@ -454,25 +550,13 @@ export class PlannotatorMod {
     const stored = await this.host.storeGet(STORE_LAUNCHES)
     const all = (Array.isArray(stored) ? (stored as LaunchRecord[]) : []).filter((record) => !!record)
     const others = all.filter(
-      (record) => record.sessionId !== this.session.sessionId || (!this.launches.has(record.id) && !this.forgotten.has(record.id)),
+      (record) =>
+        record.sessionId !== this.session.sessionId ||
+        (!this.launches.has(record.id) && !this.awaitingIdle.has(record.id) && !this.forgotten.has(record.id)),
     )
-    const mine: LaunchRecord[] = [...this.launches.values()].map(
-      ({
-        pidMisses: _misses,
-        ticks: _ticks,
-        settling: _settling,
-        starting: _starting,
-        bridge: _bridge,
-        bridgeRetryAt: _retryAt,
-        bridgeBackoffMs: _backoff,
-        bridgeOff: _off,
-        leader: _leader,
-        leaseTick: _leaseTick,
-        touchedAt: _touchedAt,
-        checking: _checking,
-        ...record
-      }) => record,
-    )
+    // A decision waiting for Claude to go idle keeps its record: if this
+    // process quits first, the next restore finds and reports it.
+    const mine: LaunchRecord[] = [...[...this.launches.values()].map(recordOf), ...this.awaitingIdle.values()]
     await this.host.storeSet(STORE_LAUNCHES, [...others, ...mine])
   }
 
@@ -484,15 +568,19 @@ export class PlannotatorMod {
     await this.host.storeSet(STORE_APPROVALS, all)
   }
 
+  private hasWork(): boolean {
+    return this.launches.size > 0 || this.awaitingIdle.size > 0 || this.claimedElsewhere.size > 0
+  }
+
   private ensureTimer(): void {
-    if (this.disposed || this.timer || this.launches.size === 0) return
+    if (this.disposed || this.timer || !this.hasWork()) return
     this.timer = this.host.every(TICK_MS, () => {
       void this.tick()
     })
   }
 
   private stopTimerIfIdle(): void {
-    if (this.launches.size === 0 && this.timer) {
+    if (!this.hasWork() && this.timer) {
       this.timer.cancel()
       this.timer = null
     }
@@ -847,6 +935,7 @@ export class PlannotatorMod {
     const unsent = record?.unsentAnnotations
     const saved = typeof unsent === 'number' && unsent > 0 ? ` ${unsent} unsent ${unsent === 1 ? 'comment' : 'comments'} kept in the draft.` : ''
     this.host.log(`Claude closed ${launch.subject} (${sessionIdOf(launch)}).${saved} Nothing was sent to Claude.`)
+    await this.markDelivered(launch.dir)
     await this.host.run(cleanupArgv(launch.dir), { timeoutMs: 5_000 }).catch(() => undefined)
   }
 
@@ -1036,6 +1125,15 @@ export class PlannotatorMod {
 
   private async tick(): Promise<void> {
     if (this.disposed) return
+    this.tickCount += 1
+    if (this.tickCount % LEASE_EVERY_TICKS === 0) {
+      const now = await this.host.now()
+      // Still waiting for Claude to go idle: keep saying so.
+      for (const record of this.awaitingIdle.values()) {
+        await this.host.writeFile(fileIn(record.dir, 'watcher'), JSON.stringify({ owner: this.instanceId, at: now, touchedAt: 0 })).catch(() => undefined)
+      }
+      for (const record of [...this.claimedElsewhere.values()]) await this.watchClaimedElsewhere(record).catch(() => undefined)
+    }
     for (const launch of [...this.launches.values()]) {
       if (launch.settling || launch.starting || launch.checking) continue
       launch.ticks += 1
@@ -1168,9 +1266,11 @@ export class PlannotatorMod {
    * another process got there first (the launch is forgotten here, nothing
    * said), or the claim could not be made or its answer was lost (tried again
    * next tick; the claim names this instance, so a claim it already made wins
-   * again). A process that dies between the claim and the delivery loses that
-   * decision (the claim stays, nobody else delivers it): a window of one
-   * process call and one `$.prompt.submit`.
+   * again). A process that quits or dies between the claim and the delivery
+   * takes the delivery with it (the claim stays, nobody else delivers it), and
+   * `$.prompt.submit` waits for Claude to be idle, so that window is the whole
+   * of Claude's current turn. Such a decision is reported, never re-delivered:
+   * see `watchClaimedElsewhere`.
    */
   private async claimSettlement(launch: LiveLaunch): Promise<boolean> {
     // The lease read every few ticks may be stale by now: the person may have
@@ -1205,6 +1305,13 @@ export class PlannotatorMod {
     launch.settling = true
     this.host.debug(`launch ${launch.id}: settled by another Claude Code process on this session`)
     await this.forget(launch)
+    // Watched (quietly) until delivered; reported if its claimant quits first.
+    await this.watchClaimedElsewhere(recordOf(launch))
+  }
+
+  /** `settled/delivered`: this claim's decision reached Claude (or there was none to send). */
+  private async markDelivered(dir: string): Promise<void> {
+    await this.host.writeFile(`${dir}/${SETTLED_DELIVERED}`, String(await this.host.now())).catch(() => undefined)
   }
 
   /**
@@ -1242,7 +1349,12 @@ export class PlannotatorMod {
       }
       await this.persistApproval()
     }
+    const stored = recordOf(launch)
+    this.awaitingIdle.set(launch.id, stored)
     await this.forget(launch)
+    await this.host
+      .writeFile(fileIn(launch.dir, 'watcher'), JSON.stringify({ owner: this.instanceId, at: await this.host.now(), touchedAt: 0 }))
+      .catch(() => undefined)
     const delivery = deliveryFor(record, {
       subject: launch.subject,
       sessionId: sessionIdOf(launch),
@@ -1262,7 +1374,13 @@ export class PlannotatorMod {
         this.host.log(`Could not send the ${launch.subject} decision to Claude (${error instanceof Error ? error.message : String(error)}).`)
       })
     }).catch(() => undefined)
+    // `$.prompt.submit` resolves once Claude was idle and took the turn: a long
+    // turn means a long wait, which this process may not survive (quit, crash).
     await this.delivering
+    await this.markDelivered(launch.dir)
+    this.awaitingIdle.delete(launch.id)
+    await this.persist()
+    this.stopTimerIfIdle()
     // The launch's copies of the plan/message and feedback are not kept once
     // delivered (feedback.md stays: Claude reads it after this turn).
     await this.host.run(cleanupArgv(launch.dir), { timeoutMs: 5_000 }).catch(() => undefined)

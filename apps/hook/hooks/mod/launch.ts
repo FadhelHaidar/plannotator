@@ -133,7 +133,7 @@ export function cleanupArgv(dir: string): string[] {
     [
       'dir=$1; shift',
       'for f in "$@"; do rm -f "$dir/$f"; done',
-      `if [ ! -e "$dir/${LAUNCH_FILES.overflow}" ]; then rm -f "$dir/${SETTLED_BY}"; rmdir "$dir/${SETTLED_DIR}" 2>/dev/null; rmdir "$dir" 2>/dev/null; fi`,
+      `if [ ! -e "$dir/${LAUNCH_FILES.overflow}" ]; then rm -f "$dir/${SETTLED_BY}" "$dir/${SETTLED_DIR}/delivered" "$dir/${SETTLED_DIR}/reported"; rmdir "$dir/${SETTLED_DIR}" 2>/dev/null; rmdir "$dir" 2>/dev/null; fi`,
       'exit 0',
     ].join('\n'),
     'plannotator-cleanup',
@@ -178,9 +178,11 @@ export function claimArgv(dir: string, claimant: string): string[] {
 /**
  * Prints each launch directory whose stored record can go. Arguments are
  * directories in three groups, each started by a marker:
- * - `--cleaned`: only when settled or cleaned up (a `settled/` claim, no
- *   `stdin` — which the mod writes before launching and only `cleanupArgv`
- *   removes — or no directory at all);
+ * - `--cleaned`: only when settled or cleaned up (no `stdin` — which the mod
+ *   writes before launching and only `cleanupArgv` removes — or no directory
+ *   at all; or a `settled/` claim marked delivered or reported, or with no
+ *   decision on disk). A claimed decision never marked delivered stays, so
+ *   its session can report it when resumed (`UNDELIVERED_AFTER_MS`);
  * - `--dead`: also when no decision waits (`result.json`, `exit`) and the
  *   server's pid no longer answers `kill -0` (or there is none);
  * - `--expired`: also with a decision waiting, unless the server still runs
@@ -191,7 +193,13 @@ export const PRUNE_SCRIPT = [
   'mode=cleaned',
   'for d in "$@"; do',
   '  case "$d" in --cleaned|--dead|--expired) mode=${d#--}; continue ;; esac',
-  `  if [ -e "$d/${SETTLED_DIR}" ] || [ ! -e "$d/stdin" ]; then echo "$d"; continue; fi`,
+  '  if [ ! -e "$d/stdin" ]; then echo "$d"; continue; fi',
+  `  if [ -e "$d/${SETTLED_DIR}" ]; then`,
+  // Delivered, reported, or a claim on a server that stopped without a decision.
+  `    if [ -e "$d/${SETTLED_DIR}/delivered" ] || [ -e "$d/${SETTLED_DIR}/reported" ] || { [ ! -e "$d/result.json" ] && [ ! -e "$d/exit" ]; }; then echo "$d"; continue; fi`,
+  // Claimed and maybe never delivered: kept until its session reports it, or it expires.
+  '    [ "$mode" = expired ] || continue',
+  '  fi',
   '  [ "$mode" = cleaned ] && continue',
   '  pid=$(cat "$d/pid" 2>/dev/null)',
   '  case "$pid" in',
