@@ -530,3 +530,133 @@ describe.if(hasDom)("annotate decision control", () => {
     expect(submissions[0]!.annotations).toEqual([]);
   });
 });
+
+/** The completion overlay's state attribute, or null while no overlay shows. */
+function completionState(): string | null {
+  return document.querySelector("[data-completion-state]")?.getAttribute("data-completion-state") ?? null;
+}
+
+function completionTitle(): string | null {
+  return document.querySelector("[data-completion-state] h2")?.textContent ?? null;
+}
+
+/**
+ * The completion screen must say what actually happened. A Done with nothing
+ * to send posts the nothing-to-send body, which every host treats as a no-op
+ * (Pi: "Annotation closed (no feedback).", OpenCode: no turn, the Claude Code
+ * mod: a logged no-op), so a "Feedback Sent" / "will address your feedback"
+ * screen there told the reviewer the agent got something it never did.
+ */
+describe.if(hasDom)("annotate completion screen", () => {
+  async function clickPrimary(): Promise<void> {
+    await act(async () => primaryButton()!.click());
+    await settle();
+  }
+
+  function expectNoSentClaim(): void {
+    const text = document.querySelector("[data-completion-state]")?.textContent ?? "";
+    expect(text).not.toContain("Feedback Sent");
+    expect(text).not.toContain("address your feedback");
+    expect(text).not.toContain("has been sent");
+  }
+
+  test("Done with nothing to send shows the Done screen, not Feedback Sent", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    await mountAnnotate();
+
+    await clickPrimary();
+
+    expect(submissions[0]!.nothingToSend).toBe(true);
+    expect(completionState()).toBe("done");
+    // Deliberate label: the title names the decision the reviewer made.
+    expect(completionTitle()).toBe("Done");
+    expectNoSentClaim();
+  });
+
+  test("a note that was sent still shows Feedback Sent", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    await mountAnnotate();
+
+    await openComposer("Send a note");
+    await typeNote("tighten the intro");
+    await pressNoteKey("Enter", { metaKey: true });
+
+    expect(submissions[0]!.nothingToSend).toBeUndefined();
+    expect(completionState()).toBe("denied");
+    expect(completionTitle()).toBe("Feedback Sent");
+  });
+
+  test("discarding every annotation finishes on the Done screen", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    seededExternalAnnotations = [{
+      id: "ext-1",
+      blockId: "",
+      startOffset: 0,
+      endOffset: 0,
+      type: "COMMENT",
+      text: "existing finding",
+      originalText: "Some body text.",
+      createdA: 1,
+      source: "eslint",
+    }];
+    await mountAnnotate();
+    await settle();
+    await settle();
+
+    await act(async () => caretButton()!.click());
+    await settle();
+    await act(async () => menuItem("discard 1 annotation")!.click());
+    await settle();
+    const confirm = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .find((el) => el.textContent === "Discard & finish");
+    await act(async () => confirm!.click());
+    await settle();
+
+    expect(submissions).toHaveLength(1);
+    expect(completionState()).toBe("done");
+    expectNoSentClaim();
+  });
+
+  test("gate: the empty Approve keeps the approval screen", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    await mountAnnotate({ gate: true });
+
+    await clickPrimary();
+
+    expect(submissions[0]!.endpoint).toBe("approve");
+    expect(completionState()).toBe("approved");
+  });
+
+  test("annotate-last: Done with nothing to send shows the Done screen", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    await mountAnnotate({ mode: "annotate-last", filePath: undefined });
+
+    await clickPrimary();
+
+    expect(submissions[0]!.nothingToSend).toBe(true);
+    expect(completionState()).toBe("done");
+    expectNoSentClaim();
+  });
+
+  test("raw HTML: Done with nothing to send shows the Done screen", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    await mountAnnotate({
+      filePath: "/tmp/page.html",
+      renderAs: "html",
+      rawHtml: "<h1>Rendered page</h1><p>Body copy.</p>",
+      plan: "",
+    });
+
+    await clickPrimary();
+
+    expect(submissions[0]!.nothingToSend).toBe(true);
+    expect(completionState()).toBe("done");
+    expectNoSentClaim();
+  });
+});
