@@ -16,10 +16,6 @@
   "bugs": {
     "url": "https://github.com/backnotprop/plannotator/issues"
   },
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
   "scripts": {
     "dev:hook": "bun run --cwd apps/hook dev",
     "dev:portal": "bun run --cwd apps/portal dev",
@@ -48,7 +44,12 @@
     "dockview-react": "^5.2.0",
     "dompurify": "^3.4.14",
     "marked": "^17.0.6",
-    "sonner": "^2.0.8"
+    "sonner": "^2.0.8",
+    "@joplin/turndown-plugin-gfm": "^1.0.64",
+    "@plannotator/webtui": "0.1.0",
+    "chokidar": "^5.0.0",
+    "parse5": "^7.3.0",
+    "turndown": "^7.2.4"
   },
   "devDependencies": {
     "@types/node": "^25.5.2",
