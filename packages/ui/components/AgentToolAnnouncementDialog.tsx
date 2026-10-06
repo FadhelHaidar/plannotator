@@ -191,7 +191,7 @@ export function AgentToolAnnouncementDialog({
             id="agent-tool-announcement-description"
             className="mt-1 text-pretty text-sm leading-relaxed text-muted-foreground"
           >
-            Plannotator can give {agent} a <span className="font-mono text-foreground">plannotator</span> tool.
+            Plannotator can give {agent} a <span className="font-mono text-foreground">plannotator</span> tool.{' '}
             {save.kind === 'saved' ? '' : 'It is off for now. '}With it on, {agent} can:
           </p>
 
