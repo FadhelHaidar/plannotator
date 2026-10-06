@@ -298,7 +298,7 @@ Run `/plannotator-last` to annotate the agent's most recent response. The messag
 
 ### The `plannotator` tool
 
-The agent has a `plannotator` tool. When you ask it to "open notes.md in Plannotator", it calls the tool instead of running the CLI:
+The agent can have a `plannotator` tool (off by default on Pi; see below for turning it on). When you ask it to "open notes.md in Plannotator", it calls the tool instead of running the CLI:
 
 - **Open:** `annotate` a file, folder or URL (`gate: true` adds an Approve button), `review` changes or a PR (`options.base` sets the compare ref), or `last` (the agent's last answer; the message in which the agent calls the tool is skipped). The review opens exactly as the matching slash command opens it, with Ask this session. The tool returns at once with a session id (`pn-3f2a9c`) and the URL, and the agent's turn ends. Your decision arrives later as a new message that starts with `Plannotator: notes.md (pn-3f2a9c) — Feedback · 2 comments.` If the agent asked for a gated sign-off, a plain Approve is sent to it too.
 - **List:** the reviews this Pi session opened that are still open, including the ones you opened with `/plannotator-*` commands and plan reviews. Each line shows the id, what it shows, the URL, its age and how many comments you have not sent yet.
@@ -306,7 +306,7 @@ The agent has a `plannotator` tool. When you ask it to "open notes.md in Plannot
 
 Another Pi session cannot list or close these reviews. After `/reload` or `/resume` of the same session, the agent still sees the reviews that are open. After `/new` it does not, because that is another session. In remote mode (or with a single `PLANNOTATOR_PORT`) every review uses the same port, so the tool opens only one review at a time and tells the agent which one to close first. The tool is active only in an interactive Pi session: in print or JSON mode the agent does not get it, because nothing could deliver your decision later. To review several files together, the agent passes a list as `target` (for example `["spec.md", "mock.html"]`); they open as one review in that order, with one decision. Decisions from the slash commands now also start with the same `Plannotator: … (pn-…) — …` line.
 
-To keep the tool out of the agent's tool list, set `PLANNOTATOR_AGENT_TOOL=0` or add `{ "agentTool": false }` to `~/.plannotator/config.json` (the environment variable wins). The slash commands and plan mode are unchanged. The setting is read when a session starts, so it applies to the next session (or after `/reload`); the tool list never changes during a session.
+The tool is off by default: turn it on with `PLANNOTATOR_AGENT_TOOL=1` or `{ "agentTool": true }` in `~/.plannotator/config.json` (the environment variable wins in both directions). Off, the agent has no `plannotator` tool and the slash commands and plan mode work as before. The setting is read when a session starts, so it applies to the next session (or after `/reload`); the tool list never changes during a session, which keeps the model's prompt cache intact.
 
 The extension also ships the `plannotator` knowledge skill (a CLI reference) for installs without the CLI installer's copy. It is user-invoked only: load it with `/skill:plannotator`; it is not listed in the model's system prompt.
 
@@ -327,7 +327,7 @@ During execution, the agent marks completed steps with `[DONE:n]` markers. Progr
 | `/plannotator-annotate <file>` | Open markdown file in annotation UI |
 | `/plannotator-last` | Annotate the last assistant message |
 
-The agent opens, lists and closes reviews with the `plannotator` tool (see above).
+When the `plannotator` tool is turned on, the agent opens, lists and closes reviews with it (see above).
 
 ## Flags
 

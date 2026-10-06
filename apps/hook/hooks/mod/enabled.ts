@@ -50,8 +50,9 @@ export function resolveClaudeModEnabled(envValue: string | undefined, configText
 
 /**
  * Whether the mod registers Claude's `plannotator` tool when nothing is set.
- * Mirrors `AGENT_TOOL_DEFAULT` in packages/shared/config.ts (enabled.test.ts
- * keeps them equal); the owner may flip it there and here together.
+ * Mirrors the claude-code entry of `AGENT_TOOL_DEFAULTS` in
+ * packages/shared/config.ts (enabled.test.ts keeps them equal): on here, where
+ * the tool is deferred behind tool search and costs only its name until used.
  */
 export const AGENT_TOOL_DEFAULT = true
 
@@ -62,7 +63,7 @@ export const AGENT_TOOL_DEFAULT = true
  *   PLANNOTATOR_AGENT_TOOL=0            (env; also false/off/disabled; wins over the config file)
  *   { "agentTool": false }              (config.json in the data dir)
  *
- * Mirrors `resolveAgentTool` in packages/shared/config.ts. Read once, at the
+ * Mirrors `resolveAgentTool(config, env, 'claude-code')` in packages/shared/config.ts. Read once, at the
  * first session.start of the Claude Code process: the tool list is part of
  * the prompt, so it never changes under a running session.
  */

@@ -20,6 +20,8 @@ import {
   resolveGuideHistory,
   resolveReviewProgress,
   resolveAgentTool,
+  agentToolHostOf,
+  AGENT_TOOL_DEFAULTS,
   resolveUseJina,
   resolveTodoProviderEnabled,
   resolveUrlHost,
@@ -429,28 +431,78 @@ describe("resolveReviewProgress env handling", () => {
 });
 
 describe("resolveAgentTool", () => {
-  // The failure this guards: a user who turned the tool off (or on) gets the
+  // The failure this guards: a user who turned the tool on (or off) gets the
   // other answer, so the agent's tool list does not match their setting.
-  test("on when nothing is set; an empty or unrecognized env value counts as unset", () => {
-    expect(resolveAgentTool({}, {})).toBe(true);
-    expect(resolveAgentTool({}, { PLANNOTATOR_AGENT_TOOL: "" })).toBe(true);
-    expect(resolveAgentTool({ agentTool: false }, { PLANNOTATOR_AGENT_TOOL: "" })).toBe(false);
-    expect(resolveAgentTool({ agentTool: false }, { PLANNOTATOR_AGENT_TOOL: "yes" })).toBe(false);
+  test("unset: the host's default (owner's call: on for the Claude Code mod, off on Pi and OpenCode 2)", () => {
+    expect(AGENT_TOOL_DEFAULTS).toEqual({ "claude-code": true, pi: false, opencode: false });
+    for (const host of ["claude-code", "pi", "opencode"] as const) {
+      expect(resolveAgentTool({}, {}, host)).toBe(AGENT_TOOL_DEFAULTS[host]);
+      // An empty or unrecognized env value counts as unset.
+      expect(resolveAgentTool({}, { PLANNOTATOR_AGENT_TOOL: "" }, host)).toBe(AGENT_TOOL_DEFAULTS[host]);
+      expect(resolveAgentTool({}, { PLANNOTATOR_AGENT_TOOL: "yes" }, host)).toBe(AGENT_TOOL_DEFAULTS[host]);
+    }
+  });
+
+  test("config.json overrides the host default in both directions", () => {
+    expect(resolveAgentTool({ agentTool: true }, {}, "pi")).toBe(true);
+    expect(resolveAgentTool({ agentTool: "1" as never }, {}, "opencode")).toBe(true);
+    expect(resolveAgentTool({ agentTool: false }, {}, "claude-code")).toBe(false);
+    expect(resolveAgentTool({ agentTool: "false" as never }, {}, "claude-code")).toBe(false);
+    expect(resolveAgentTool({ agentTool: "nope" as never }, {}, "pi")).toBe(false);
   });
 
   test("the env var wins over agentTool in config.json, in both directions", () => {
     for (const v of ["0", "false", "OFF", "disabled", " off "]) {
-      expect(resolveAgentTool({ agentTool: true }, { PLANNOTATOR_AGENT_TOOL: v })).toBe(false);
+      expect(resolveAgentTool({ agentTool: true }, { PLANNOTATOR_AGENT_TOOL: v }, "claude-code")).toBe(false);
     }
     for (const v of ["1", "true", "On"]) {
-      expect(resolveAgentTool({ agentTool: false }, { PLANNOTATOR_AGENT_TOOL: v })).toBe(true);
+      expect(resolveAgentTool({ agentTool: false }, { PLANNOTATOR_AGENT_TOOL: v }, "pi")).toBe(true);
     }
   });
 
-  test("agentTool is coerced like the other boolean keys", () => {
-    expect(resolveAgentTool({ agentTool: "false" as never }, {})).toBe(false);
-    expect(resolveAgentTool({ agentTool: "0" as never }, {})).toBe(false);
-    expect(resolveAgentTool({ agentTool: "nope" as never }, {})).toBe(true);
+  test("the session origin names the host; other origins have none", () => {
+    expect(agentToolHostOf("claude-code")).toBe("claude-code");
+    expect(agentToolHostOf("pi")).toBe("pi");
+    expect(agentToolHostOf("oh-my-pi")).toBe("pi");
+    expect(agentToolHostOf("opencode")).toBe("opencode");
+    expect(agentToolHostOf("codex")).toBeNull();
+    expect(agentToolHostOf(undefined)).toBeNull();
+  });
+});
+
+// What a later Settings toggle / "turn the tool on" offer reads: the
+// effective value for the session's host, whether the file decided it, and
+// an env override that a toggle cannot change.
+describe("getServerConfig agent tool advert", () => {
+  const savedDataDir = process.env.PLANNOTATOR_DATA_DIR;
+  const savedEnv = process.env.PLANNOTATOR_AGENT_TOOL;
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "plannotator-agent-tool-advert-"));
+    process.env.PLANNOTATOR_DATA_DIR = dir;
+    delete process.env.PLANNOTATOR_AGENT_TOOL;
+  });
+  afterEach(() => {
+    if (savedDataDir === undefined) delete process.env.PLANNOTATOR_DATA_DIR;
+    else process.env.PLANNOTATOR_DATA_DIR = savedDataDir;
+    if (savedEnv === undefined) delete process.env.PLANNOTATOR_AGENT_TOOL;
+    else process.env.PLANNOTATOR_AGENT_TOOL = savedEnv;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("unset: the host default, marked not configured; no host, nothing", () => {
+    expect(getServerConfig(null, "pi")).toMatchObject({ agentTool: false, agentToolConfigured: false, agentToolHost: "pi", agentToolEnabled: false });
+    expect(getServerConfig(null, "claude-code")).toMatchObject({ agentTool: true, agentToolConfigured: false, agentToolHost: "claude-code", agentToolEnabled: true });
+    const codex = getServerConfig(null, "codex");
+    expect([codex.agentTool, codex.agentToolHost, codex.agentToolEnabled]).toEqual([undefined, undefined, undefined]);
+  });
+
+  test("a saved choice is reported, and an env override is reported beside it", () => {
+    saveConfig({ agentTool: true });
+    expect(getServerConfig(null, "opencode")).toMatchObject({ agentTool: true, agentToolConfigured: true, agentToolEnabled: true });
+    expect(getServerConfig(null, "opencode").agentToolEnv).toBeUndefined();
+    process.env.PLANNOTATOR_AGENT_TOOL = "0";
+    expect(getServerConfig(null, "opencode")).toMatchObject({ agentTool: true, agentToolEnv: false, agentToolEnabled: false });
   });
 });
 

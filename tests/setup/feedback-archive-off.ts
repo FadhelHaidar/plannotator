@@ -24,6 +24,6 @@ afterAll(() => {
 process.env.PLANNOTATOR_FEEDBACK_HISTORY = "0";
 
 // The agent tool switch decides whether the plannotator tool is registered at
-// all; a contributor who turned it off in their shell must not fail the tool
-// tests. Tests of the switch set it inside their bodies.
+// all; a contributor who set it in their shell must not change what the tests
+// see (host defaults apply). Tests that need it on set it in their bodies.
 delete process.env.PLANNOTATOR_AGENT_TOOL;

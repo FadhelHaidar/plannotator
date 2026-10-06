@@ -187,7 +187,7 @@ This also clears cached plugin versions for both OpenCode 1 and OpenCode 2. To u
 
 ## The `plannotator` tool
 
-On OpenCode 2 the plugin also gives the agent a `plannotator` tool, in every workflow mode. Ask the agent to "open notes.md in Plannotator" or "let me review these changes in Plannotator", and it opens the review itself:
+On OpenCode 2 the plugin can also give the agent a `plannotator` tool, in every workflow mode. It is off by default (see the end of this section). Ask the agent to "open notes.md in Plannotator" or "let me review these changes in Plannotator", and it opens the review itself:
 
 - The tool returns as soon as the page is open, so the session does not wait while you review.
 - The agent can pass several files to open them as one review, in the order it chose.
@@ -197,7 +197,7 @@ On OpenCode 2 the plugin also gives the agent a `plannotator` tool, in every wor
 
 Plan review still goes through `submit_plan`. The tool needs the CLI, like the slash commands. OpenCode 1 does not get the tool.
 
-To keep the tool out of the agent's tool list, set `PLANNOTATOR_AGENT_TOOL=0` or add `{ "agentTool": false }` to `~/.plannotator/config.json` (the environment variable wins). The slash commands are unchanged. OpenCode reads the setting when it starts, so restart OpenCode after you change it.
+The tool is off by default: turn it on with `PLANNOTATOR_AGENT_TOOL=1` or `{ "agentTool": true }` in `~/.plannotator/config.json` (the environment variable wins in both directions). Off, the slash commands work as before. OpenCode reads the setting when it starts, so restart OpenCode after you change it.
 
 ## Ask this session
 

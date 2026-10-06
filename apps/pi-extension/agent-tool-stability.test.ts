@@ -19,9 +19,9 @@
  *  - the tool's definition drifts from the shared contract, or a
  *    plannotator tool starts adding promptSnippet/promptGuidelines (which Pi
  *    folds into the system prompt);
- *  - the agent tool switch (PLANNOTATOR_AGENT_TOOL) stops keeping the tool out.
+ *  - the agent tool switch stops keeping the tool out (off is Pi's default).
  */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,6 +43,10 @@ function restore(name: string, value: string | undefined): void {
 	if (value === undefined) delete process.env[name];
 	else process.env[name] = value;
 }
+beforeEach(() => {
+	// Off by default on Pi; the lifecycle tests are about the tool once on.
+	process.env.PLANNOTATOR_AGENT_TOOL = "1";
+});
 afterEach(() => {
 	restore("HOME", savedEnv.home);
 	restore("PI_CODING_AGENT_DIR", savedEnv.agentDir);
@@ -354,13 +358,18 @@ describe("the plannotator tool stays put for the whole session", () => {
 		for (const result of results) expect(Object.keys(result as object)).not.toContain("systemPrompt");
 	});
 
-	test("the agent tool switch off: never registered, never active, plan mode unaffected", async () => {
-		process.env.PLANNOTATOR_AGENT_TOOL = "0";
-		const pi = createPi({ activation: "pre-0.99", hasUI: true });
-		await runLifecycle(pi);
+	// Off is the default on Pi (owner's call), and the env var turns it off
+	// over a config.json that turned it on.
+	for (const [label, env] of [["unset (the Pi default)", undefined], ["PLANNOTATOR_AGENT_TOOL=0", "0"]] as const) {
+		test(`the agent tool off, ${label}: never registered, never active, plan mode unaffected`, async () => {
+			if (env === undefined) delete process.env.PLANNOTATOR_AGENT_TOOL;
+			else process.env.PLANNOTATOR_AGENT_TOOL = env;
+			const pi = createPi({ activation: "pre-0.99", hasUI: true });
+			await runLifecycle(pi);
 
-		expect(pi.registrations.map((tool) => tool.name)).not.toContain(TOOL);
-		expect(pi.requests.filter((request) => request.active)).toEqual([]);
-		expect(pi.registrations.map((tool) => tool.name)).toContain("plannotator_submit_plan");
-	});
+			expect(pi.registrations.map((tool) => tool.name)).not.toContain(TOOL);
+			expect(pi.requests.filter((request) => request.active)).toEqual([]);
+			expect(pi.registrations.map((tool) => tool.name)).toContain("plannotator_submit_plan");
+		});
+	}
 });

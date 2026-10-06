@@ -153,10 +153,11 @@ const serverPlugin = {
     // The `plannotator` tool (annotate / review / last / list / close), for
     // every workflow: it opens reviews through the slash commands' own launch
     // and returns at once. Wrapped like the commands: a failed registration
-    // must not take the plugin down. Off with PLANNOTATOR_AGENT_TOOL=0 or
-    // `{ "agentTool": false }`, decided here once per plugin setup: the tool
-    // list is part of the prompt, so a change applies when OpenCode restarts.
-    if (hasToolTransform && resolveAgentTool(loadConfig())) {
+    // must not take the plugin down. Off by default on OpenCode 2; on with
+    // PLANNOTATOR_AGENT_TOOL=1 or `{ "agentTool": true }`, decided here once per
+    // plugin setup: the tool list is part of the prompt, so a change applies
+    // when OpenCode restarts.
+    if (hasToolTransform && resolveAgentTool(loadConfig(), process.env, "opencode")) {
       try {
         await registerPlannotatorTool(ctx.tool as unknown as ToolDomainLike, v2, {
           registry: launches,

@@ -403,9 +403,10 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	const startCodeReview = deps.startCodeReview ?? startCodeReviewBrowserSession;
 	const startAnnotation = deps.startAnnotation ?? startMarkdownAnnotationSession;
 	const startLastMessageAnnotation = deps.startLastMessageAnnotation ?? startLastMessageAnnotationSession;
-	// The `plannotator` tool switch, read once per extension instance (one per
-	// session and per /reload): see the tool's registration below.
-	const agentToolEnabled = resolveAgentTool(loadConfig());
+	// The `plannotator` tool switch (off by default on Pi), read once per
+	// extension instance (one per session and per /reload): see the tool's
+	// registration below.
+	const agentToolEnabled = resolveAgentTool(loadConfig(), process.env, "pi");
 	const currentPiSession = registerCurrentPiSession(pi);
 	// "Ask this session": Ask AI answered by this Pi session (review, annotate,
 	// last, plan review). Listeners register once here; each command binds a bridge to its ctx.

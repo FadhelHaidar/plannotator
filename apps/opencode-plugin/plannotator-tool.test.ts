@@ -267,39 +267,37 @@ describe("registration", () => {
     return added;
   }
 
+  /** Run `fn` with PLANNOTATOR_AGENT_TOOL set (or unset), restoring it after. */
+  async function withAgentToolEnv<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+    const saved = process.env.PLANNOTATOR_AGENT_TOOL;
+    if (value === undefined) delete process.env.PLANNOTATOR_AGENT_TOOL;
+    else process.env.PLANNOTATOR_AGENT_TOOL = value;
+    try {
+      return await fn();
+    } finally {
+      if (saved === undefined) delete process.env.PLANNOTATOR_AGENT_TOOL;
+      else process.env.PLANNOTATOR_AGENT_TOOL = saved;
+    }
+  }
+
   // Failure caught: the tool registered only for some workflows, or setup
-  // wiring that never reaches it.
+  // wiring that never reaches it, once the user turned it on.
   for (const workflow of ["plan-agent", "manual"] as const) {
-    test(`${workflow}: plugin setup registers the plannotator tool`, async () => {
-      expect(await setupAddedTools(workflow)).toContain(PLANNOTATOR_TOOL_NAME);
+    test(`${workflow}: plugin setup registers the plannotator tool when it is turned on`, async () => {
+      expect(await withAgentToolEnv("1", () => setupAddedTools(workflow))).toContain(PLANNOTATOR_TOOL_NAME);
     });
   }
 
-  // Failure caught: a user who turned the agent tool off still gets it in
-  // the model's tool list (env var or config.json in the data dir).
-  test("the agent tool switch off: setup registers no plannotator tool", async () => {
-    const savedEnv = process.env.PLANNOTATOR_AGENT_TOOL;
-    const savedDataDir = process.env.PLANNOTATOR_DATA_DIR;
-    const dataDir = mkdtempSync(path.join(tmpdir(), "plannotator-agent-tool-"));
-    try {
-      process.env.PLANNOTATOR_DATA_DIR = dataDir;
-      process.env.PLANNOTATOR_AGENT_TOOL = "0";
+  // Failure caught: the owner's default (off on OpenCode 2) regresses, or the
+  // config key / env var stops deciding it. PLANNOTATOR_DATA_DIR is the
+  // sandbox beforeEach set up, so config.json here is a temp file.
+  test("off by default; agentTool in config.json turns it on; the env var wins over the file", async () => {
+    await withAgentToolEnv(undefined, async () => {
       expect(await setupAddedTools("plan-agent")).not.toContain(PLANNOTATOR_TOOL_NAME);
-
-      delete process.env.PLANNOTATOR_AGENT_TOOL;
-      writeFileSync(path.join(dataDir, "config.json"), JSON.stringify({ agentTool: false }));
-      expect(await setupAddedTools("manual")).not.toContain(PLANNOTATOR_TOOL_NAME);
-
-      // The env var wins over the file.
-      process.env.PLANNOTATOR_AGENT_TOOL = "1";
+      writeFileSync(path.join(process.env.PLANNOTATOR_DATA_DIR!, "config.json"), JSON.stringify({ agentTool: true }));
       expect(await setupAddedTools("manual")).toContain(PLANNOTATOR_TOOL_NAME);
-    } finally {
-      if (savedEnv === undefined) delete process.env.PLANNOTATOR_AGENT_TOOL;
-      else process.env.PLANNOTATOR_AGENT_TOOL = savedEnv;
-      if (savedDataDir === undefined) delete process.env.PLANNOTATOR_DATA_DIR;
-      else process.env.PLANNOTATOR_DATA_DIR = savedDataDir;
-      rmSync(dataDir, { recursive: true, force: true });
-    }
+    });
+    expect(await withAgentToolEnv("0", () => setupAddedTools("manual"))).not.toContain(PLANNOTATOR_TOOL_NAME);
   });
 });
 
