@@ -1,3 +1,6 @@
+import type { Origin } from "@plannotator/shared/agents";
+import type { PlannotatorConfig } from "@plannotator/shared/config";
+import { getAnnotateApprovedWithNotesPrompt } from "@plannotator/shared/prompts";
 import type { AnnotateOutcome } from "./strict-annotate-result";
 
 export type { AnnotateOutcome } from "./strict-annotate-result";
@@ -7,21 +10,43 @@ export interface AnnotateOutputOptions {
   json: boolean;
 }
 
-export interface AnnotateApprovalCapabilityOptions extends AnnotateOutputOptions {
+export interface AnnotateApprovalCapabilityOptions {
   gate: boolean;
+  hook: boolean;
 }
 
-export interface AnnotateClientLeaseCapabilityOptions extends AnnotateApprovalCapabilityOptions {
+export interface AnnotateClientLeaseCapabilityOptions extends AnnotateOutputOptions {
+  gate: boolean;
   /** True for remote/shared sessions, where a lost tab connection is expected and not abandonment. */
   isRemote: boolean;
 }
 
+/**
+ * What a plaintext approval WITH notes is framed with: the configured
+ * approved-with-notes prompt, the same framing the result file, OpenCode and Pi
+ * deliver. `context` names the file/folder/URL (`File: <path>`); annotate-last
+ * has none.
+ */
+export interface AnnotateApprovalNotesContext {
+  runtime?: Origin;
+  context?: string;
+  config?: PlannotatorConfig;
+}
+
 const APPROVED_PLAINTEXT_MARKER = "The user approved.";
 
+/**
+ * Whether an approval can carry a note to the agent, which is what shows
+ * "Approve with a note…" / "Approve with notes" in the annotate header. Every
+ * gated output delivers it (JSON as `feedback`, plaintext as the
+ * approved-with-notes message, and the Claude Code mod's result file, which a
+ * plaintext launch also writes) except `--hook`, whose protocol has no message
+ * on approval.
+ */
 export function supportsAnnotateApprovalNotes(
   options: AnnotateApprovalCapabilityOptions,
 ): boolean {
-  return options.gate && options.json && !options.hook;
+  return options.gate && !options.hook;
 }
 
 /**
@@ -40,6 +65,7 @@ export function supportsAnnotateClientLease(
 export function formatAnnotateOutcome(
   result: AnnotateOutcome,
   options: AnnotateOutputOptions,
+  notes?: AnnotateApprovalNotesContext,
 ): string | null {
   if (options.hook) {
     if (result.approved || result.exit) return null;
@@ -73,15 +99,24 @@ export function formatAnnotateOutcome(
   }
 
   if (result.exit) return null;
-  if (result.approved) return APPROVED_PLAINTEXT_MARKER;
+  if (result.approved) {
+    // A bare approval keeps the legacy marker byte for byte; only an approval
+    // that carries a note (gate sessions, "Approve with a note…") is framed.
+    const feedback = result.feedback?.trim() ? result.feedback : "";
+    if (!feedback) return APPROVED_PLAINTEXT_MARKER;
+    return getAnnotateApprovedWithNotesPrompt(notes?.runtime, notes?.config, {
+      context: notes?.context,
+      feedback,
+    });
+  }
   return result.feedback || null;
 }
 
 export function createAnnotateOutcomeEmitter(
   options: AnnotateOutputOptions,
-): (result: AnnotateOutcome) => void {
-  return (result) => {
-    const output = formatAnnotateOutcome(result, options);
+): (result: AnnotateOutcome, notes?: AnnotateApprovalNotesContext) => void {
+  return (result, notes) => {
+    const output = formatAnnotateOutcome(result, options, notes);
     if (output !== null) console.log(output);
   };
 }

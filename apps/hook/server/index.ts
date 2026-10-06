@@ -114,7 +114,7 @@ import {
   resolveAnnotateBundleFiles,
   selectAnnotateTokenTarget,
 } from "@plannotator/shared/annotate-target";
-import { annotateBundleRoot } from "@plannotator/shared/annotate-bundle";
+import { annotateBundleRoot, annotateBundleTargetText } from "@plannotator/shared/annotate-bundle";
 import { stripAtPrefix } from "@plannotator/shared/at-reference";
 import { plannotatorBundleSubject } from "@plannotator/shared/plannotator-tool";
 import { createWorktreePool, type WorktreePool, type PoolEntry } from "@plannotator/shared/worktree-pool";
@@ -407,7 +407,8 @@ if (staticFlag) args.splice(staticFlagIdx, 1);
 //   Emits {"decision":"approved|dismissed|annotated","feedback":"..."}.
 //
 // Plaintext (default):
-//   Close → empty. Approve → "The user approved." Annotate → feedback.
+//   Close → empty. Approve → "The user approved." (an approval with a note
+//   prints the approved-with-notes prompt instead). Annotate → feedback.
 //
 const emitAnnotateOutcome = createAnnotateOutcomeEmitter({
   hook: hookFlag,
@@ -1573,7 +1574,6 @@ if (args[0] === "sessions") {
     gate: gateFlag,
     approvalNotesSupported: supportsAnnotateApprovalNotes({
       gate: gateFlag,
-      json: jsonFlag,
       hook: hookFlag,
     }),
     clientLeaseSupported: supportsAnnotateClientLease({
@@ -1637,7 +1637,12 @@ if (args[0] === "sessions") {
             target: folderPath ?? absolutePath,
             origin: detectedOrigin,
           }));
-      emitAnnotateOutcome(outcome);
+      emitAnnotateOutcome(outcome, {
+        runtime: detectedOrigin,
+        context: bundlePaths
+          ? `Files: ${annotateBundleTargetText(bundlePaths)}`
+          : `${folderPath ? "Folder" : isUrl ? "URL" : "File"}: ${folderPath ?? absolutePath}`,
+      });
     },
   });
 
@@ -1855,7 +1860,6 @@ if (args[0] === "sessions") {
     gate: gateFlag,
     approvalNotesSupported: supportsAnnotateApprovalNotes({
       gate: gateFlag,
-      json: jsonFlag,
       hook: hookFlag,
     }),
     clientLeaseSupported: supportsAnnotateClientLease({
@@ -1897,7 +1901,7 @@ if (args[0] === "sessions") {
   server.stop();
 
   publishHostResult(annotateHostResult(result, { kind: "last", origin: detectedOrigin }));
-  emitAnnotateOutcome(result);
+  emitAnnotateOutcome(result, { runtime: detectedOrigin });
   process.exit(0);
 
 } else if (args[0] === "guide") {
@@ -2481,7 +2485,6 @@ if (args[0] === "sessions") {
     gate: gateFlag,
     approvalNotesSupported: supportsAnnotateApprovalNotes({
       gate: gateFlag,
-      json: jsonFlag,
       hook: hookFlag,
     }),
     clientLeaseSupported: supportsAnnotateClientLease({
@@ -2514,7 +2517,7 @@ if (args[0] === "sessions") {
   await Bun.sleep(1500);
   server.stop();
 
-  emitAnnotateOutcome(result);
+  emitAnnotateOutcome(result, { runtime: "copilot-cli" });
   process.exit(0);
 
 } else if (args[0] === "improve-context") {

@@ -1544,6 +1544,16 @@ positive decision exists in every state; composer rows open `DecisionNoteDialog`
 predicate is `hasFeedbackToSend`, so feedback already delivered through the agent terminal shows
 the positive primary rather than a stale Send Feedback.
 
+The approve-carrying gate items (`Approve with a note…`, `Approve with notes`) follow the
+`approvalNotesSupported` advert on `/api/plan`, the same on markdown, raw-HTML and live-app
+surfaces. The Bun CLI sets it with `supportsAnnotateApprovalNotes` = `--gate` and not `--hook`
+(`apps/hook/server/annotate-output.ts`): `--json` carries the note as `feedback`, plaintext prints
+the configured `approvedWithNotes` prompt instead of `The user approved.` (a bare approval keeps
+that line byte for byte), and the Claude Code mod's plaintext `--gate` launches deliver it from the
+result file as an approved-with-notes turn. `--hook` has no message on approval, so the items stay
+hidden there. Pi and OpenCode advertise it from their own servers. Non-gated annotate has no
+approve channel: its only composer is "Send a note…" (feedback).
+
 ### Annotate Options menu and Settings parity
 
 Annotate renders the same document app as plan review, so its Options menu and

@@ -227,7 +227,7 @@ This is the recommended flag for hook integrations. If both `--hook` and `--json
 | Flags | UX | Approve | Close | Send Annotations |
 |---|---|---|---|---|
 | *(none)* | 2-button | n/a | empty | feedback (plaintext) |
-| `--gate` | 3-button | `The user approved.` | empty | feedback (plaintext) |
+| `--gate` | 3-button | `The user approved.`, or the approved-with-notes message when approved with a note | empty | feedback (plaintext) |
 | `--json` | 2-button | n/a | `{"decision":"dismissed"}` | `{"decision":"annotated","feedback":"..."}` |
 | `--gate --json` | 3-button | `{"decision":"approved"}`, or `{"decision":"approved","feedback":"..."}` when approved with notes | `{"decision":"dismissed"}` | `{"decision":"annotated","feedback":"..."}` |
 | `--hook` | 3-button | empty | empty | `{"decision":"block","reason":"..."}` |

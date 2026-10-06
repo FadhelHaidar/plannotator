@@ -78,11 +78,36 @@ describe("annotate stdout", () => {
       .toBe('{"decision":"annotated","feedback":"Revise this."}');
   });
 
-  test("advertises approval notes only for gated direct JSON", () => {
-    expect(supportsAnnotateApprovalNotes({ gate: true, json: true, hook: false })).toBe(true);
-    expect(supportsAnnotateApprovalNotes({ gate: false, json: true, hook: false })).toBe(false);
-    expect(supportsAnnotateApprovalNotes({ gate: true, json: false, hook: false })).toBe(false);
-    expect(supportsAnnotateApprovalNotes({ gate: true, json: true, hook: true })).toBe(false);
+  // Failure caught: "Approve with a note…" hidden in a gated session whose
+  // output delivers the note (plaintext, which the Claude Code mod and the
+  // classic skill launch), or shown where it is dropped (--hook, no gate).
+  test("advertises approval notes for every gated output except --hook", () => {
+    expect(supportsAnnotateApprovalNotes({ gate: true, hook: false })).toBe(true);
+    expect(supportsAnnotateApprovalNotes({ gate: false, hook: false })).toBe(false);
+    expect(supportsAnnotateApprovalNotes({ gate: true, hook: true })).toBe(false);
+  });
+
+  test("plaintext approval with a note prints the configured approved-with-notes prompt", () => {
+    const config = { prompts: { annotate: { approvedWithNotes: "APPROVED {{context}} :: {{feedback}}" } } };
+    expect(formatAnnotateOutcome(
+      { feedback: "Rename the header.", approved: true },
+      { hook: false, json: false },
+      { runtime: "claude-code", context: "File: /tmp/page.html", config },
+    )).toBe("APPROVED File: /tmp/page.html :: Rename the header.");
+    // The default prompt still carries the note and the file it is about.
+    const framed = formatAnnotateOutcome(
+      { feedback: "Rename the header.", approved: true },
+      { hook: false, json: false },
+      { context: "File: /tmp/page.html", config: {} },
+    );
+    expect(framed).toContain("Rename the header.");
+    expect(framed).toContain("File: /tmp/page.html");
+    // Whitespace is no note: the legacy marker, byte for byte.
+    expect(formatAnnotateOutcome(
+      { feedback: "  \n", approved: true },
+      { hook: false, json: false },
+      { config: {} },
+    )).toBe("The user approved.");
   });
 
   test("advertises client-lease only for gated direct JSON, local sessions", () => {
@@ -145,6 +170,9 @@ describe("annotate client-lease call sites", () => {
       // that is what keeps hook/plaintext/remote transports opted out.
       expect(site).toContain("clientLeaseSupported: supportsAnnotateClientLease({");
       expect(site).toContain("isRemote: isRemoteSession()");
+      // A site without the advert hides "Approve with a note…" in its gated
+      // sessions (the server defaults it to false).
+      expect(site).toContain("approvalNotesSupported:");
     }
 
     // Cross-check the brace scan against a plain occurrence count, so a call

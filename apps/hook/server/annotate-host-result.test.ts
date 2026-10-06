@@ -156,3 +156,45 @@ describe("annotate folder session", () => {
     ]);
   }, 30_000);
 });
+
+// The Claude Code mod (plannotator tool `gate: true`, `/plannotator-annotate
+// x --gate`, a taken-over `plannotator annotate x --gate` run) launches plain
+// `--gate` with the result file, and the classic skill runs plain `--gate`.
+// Failure caught: the header hiding "Approve with a note…" there (the advert
+// used to require --json), or a note approved there being dropped.
+describe("gated approval with a note, plaintext launch", () => {
+  const page = (root: string) => writeFileSync(join(root, "page.html"), "<!doctype html><h1>Plan</h1><p>Body.</p>");
+  const NOTE = "Approved, but rename the header before shipping.";
+
+  test("an HTML file advertises approval notes; the note reaches stdout and the host record", async () => {
+    const run = start(["page.html", "--gate"], page);
+    const base = await run.base();
+    const plan = await (await fetch(`${base}/api/plan`)).json() as { renderAs?: string; gate?: boolean; approvalNotesSupported?: boolean };
+    expect(plan).toMatchObject({ renderAs: "html", gate: true, approvalNotesSupported: true });
+
+    await post(base, "/api/approve", { feedback: NOTE, annotations: [], codeAnnotations: [] });
+    const { code, stdout, record } = await run.finish();
+    expect(code).toBe(0);
+    expect(stdout).toContain(NOTE);
+    expect(stdout).toContain(join(run.root, "page.html"));
+    expect(record).toMatchObject({ surface: "annotate", decision: "approved", noop: false });
+    expect(record.message).toContain(NOTE);
+  }, 30_000);
+
+  test("a bare approval keeps the legacy stdout marker and stays a no-op", async () => {
+    const run = start(["page.html", "--gate"], page);
+    await post(await run.base(), "/api/approve", { feedback: "", annotations: [], codeAnnotations: [] });
+    const { stdout, record } = await run.finish();
+    expect(stdout.trim()).toBe("The user approved.");
+    expect(record).toMatchObject({ decision: "approved", noop: true });
+  }, 30_000);
+
+  test("--hook (no message on approval) keeps the advert off", async () => {
+    const run = start(["page.html", "--gate", "--hook"], page);
+    const base = await run.base();
+    const plan = await (await fetch(`${base}/api/plan`)).json() as { approvalNotesSupported?: boolean };
+    expect(plan.approvalNotesSupported).toBe(false);
+    await post(base, "/api/approve", { annotations: [], codeAnnotations: [] });
+    await run.finish();
+  }, 30_000);
+});
