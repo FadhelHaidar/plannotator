@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { annotateHostResult, isAllowedHostResultPath, reviewHostResult, takeHostResultPath, HOST_RESULT_FILE_ENV } from "./host-result";
+import { annotateContextLine, annotateHostResult, isAllowedHostResultPath, reviewHostResult, takeHostResultPath, HOST_RESULT_FILE_ENV } from "./host-result";
 import { buildReviewOutput } from "./review-output";
+import { formatAnnotateOutcome } from "./annotate-output";
 import { deliveryFor } from "../hooks/mod/delivery";
 
 describe("reviewHostResult", () => {
@@ -77,6 +78,30 @@ describe("reviewHostResult", () => {
 });
 
 describe("annotateHostResult", () => {
+  // Failure caught: plaintext stdout and the result file naming the target of
+  // an approval with notes differently (they share annotateContextLine).
+  test("an approval with notes reads the same on stdout and in the result file", () => {
+    const config = { prompts: { annotate: { approvedWithNotes: "{{context}} || {{feedback}}" } } };
+    const outcome = { approved: true, feedback: "ship it after the rename", annotations: [] };
+    const contexts = [
+      { kind: "file", target: "/repo/page.html" },
+      { kind: "folder", target: "/repo/docs" },
+      { kind: "url", target: "https://example.com/a" },
+      { kind: "bundle", bundlePaths: ["/repo/a.md", "/repo/b.md"] },
+      { kind: "last" },
+    ] as const;
+    const lines = contexts.map((context) => {
+      const record = annotateHostResult(outcome, { ...context, config });
+      const stdout = formatAnnotateOutcome(outcome, { hook: false, json: false }, { context: annotateContextLine(context), config });
+      expect(record.message).toBe(stdout!);
+      return annotateContextLine(context);
+    });
+    expect(lines.map((line) => line.split(":")[0])).toEqual(["File", "Folder", "URL", "Files", ""]);
+    expect(lines[0]).toBe("File: /repo/page.html");
+    expect(lines[3]).toContain("/repo/a.md");
+    expect(lines[3]).toContain("/repo/b.md");
+  });
+
   test("file feedback carries the annotate prompt with the file named", () => {
     const record = annotateHostResult({ feedback: "1. tighten intro", annotations: [{}] }, { kind: "file", target: "/repo/notes.md" });
     expect(record).toMatchObject({ surface: "annotate", decision: "annotated", noop: false, annotationCount: 1 });

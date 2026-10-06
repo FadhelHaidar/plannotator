@@ -170,10 +170,21 @@ describe("annotate client-lease call sites", () => {
       // that is what keeps hook/plaintext/remote transports opted out.
       expect(site).toContain("clientLeaseSupported: supportsAnnotateClientLease({");
       expect(site).toContain("isRemote: isRemoteSession()");
-      // A site without the advert hides "Approve with a note…" in its gated
-      // sessions (the server defaults it to false).
-      expect(site).toContain("approvalNotesSupported:");
     }
+
+    // Every CLI-flag site decides "Approve with a note…" through the shared
+    // predicate (a hardcoded or missing advert hides it, or offers it where
+    // the note is dropped). The one exception is opencode-annotate-last: its
+    // only output is the structured record, so the advert is the gate itself.
+    const bridge = "approvalNotesSupported: input.gate === true,";
+    const bridgeSites = sites.filter((site) => site.includes(bridge));
+    expect(bridgeSites).toHaveLength(1);
+    expect(bridgeSites[0]).toContain('mode: "annotate-last"');
+    for (const site of sites.filter((site) => !site.includes(bridge))) {
+      expect(site).toContain("approvalNotesSupported: supportsAnnotateApprovalNotes({");
+    }
+    const advertUses = source.split("approvalNotesSupported: supportsAnnotateApprovalNotes({").length - 1;
+    expect(advertUses).toBe(sites.length - 1);
 
     // Cross-check the brace scan against a plain occurrence count, so a call
     // site the scanner failed to slice cannot pass by being invisible.

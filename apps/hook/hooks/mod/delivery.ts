@@ -185,6 +185,16 @@ export const LEGACY_REVIEW_APPROVED_TEXT = '# Code Review\n\nCode review complet
 export const LEGACY_REVIEW_APPROVED_WITH_NOTES_HEADING = '# Code Review — Approved with Notes'
 
 /**
+ * The first line of the CLI's default annotate approved-with-notes prompt
+ * (`DEFAULT_ANNOTATE_APPROVED_WITH_NOTES_PROMPT`; delivery.test.ts keeps them
+ * equal), which plaintext `--gate` prints for an approval that carries a note.
+ * A launch whose result file is missing is then still delivered as "Approved
+ * with notes" rather than as feedback. A customized prompt cannot be told
+ * apart and arrives as feedback, as for review.
+ */
+export const LEGACY_ANNOTATE_APPROVED_WITH_NOTES_HEADING = '# Approved with Notes'
+
+/**
  * What the editor posts, and an annotate CLI prints, for a Done with nothing
  * to send (`ANNOTATE_NO_FEEDBACK_SENTENCE` in packages/editor/annotateSubmission.ts
  * and the multi-message variant in packages/ui/utils/parser.ts; delivery.test.ts
@@ -220,6 +230,9 @@ export function legacyResult(kind: SessionKind, printed: string): HostResultReco
     return { v: 1, surface, decision: 'approved', message: '', noop: true }
   }
   if (surface === 'review' && text.startsWith(LEGACY_REVIEW_APPROVED_WITH_NOTES_HEADING)) {
+    return { v: 1, surface, decision: 'approved', message: text, noop: false, withNotes: true }
+  }
+  if (surface !== 'review' && text.startsWith(`${LEGACY_ANNOTATE_APPROVED_WITH_NOTES_HEADING}\n`)) {
     return { v: 1, surface, decision: 'approved', message: text, noop: false, withNotes: true }
   }
   return { v: 1, surface, decision: 'annotated', message: text, noop: false }

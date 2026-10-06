@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { DEFAULT_REVIEW_APPROVED_PROMPT, DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT } from '@plannotator/shared/prompts'
+import { DEFAULT_ANNOTATE_APPROVED_WITH_NOTES_PROMPT, DEFAULT_REVIEW_APPROVED_PROMPT, DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT } from '@plannotator/shared/prompts'
 import {
   deliveryFor,
+  LEGACY_ANNOTATE_APPROVED_WITH_NOTES_HEADING,
   LEGACY_ANNOTATE_NO_FEEDBACK_TEXTS,
   LEGACY_REVIEW_APPROVED_TEXT,
   LEGACY_REVIEW_APPROVED_WITH_NOTES_HEADING,
@@ -106,6 +107,22 @@ describe('legacyResult (a CLI that predates the host result file)', () => {
     expect(delivery.text).toContain('rename foo')
   })
 
+  // Plaintext --gate prints this when the reviewer approves with a note; a
+  // launch whose result.json is missing must not read it as feedback.
+  test('an annotate approval with notes is delivered under its own outcome', () => {
+    const printed = DEFAULT_ANNOTATE_APPROVED_WITH_NOTES_PROMPT
+      .replace('{{contextBlock}}', 'File: /x/page.html\n\n')
+      .replace('{{feedback}}', 'rename the header')
+    for (const kind of ['annotate', 'last'] as const) {
+      const delivery = deliveryFor(legacyResult(kind, printed), CONTEXT)
+      expect(delivery.action).toBe('submit')
+      expect(delivery.text.split('\n')[0]).toBe('Plannotator: notes.md — Approved with notes.')
+      expect(delivery.text).toContain('rename the header')
+    }
+    // Feedback that merely quotes the heading mid-text stays feedback.
+    expect(deliveryFor(legacyResult('annotate', 'fix this\n# Approved with Notes'), CONTEXT).text).not.toContain('Approved with notes')
+  })
+
   test('feedback, close and the annotate approval line', () => {
     expect(deliveryFor(legacyResult('review', '# Code Review Feedback\n\nfix'), CONTEXT).text).toContain('Changes requested')
     expect(deliveryFor(legacyResult('review', 'Review session closed without feedback.'), CONTEXT).action).toBe('log')
@@ -131,6 +148,7 @@ describe('legacyResult (a CLI that predates the host result file)', () => {
   test('the recognized approval texts are the CLI defaults', () => {
     expect(LEGACY_REVIEW_APPROVED_TEXT).toBe(DEFAULT_REVIEW_APPROVED_PROMPT)
     expect(DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT.split('\n')[0]).toBe(LEGACY_REVIEW_APPROVED_WITH_NOTES_HEADING)
+    expect(DEFAULT_ANNOTATE_APPROVED_WITH_NOTES_PROMPT.split('\n')[0]).toBe(LEGACY_ANNOTATE_APPROVED_WITH_NOTES_HEADING)
   })
 })
 

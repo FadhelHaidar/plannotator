@@ -114,7 +114,7 @@ import {
   resolveAnnotateBundleFiles,
   selectAnnotateTokenTarget,
 } from "@plannotator/shared/annotate-target";
-import { annotateBundleRoot, annotateBundleTargetText } from "@plannotator/shared/annotate-bundle";
+import { annotateBundleRoot } from "@plannotator/shared/annotate-bundle";
 import { stripAtPrefix } from "@plannotator/shared/at-reference";
 import { plannotatorBundleSubject } from "@plannotator/shared/plannotator-tool";
 import { createWorktreePool, type WorktreePool, type PoolEntry } from "@plannotator/shared/worktree-pool";
@@ -125,7 +125,9 @@ import { discardEnvPullSessionBridgeConfig, takeEnvPullSessionBridgeConfig } fro
 import { writeUrlQr } from "@plannotator/server/qr";
 import { resolveAnnotateTarget } from "./annotate-resolution";
 import {
+  annotateContextLine,
   annotateHostResult,
+  type AnnotateHostContext,
   planHostResult,
   publishHostResult,
   reviewHostResult,
@@ -1630,19 +1632,15 @@ if (args[0] === "sessions") {
     requireApproval: requireApprovalFlag,
     resultFile,
     emitLegacyOutcome: (outcome) => {
-      publishHostResult(annotateHostResult(outcome, bundlePaths
+      const hostContext: AnnotateHostContext = bundlePaths
         ? { kind: "bundle", bundlePaths, origin: detectedOrigin }
         : {
             kind: folderPath ? "folder" : isUrl ? "url" : "file",
             target: folderPath ?? absolutePath,
             origin: detectedOrigin,
-          }));
-      emitAnnotateOutcome(outcome, {
-        runtime: detectedOrigin,
-        context: bundlePaths
-          ? `Files: ${annotateBundleTargetText(bundlePaths)}`
-          : `${folderPath ? "Folder" : isUrl ? "URL" : "File"}: ${folderPath ?? absolutePath}`,
-      });
+          };
+      publishHostResult(annotateHostResult(outcome, hostContext));
+      emitAnnotateOutcome(outcome, { runtime: detectedOrigin, context: annotateContextLine(hostContext) });
     },
   });
 

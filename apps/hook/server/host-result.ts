@@ -189,6 +189,27 @@ export interface AnnotateHostContext {
   config?: PlannotatorConfig;
 }
 
+/** The header word for an annotate target (`File`, `Folder`, `URL`, `Files`). */
+function annotateTargetHeader(kind: AnnotateHostContext["kind"]): "File" | "Folder" | "URL" | "Files" {
+  return kind === "folder" ? "Folder" : kind === "url" ? "URL" : kind === "bundle" ? "Files" : "File";
+}
+
+/** The target an annotate session names: the bundle's file list, else `target`. */
+function annotateTargetText(context: AnnotateHostContext): string {
+  return context.kind === "bundle" ? annotateBundleTargetText(context.bundlePaths ?? []) : context.target ?? "";
+}
+
+/**
+ * The `{{context}}` of the approved-with-notes prompt: `File: <path>`,
+ * `Folder: …`, `URL: …` or `Files: …`; empty for annotate-last. One helper
+ * for the result file and the CLI's plaintext stdout, so both name the target
+ * the same way.
+ */
+export function annotateContextLine(context: AnnotateHostContext): string {
+  if (context.kind === "last") return "";
+  return `${annotateTargetHeader(context.kind)}: ${annotateTargetText(context)}`;
+}
+
 /**
  * Annotate and annotate-last. The CLI prints raw feedback for these (the skill
  * text frames it); a detached host has no skill, so the record carries the
@@ -212,13 +233,12 @@ function annotateHostRecord(result: AnnotateOutcomeLike, context: AnnotateHostCo
   if (result.exit) {
     return { v: 1, surface, decision: "dismissed", message: "", noop: true, ...(annotationCount !== undefined && { annotationCount }), ...closedByFields(result) };
   }
-  const header = context.kind === "folder" ? "Folder" : context.kind === "url" ? "URL" : context.kind === "bundle" ? "Files" : "File";
-  if (context.kind === "bundle") context = { ...context, target: annotateBundleTargetText(context.bundlePaths ?? []) };
+  const header = annotateTargetHeader(context.kind);
   if (result.approved) {
     if (!feedback) {
       return { v: 1, surface, decision: "approved", message: getAnnotateApprovedPrompt(runtime, context.config), noop: true, ...(annotationCount !== undefined && { annotationCount }) };
     }
-    const contextLine = context.kind === "last" ? "" : `${header}: ${context.target ?? ""}`;
+    const contextLine = annotateContextLine(context);
     return {
       v: 1,
       surface,
@@ -235,7 +255,7 @@ function annotateHostRecord(result: AnnotateOutcomeLike, context: AnnotateHostCo
   }
   const message = context.kind === "last"
     ? getAnnotateMessageFeedbackPrompt(runtime, context.config, { feedback })
-    : getAnnotateFileFeedbackPrompt(runtime, context.config, { fileHeader: header, filePath: context.target ?? "", feedback });
+    : getAnnotateFileFeedbackPrompt(runtime, context.config, { fileHeader: header, filePath: annotateTargetText(context), feedback });
   return { v: 1, surface, decision: "annotated", message, noop: false, ...(annotationCount !== undefined && { annotationCount }) };
 }
 
