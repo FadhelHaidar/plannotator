@@ -667,9 +667,19 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		if (nextTools.length !== activeTools.length) pi.setActiveTools(nextTools);
 	}
 
-	async function applyPhaseConfig(ctx: ExtensionContext, opts: { restoreSavedState?: boolean } = {}): Promise<void> {
+	/**
+	 * Apply the current phase's tools, model and thinking level. With
+	 * `applyModelSettings: false` only the tools are re-applied: the model and
+	 * thinking level stay as they are and the saved pre-phase state is not
+	 * restored (the same-phase /tree resync, #1722).
+	 */
+	async function applyPhaseConfig(
+		ctx: ExtensionContext,
+		opts: { restoreSavedState?: boolean; applyModelSettings?: boolean } = {},
+	): Promise<void> {
 		const profile = getPhaseProfile();
-		if (opts.restoreSavedState !== false && savedState) {
+		const applyModelSettings = opts.applyModelSettings !== false;
+		if (applyModelSettings && opts.restoreSavedState !== false && savedState) {
 			await restoreSavedState(ctx);
 		}
 
@@ -701,11 +711,11 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			}
 		}
 
-		if (profile?.model) {
+		if (applyModelSettings && profile?.model) {
 			await applyModelRef(profile.model, ctx, phase);
 		}
 
-		if (profile?.thinking) {
+		if (applyModelSettings && profile?.thinking) {
 			// The config accepts every level current Pi knows, which is a superset
 			// of the `ThinkingLevel` union of the pinned Pi floor (#1304). Pi clamps
 			// a level the running model does not support, so handing it one this
@@ -2275,8 +2285,9 @@ Call ${PLAN_MARK_DONE_TOOL} immediately after each completed step and before the
 	 */
 	async function resyncPhaseFromSession(
 		ctx: ExtensionContext,
-		options: { phaseWhenUnrecorded: Phase; warnOnPlanning: boolean },
+		options: { phaseWhenUnrecorded: Phase; warnOnPlanning: boolean; keepModelWhenPhaseUnchanged?: boolean },
 	): Promise<void> {
+		const phaseBefore = phase;
 		const entries = ctx.sessionManager.getBranch();
 		const stateEntry = entries
 			.filter(
@@ -2421,7 +2432,16 @@ Call ${PLAN_MARK_DONE_TOOL} immediately after each completed step and before the
 			const idleTools = stripPlanningOnlyTools(activeTools);
 			if (idleTools.length !== activeTools.length) pi.setActiveTools(idleTools);
 		} else if (phase === "planning" || phase === "executing") {
-			await applyPhaseConfig(ctx, { restoreSavedState: true });
+			// A /tree navigation that stays in the same phase must not undo a
+			// model or thinking level the user picked during that phase (#1722):
+			// restoring the pre-plan model and re-applying the phase profile
+			// belong to an actual phase change. Pi and oh-my-pi leave the model
+			// alone on /tree, so keeping it keeps the user's choice. Tools are
+			// still re-derived from the new path.
+			await applyPhaseConfig(ctx, {
+				restoreSavedState: true,
+				applyModelSettings: !(options.keepModelWhenPhaseUnchanged && phase === phaseBefore),
+			});
 		}
 
 		updateStatus(ctx);
@@ -2477,6 +2497,10 @@ Call ${PLAN_MARK_DONE_TOOL} immediately after each completed step and before the
 	// that was delivered on the abandoned branch. Re-derive everything from the
 	// new path; a path with no plannotator state at all means idle.
 	pi.on("session_tree", async (_event, ctx) => {
-		await resyncPhaseFromSession(ctx, { phaseWhenUnrecorded: "idle", warnOnPlanning: false });
+		await resyncPhaseFromSession(ctx, {
+			phaseWhenUnrecorded: "idle",
+			warnOnPlanning: false,
+			keepModelWhenPhaseUnchanged: true,
+		});
 	});
 }
