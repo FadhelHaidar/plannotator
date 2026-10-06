@@ -460,10 +460,11 @@ describe("resolveAgentTool", () => {
     }
   });
 
-  test("the session origin names the host; other origins have none", () => {
+  test("only the three tool hosts name one", () => {
     expect(agentToolHostOf("claude-code")).toBe("claude-code");
     expect(agentToolHostOf("pi")).toBe("pi");
-    expect(agentToolHostOf("oh-my-pi")).toBe("pi");
+    // The argument is a session-bridge host, never an agent origin.
+    expect(agentToolHostOf("oh-my-pi")).toBeNull();
     expect(agentToolHostOf("opencode")).toBe("opencode");
     expect(agentToolHostOf("codex")).toBeNull();
     expect(agentToolHostOf(undefined)).toBeNull();

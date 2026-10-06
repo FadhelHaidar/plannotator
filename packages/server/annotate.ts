@@ -11,6 +11,7 @@
  *   PLANNOTATOR_PORT   - Fixed port or inclusive range (default: random locally, 19432 for remote)
  */
 
+import { isSameOriginOrNoOrigin } from "@plannotator/shared/request-origin";
 import { appHtmlResponse, likelyAppHtmlEncoding, prewarmAppHtml } from "@plannotator/shared/app-html";
 import { isRemoteSession, getServerHostname, startBunServerOnAvailablePort, buildAdvertisedUrl } from "./remote";
 import { getRepoInfo } from "./repo";
@@ -55,7 +56,7 @@ import { dirname, resolve as resolvePath } from "path";
 import { isWithinDirectory } from "@plannotator/shared/html-assets-node";
 import { isWSL } from "./browser";
 import { handleOpenInApps, handleOpenIn } from "./open-in";
-import { createAIRuntime } from "./ai-runtime";
+import { agentToolHostForServer, createAIRuntime } from "./ai-runtime";
 import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control";
 import { countUnsentDraftComments, hostSessionClosedEvent } from "@plannotator/shared/host-control";
 import { isAIEndpointPath, isLongLivedAIEndpointPath, type AIEndpoints, type SessionBridge } from "@plannotator/ai";
@@ -890,7 +891,7 @@ export async function startAnnotateServer(
               repoInfo,
               projectRoot: process.cwd(),
               isWSL: wslFlag,
-              serverConfig: getServerConfig(gitUser, origin),
+              serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge)),
               ...getAutoUpdateAdvert(),
               agentTerminal: agentTerminal.capability,
               feedbackTemplates: {
@@ -964,7 +965,7 @@ export async function startAnnotateServer(
               // Per-document draft copies (/api/draft/document): absent means
               // the client keeps every comment in the session draft only.
               ...(annotateDrafts.documentsEnabled ? { documentDrafts: true } : {}),
-              serverConfig: getServerConfig(gitUser, origin),
+              serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge)),
               ...getAutoUpdateAdvert(),
               agentTerminal: agentTerminal.capability,
               ...(recentMessages ? { recentMessages } : {}),
@@ -1079,6 +1080,9 @@ export async function startAnnotateServer(
 
           // API: Update user config (write-back to ~/.plannotator/config.json)
           if (url.pathname === "/api/config" && req.method === "POST") {
+            if (!isSameOriginOrNoOrigin(req.headers.get("origin"), url.host)) {
+              return Response.json({ error: "Cross-origin config writes are not allowed" }, { status: 403 });
+            }
             try {
               const body = (await req.json()) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; agentTool?: unknown; conventionalComments?: boolean; conventionalLabels?: unknown[] | null; agentTerminalSide?: unknown; agentTerminalDefaultAgent?: unknown };
               const toSave: Record<string, unknown> = {};

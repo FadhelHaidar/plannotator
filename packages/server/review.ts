@@ -9,6 +9,7 @@
  *   PLANNOTATOR_PORT   - Fixed port or inclusive range (default: random locally, 19432 for remote)
  */
 
+import { isSameOriginOrNoOrigin } from "@plannotator/shared/request-origin";
 import { appHtmlResponse, likelyAppHtmlEncoding, prewarmAppHtml } from "@plannotator/shared/app-html";
 import { isRemoteSession, getServerHostname, startBunServerOnAvailablePort, buildAdvertisedUrl } from "./remote";
 import type { Origin } from "@plannotator/shared/agents";
@@ -150,7 +151,7 @@ import {
   fetchPRArtifactDocument,
   PRArtifactDocumentError,
 } from "@plannotator/shared/pr-artifact-document";
-import { createAIRuntime } from "./ai-runtime";
+import { agentToolHostForServer, createAIRuntime } from "./ai-runtime";
 import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control";
 import { countUnsentDraftComments, hostSessionClosedEvent } from "@plannotator/shared/host-control";
 import { isAIEndpointPath, isLongLivedAIEndpointPath, type AIEndpoints, type SessionBridge } from "@plannotator/ai";
@@ -2311,7 +2312,7 @@ export async function startReviewServer(
               ...(servedError && { error: servedError }),
               semanticDiff: await getSemanticDiffAdvert(servedDiffType as DiffType),
               callFlow: await getCallFlowAdvert(servedDiffType as DiffType),
-              serverConfig: getServerConfig(gitUser, origin),
+              serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge)),
               ...getAutoUpdateAdvert(),
             });
           }
@@ -3635,6 +3636,9 @@ export async function startReviewServer(
 
           // API: Update user config (write-back to ~/.plannotator/config.json)
           if (url.pathname === "/api/config" && req.method === "POST") {
+            if (!isSameOriginOrNoOrigin(req.headers.get("origin"), url.host)) {
+              return Response.json({ error: "Cross-origin config writes are not allowed" }, { status: 403 });
+            }
             try {
               const body = (await req.json()) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; agentTool?: unknown; reviewAnalysis?: Record<string, unknown>; conventionalComments?: boolean; conventionalLabels?: unknown[] | null };
               const toSave: Record<string, unknown> = {};

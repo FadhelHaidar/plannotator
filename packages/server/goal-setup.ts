@@ -25,6 +25,7 @@ import {
   handleUpload,
 } from "./shared-handlers";
 import { detectGitUser, getServerConfig, saveConfig } from "./config";
+import { agentToolHostForServer } from "./ai-runtime";
 import { isFaviconStyle, type FaviconStyle } from "@plannotator/shared/favicon";
 import { isWSL } from "./browser";
 
@@ -124,7 +125,7 @@ export async function startGoalSetupServer(
               repoInfo,
               projectRoot: process.cwd(),
               isWSL: wslFlag,
-              serverConfig: getServerConfig(gitUser, origin),
+              serverConfig: getServerConfig(gitUser, agentToolHostForServer()),
               sharingEnabled: false,
             });
           }

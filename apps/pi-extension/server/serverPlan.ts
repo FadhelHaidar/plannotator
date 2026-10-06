@@ -1,3 +1,4 @@
+import { isSameOriginOrNoOrigin } from "../generated/request-origin.ts";
 import { randomUUID } from "node:crypto";
 import { likelyAppHtmlEncoding, prewarmAppHtml } from "../generated/app-html.ts";
 import { createServer } from "node:http";
@@ -346,7 +347,7 @@ export async function startPlanReviewServer(options: {
 					archivePlans,
 					sharingEnabled,
 					shareBaseUrl,
-					serverConfig: getServerConfig(gitUser, options.origin ?? "pi"),
+					serverConfig: getServerConfig(gitUser, "pi"),
 				});
 			} else {
 				json(res, {
@@ -363,7 +364,7 @@ export async function startPlanReviewServer(options: {
 					pasteApiUrl,
 					repoInfo,
 					projectRoot: process.cwd(),
-					serverConfig: getServerConfig(gitUser, options.origin ?? "pi"),
+					serverConfig: getServerConfig(gitUser, "pi"),
 				});
 			}
 		} else if (url.pathname === "/api/hooks/status" && req.method === "GET") {
@@ -382,6 +383,10 @@ export async function startPlanReviewServer(options: {
 				composedLength: composed?.length ?? null,
 			});
 		} else if (url.pathname === "/api/config" && req.method === "POST") {
+			if (!isSameOriginOrNoOrigin(req.headers.origin ?? null, req.headers.host ?? "")) {
+				json(res, { error: "Cross-origin config writes are not allowed" }, 403);
+				return;
+			}
 			try {
 				const body = (await parseBody(req)) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; agentTool?: unknown; conventionalComments?: boolean; conventionalLabels?: unknown[] | null; pfmReminder?: boolean };
 				const toSave: Record<string, unknown> = {};

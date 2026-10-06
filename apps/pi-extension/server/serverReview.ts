@@ -1,3 +1,4 @@
+import { isSameOriginOrNoOrigin } from "../generated/request-origin.ts";
 import { spawn } from "node:child_process";
 import { likelyAppHtmlEncoding, prewarmAppHtml } from "../generated/app-html.ts";
 import { readFileSync, existsSync, statSync } from "node:fs";
@@ -2311,7 +2312,7 @@ export async function startReviewServer(options: {
 				...(servedError && { error: servedError }),
 				semanticDiff: await getSemanticDiffAdvert(servedDiffType as DiffType),
 				callFlow: await getCallFlowAdvert(servedDiffType as DiffType),
-				serverConfig: getServerConfig(gitUser, options.origin ?? "pi"),
+				serverConfig: getServerConfig(gitUser, "pi"),
 			});
 		} else if (url.pathname === "/api/fetch-base" && req.method === "POST") {
 			// Fetch the remote default branch so the local baseline catches up
@@ -3529,6 +3530,10 @@ export async function startReviewServer(options: {
 				json(res, { error: "File not found" }, 404);
 			}
 		} else if (url.pathname === "/api/config" && req.method === "POST") {
+			if (!isSameOriginOrNoOrigin(req.headers.origin ?? null, req.headers.host ?? "")) {
+				json(res, { error: "Cross-origin config writes are not allowed" }, 403);
+				return;
+			}
 			try {
 				const body = (await parseBody(req)) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; agentTool?: unknown; reviewAnalysis?: Record<string, unknown>; conventionalComments?: boolean };
 				const toSave: Record<string, unknown> = {};

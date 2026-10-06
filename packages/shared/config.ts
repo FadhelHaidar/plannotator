@@ -624,7 +624,7 @@ export function detectGitUser(cwd?: string): string | null {
  * Build the serverConfig payload for API responses.
  * Reads config.json fresh each call so the response reflects the latest file on disk.
  */
-export function getServerConfig(gitUser: string | null, origin?: string | null): {
+export function getServerConfig(gitUser: string | null, agentToolIntegration?: string | null): {
   displayName?: string;
   diffOptions?: DiffOptions;
   theme?: ThemeConfig;
@@ -646,7 +646,7 @@ export function getServerConfig(gitUser: string | null, origin?: string | null):
   const cfg = loadConfig();
   const autoUpdateEnv = parseAutoUpdateEnv();
   const agentToolEnv = parseAgentToolEnv();
-  const agentToolHost = agentToolHostOf(origin);
+  const agentToolHost = agentToolHostOf(agentToolIntegration);
   return {
     displayName: cfg.displayName,
     diffOptions: cfg.diffOptions,
@@ -679,8 +679,10 @@ export function getServerConfig(gitUser: string | null, origin?: string | null):
 /**
  * What a Settings toggle or a one-time "turn the tool on" offer needs about
  * the `plannotator` agent tool (see getServerConfig):
- *  - agentToolHost: the session's host, when its origin is one that registers
- *    the tool (otherwise none of the fields below except a set config value);
+ *  - agentToolHost: the integration that started this server, when it is one
+ *    that registers the tool (`agentToolIntegration`: the session-bridge host,
+ *    see agentToolHostOf); absent otherwise, and then so are the fields below
+ *    except a value config.json sets;
  *  - agentTool: the config-file value, or the host's default while unset
  *    (always explicit when the host is known, like autoUpdate);
  *  - agentToolConfigured: whether config.json holds an explicit choice;
@@ -907,14 +909,14 @@ export const AGENT_TOOL_DEFAULTS: Readonly<Record<AgentToolHost, boolean>> = {
 };
 
 /**
- * The tool host a session's origin runs on, or null for an origin whose host
- * registers no `plannotator` tool. oh-my-pi loads the Pi extension.
+ * The tool host for a server's launching integration, or null. Callers pass
+ * the session-bridge host that started the server (the Claude Code mod and
+ * the OpenCode 2 plugin hand one to the CLI; Pi's servers run inside the Pi
+ * extension), never the agent origin: an origin of claude-code or opencode
+ * also covers the classic hook and OpenCode 1, which have no tool.
  */
-export function agentToolHostOf(origin: string | null | undefined): AgentToolHost | null {
-  if (origin === "claude-code") return "claude-code";
-  if (origin === "pi" || origin === "oh-my-pi") return "pi";
-  if (origin === "opencode") return "opencode";
-  return null;
+export function agentToolHostOf(host: string | null | undefined): AgentToolHost | null {
+  return host === "claude-code" || host === "pi" || host === "opencode" ? host : null;
 }
 
 /** The PLANNOTATOR_AGENT_TOOL override, or undefined when it does not decide. */

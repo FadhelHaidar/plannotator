@@ -12,6 +12,7 @@ import {
   type PiSDKConfig,
   type PullSessionBridgeConfig,
   type SessionBridge,
+  type SessionBridgeHost,
 } from "@plannotator/ai";
 import { resolveWindowsCommandShim } from "@plannotator/ai/providers/command-path";
 import { isLoopbackHostHeader } from "@plannotator/shared/loopback-host";
@@ -54,6 +55,8 @@ interface CreateAIRuntimeOptions {
 
 let envPullBridgeTaken = false;
 let envPullBridge: PullSessionBridgeConfig | undefined;
+/** The host named by a valid pull-bridge config, kept even after a discard. */
+let envLaunchingHost: SessionBridgeHost | undefined;
 
 /**
  * The pull-bridge config from the environment, read once per process. Taking
@@ -64,8 +67,31 @@ export function takeEnvPullSessionBridgeConfig(): PullSessionBridgeConfig | unde
   if (!envPullBridgeTaken) {
     envPullBridgeTaken = true;
     envPullBridge = takePullSessionBridgeConfig(process.env);
+    envLaunchingHost = envPullBridge?.host;
   }
   return envPullBridge;
+}
+
+/**
+ * The agent host integration that launched this process (the Claude Code
+ * mod, the OpenCode 2 plugin), named by the pull-bridge config it handed over,
+ * or undefined (a classic hook or skill, OpenCode 1, a person at a shell).
+ * Kept in remote mode, where the bridge itself is off, and after
+ * `discardEnvPullSessionBridgeConfig` (--tailscale): the integration is still
+ * what started the session even when "Ask this session" is not served.
+ */
+export function launchingSessionHost(): SessionBridgeHost | undefined {
+  takeEnvPullSessionBridgeConfig();
+  return envLaunchingHost;
+}
+
+/**
+ * The host the `plannotator` agent tool advert describes for a server: its
+ * in-process bridge's host (OpenCode 2's embedded plan review), else the host
+ * that launched the process. Only those integrations register the tool.
+ */
+export function agentToolHostForServer(sessionBridge?: { host: SessionBridgeHost } | null): SessionBridgeHost | undefined {
+  return sessionBridge?.host ?? launchingSessionHost();
 }
 
 /**

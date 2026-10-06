@@ -1,17 +1,20 @@
 /**
  * The `agentTool` setting through the Pi (node:http) servers, the mirror of
- * packages/server/agent-tool-config.test.ts: POST /api/config accepts a
- * boolean and nothing else, and /api/plan's serverConfig reports the Pi
- * host's view (off by default on Pi).
+ * packages/server/agent-tool-config.test.ts: POST /api/config refuses a
+ * cross-origin write on every server and accepts `agentTool` as a boolean
+ * only, and /api/plan's serverConfig reports the Pi host's view (off by
+ * default on Pi). Pi's servers always run inside the Pi extension, which is
+ * the tool's host, so they always advertise it.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./generated/config.ts";
-import { startAnnotateServer } from "./server/serverAnnotate.ts";
+import { startAnnotateServer, startPlanReviewServer, startReviewServer } from "./server.ts";
 
 const MINIMAL_HTML = "<html><body>Plannotator</body></html>";
+const PATCH = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n";
 const KEYS = ["PLANNOTATOR_DATA_DIR", "PLANNOTATOR_PORT", "PLANNOTATOR_REMOTE", "PLANNOTATOR_AGENT_TOOL"] as const;
 const saved: Record<string, string | undefined> = {};
 let dataDir: string;
@@ -33,24 +36,51 @@ afterEach(() => {
 	rmSync(dataDir, { recursive: true, force: true });
 });
 
-describe("agentTool on the Pi annotate server", () => {
-	test("POST /api/config saves a boolean, ignores anything else; serverConfig reports the Pi view", async () => {
+const post = (url: string, body: unknown, headers: Record<string, string> = {}) =>
+	fetch(`${url}/api/config`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+const serverConfig = async (url: string) =>
+	((await (await fetch(`${url}/api/plan`)).json()) as { serverConfig: Record<string, unknown> }).serverConfig;
+
+describe("POST /api/config on the Pi servers", () => {
+	const servers = {
+		plan: () => startPlanReviewServer({ plan: "# Plan", origin: "pi", htmlContent: MINIMAL_HTML }),
+		review: () => startReviewServer({ rawPatch: PATCH, gitRef: "HEAD", htmlContent: MINIMAL_HTML }),
+		annotate: () => startAnnotateServer({ markdown: "# Test", filePath: join(dataDir, "t.md"), htmlContent: MINIMAL_HTML }),
+	};
+	for (const [name, start] of Object.entries(servers)) {
+		test(`${name}: a cross-origin write is refused and writes nothing; same-origin and Origin-less writes work`, async () => {
+			const server = await start();
+			try {
+				const forged = await fetch(`${server.url}/api/config`, {
+					method: "POST",
+					headers: { "Content-Type": "text/plain", Origin: "https://evil.example" },
+					body: JSON.stringify({ agentTool: true, autoUpdate: true }),
+				});
+				expect(forged.status).toBe(403);
+				expect(loadConfig()).toEqual({});
+
+				expect((await post(server.url, { agentTool: true }, { Origin: new URL(server.url).origin })).status).toBe(200);
+				expect(loadConfig().agentTool).toBe(true);
+				expect((await post(server.url, { agentTool: false })).status).toBe(200);
+				expect(loadConfig().agentTool).toBe(false);
+				expect((await post(server.url, { agentTool: "true" })).status).toBe(200);
+				expect(loadConfig().agentTool).toBe(false);
+			} finally {
+				server.stop();
+			}
+		});
+	}
+});
+
+describe("the agent tool advert on the Pi servers", () => {
+	test("the Pi view: off by default, a saved choice, an env override", async () => {
 		const server = await startAnnotateServer({ markdown: "# Test", filePath: join(dataDir, "t.md"), htmlContent: MINIMAL_HTML });
-		const post = (body: unknown) =>
-			fetch(`${server.url}/api/config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-		const serverConfig = async () => ((await (await fetch(`${server.url}/api/plan`)).json()) as { serverConfig: Record<string, unknown> }).serverConfig;
 		try {
-			expect(await serverConfig()).toMatchObject({ agentTool: false, agentToolConfigured: false, agentToolHost: "pi", agentToolEnabled: false });
-
-			for (const bad of ["true", 1, null]) expect((await post({ agentTool: bad })).status).toBe(200);
-			expect(loadConfig().agentTool).toBeUndefined();
-
-			expect((await post({ agentTool: true })).status).toBe(200);
-			expect(loadConfig().agentTool).toBe(true);
-			expect(await serverConfig()).toMatchObject({ agentTool: true, agentToolConfigured: true, agentToolEnabled: true });
-
+			expect(await serverConfig(server.url)).toMatchObject({ agentTool: false, agentToolConfigured: false, agentToolHost: "pi", agentToolEnabled: false });
+			await post(server.url, { agentTool: true });
+			expect(await serverConfig(server.url)).toMatchObject({ agentTool: true, agentToolConfigured: true, agentToolEnabled: true });
 			process.env.PLANNOTATOR_AGENT_TOOL = "0";
-			expect(await serverConfig()).toMatchObject({ agentTool: true, agentToolEnv: false, agentToolEnabled: false });
+			expect(await serverConfig(server.url)).toMatchObject({ agentTool: true, agentToolEnv: false, agentToolEnabled: false });
 		} finally {
 			server.stop();
 		}
