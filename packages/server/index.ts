@@ -63,6 +63,7 @@ import { countUnsentDraftComments } from "@plannotator/shared/host-control";
 import { isAIEndpointPath, isLongLivedAIEndpointPath, type AIEndpoints, type SessionBridge } from "@plannotator/ai";
 import { isArchiveDocumentMutation } from "@plannotator/shared/archive-mode";
 import { readPlanFile } from "@plannotator/shared/doc-resolve";
+import { checkServerSession, createServerSessionNonce, serverSessionMismatchBody } from "@plannotator/shared/server-session";
 
 // Re-export utilities
 export { isRemoteSession, getServerPort } from "./remote";
@@ -194,6 +195,11 @@ export async function startPlannotatorServer(
   // (note integrations): updatePlan then refuses, so the plan a decision
   // names cannot be swapped while that decision is still being recorded.
   let decisionClaimed = false;
+  // Stale-tab guard (packages/core/server-session.ts): advertised on
+  // /api/plan, echoed by every decision; a different nonce is a tab left open
+  // on a port a NEW server now owns, refused with 409 session_mismatch. A
+  // body without it (an older client) is accepted.
+  const serverSession = createServerSessionNonce();
 
   // Host-only status (packages/shared/host-control.ts). Never in archive mode.
   const hostControlToken = mode === "archive" ? undefined : resolveHostControlToken(options.hostControlToken);
@@ -435,7 +441,7 @@ export async function startPlannotatorServer(
                 ...getAutoUpdateAdvert(),
               });
             }
-            return Response.json({ plan, origin, permissionMode, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, ...(options.planRevisions ? { planRevision } : {}), projectRoot: process.cwd(), planDir: planFile?.dir, isWSL: wslFlag, serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge, options.opencodeToolCapable)), ...getAutoUpdateAdvert() });
+            return Response.json({ plan, origin, permissionMode, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, serverSession, ...(options.planRevisions ? { planRevision } : {}), projectRoot: process.cwd(), planDir: planFile?.dir, isWSL: wslFlag, serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge, options.opencodeToolCapable)), ...getAutoUpdateAdvert() });
           }
 
           // API: The live plan revision (open reviews that receive revised plans)
@@ -629,6 +635,7 @@ export async function startPlannotatorServer(
             let planSaveCustomPath: string | undefined;
             let draftGeneration: number | undefined;
             const rawApproveBody = (await req.json().catch(() => ({}))) as Record<string, unknown> | null;
+            if (checkServerSession(rawApproveBody, serverSession) === "mismatch") return Response.json(serverSessionMismatchBody(), { status: 409 });
             if (isStaleRevision(rawApproveBody)) return staleRevisionResponse();
             decisionClaimed = true;
             try {
@@ -724,6 +731,7 @@ export async function startPlannotatorServer(
             let draftGeneration: number | undefined;
             let answersOnly = false;
             const rawDenyBody = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+            if (checkServerSession(rawDenyBody, serverSession) === "mismatch") return Response.json(serverSessionMismatchBody(), { status: 409 });
             if (isStaleRevision(rawDenyBody)) return staleRevisionResponse();
             decisionClaimed = true;
             try {

@@ -20,6 +20,7 @@ import { contentHash } from "../generated/draft.ts";
 import { annotateDraftFilePath, createAnnotateDraftSession } from "../generated/annotate-draft.ts";
 import { isPathAllowed } from "../generated/doc-resolve.ts";
 import { countUnsentDraftComments, hostSessionClosedEvent } from "../generated/host-control.ts";
+import { checkServerSession, createServerSessionNonce, serverSessionMismatchBody } from "../generated/server-session.ts";
 import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control.ts";
 import { getPlanVersion, getVersionCount, listVersions } from "../generated/storage.ts";
 import { computeAnnotateHistory, deriveAnnotateHistorySlug, persistAnnotateSubmission, type AnnotateHistoryResult } from "../generated/annotate-history.ts";
@@ -347,6 +348,10 @@ export async function startAnnotateServer(options: {
 	// lease below race, and a producer that loses must not delete the reviewer's
 	// draft or report success for an outcome the caller never received.
 	const decision = createAnnotateDecisionSettler(resolveDecision);
+	// Stale-tab guard (packages/core/server-session.ts): advertised on
+	// /api/plan and echoed by every decision; a different nonce is refused
+	// with 409 session_mismatch before anything settles. Missing is accepted.
+	const serverSession = createServerSessionNonce();
 	const sendAlreadyDecided = (res: import("node:http").ServerResponse): void => {
 		json(res, { error: "This review session has already been decided." }, 409);
 	};
@@ -873,6 +878,7 @@ export async function startAnnotateServer(options: {
 				appUrl: liveAppUrl,
 				targetUrl: options.liveApp.targetUrl,
 				liveToken: liveSessionToken,
+				serverSession,
 				gate: options.gate ?? false,
 				approvalNotesSupported: options.approvalNotesSupported ?? false,
 				clientLease: options.clientLeaseSupported
@@ -928,6 +934,7 @@ export async function startAnnotateServer(options: {
 				sourceInfo: options.sourceInfo,
 				sourceConverted: options.sourceConverted ?? false,
 				sourceSave: primarySource.sourceSave,
+				serverSession,
 				gate: options.gate ?? false,
 				approvalNotesSupported: options.approvalNotesSupported ?? false,
 				clientLease: options.clientLeaseSupported
@@ -1252,6 +1259,11 @@ export async function startAnnotateServer(options: {
 		} else if (url.pathname === "/favicon.png") {
 			handleFavicon(res);
 		} else if (url.pathname === "/api/exit" && req.method === "POST") {
+			// Exit posts carry no body: the nonce rides the query string.
+			if (checkServerSession({ serverSession: url.searchParams.get("serverSession") ?? undefined }, serverSession) === "mismatch") {
+				json(res, serverSessionMismatchBody(), 409);
+				return;
+			}
 			if (!decision.settle({ feedback: "", annotations: [], exit: true })) {
 				sendAlreadyDecided(res);
 				return;
@@ -1272,6 +1284,10 @@ export async function startAnnotateServer(options: {
 					(body.draftGeneration !== undefined && typeof body.draftGeneration !== "number")
 				) {
 					json(res, { error: "Invalid approval body." }, 400);
+					return;
+				}
+				if (checkServerSession(body, serverSession) === "mismatch") {
+					json(res, serverSessionMismatchBody(), 409);
 					return;
 				}
 
@@ -1306,6 +1322,10 @@ export async function startAnnotateServer(options: {
 		} else if (url.pathname === "/api/feedback" && req.method === "POST") {
 			try {
 				const body = await parseBody(req);
+				if (checkServerSession(body, serverSession) === "mismatch") {
+					json(res, serverSessionMismatchBody(), 409);
+					return;
+				}
 				const feedbackWon = decision.settle({
 					feedback: (body.feedback as string) || "",
 					annotations: (body.annotations as unknown[]) || [],

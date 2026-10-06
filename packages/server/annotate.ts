@@ -59,6 +59,7 @@ import { handleOpenInApps, handleOpenIn } from "./open-in";
 import { agentToolHostForServer, createAIRuntime } from "./ai-runtime";
 import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control";
 import { countUnsentDraftComments, hostSessionClosedEvent } from "@plannotator/shared/host-control";
+import { checkServerSession, createServerSessionNonce, serverSessionMismatchBody } from "@plannotator/shared/server-session";
 import { isAIEndpointPath, isLongLivedAIEndpointPath, type AIEndpoints, type SessionBridge } from "@plannotator/ai";
 import { createHtmlAssetRegistry, framedDocumentNotFound } from "./html-assets";
 import { createBunAgentTerminalBridge } from "./agent-terminal";
@@ -778,6 +779,11 @@ export async function startAnnotateServer(
   // lease below race, and a producer that loses must not delete the reviewer's
   // draft or report success for an outcome the caller never received.
   const decision = createAnnotateDecisionSettler(resolveDecision!);
+  // Stale-tab guard (packages/core/server-session.ts): advertised on
+  // /api/plan and echoed by every decision; a different nonce is refused with
+  // 409 session_mismatch before anything settles. Missing is accepted.
+  const serverSession = createServerSessionNonce();
+  const sessionMismatch = () => Response.json(serverSessionMismatchBody(), { status: 409 });
   const alreadyDecided = () =>
     Response.json({ error: "This review session has already been decided." }, { status: 409 });
 
@@ -881,6 +887,7 @@ export async function startAnnotateServer(
               appUrl: liveAppUrl,
               targetUrl: liveApp.targetUrl,
               liveToken: liveSessionToken,
+              serverSession,
               gate,
               approvalNotesSupported,
               clientLease: clientLeaseSupported
@@ -934,6 +941,7 @@ export async function startAnnotateServer(
               sourceInfo,
               sourceConverted: sourceConverted ?? false,
               sourceSave: primarySource.sourceSave,
+              serverSession,
               gate,
               approvalNotesSupported,
               clientLease: clientLeaseSupported
@@ -1364,6 +1372,10 @@ export async function startAnnotateServer(
 
           // API: Exit annotation session without feedback
           if (url.pathname === "/api/exit" && req.method === "POST") {
+            // Exit posts carry no body: the nonce rides the query string.
+            if (checkServerSession({ serverSession: url.searchParams.get("serverSession") ?? undefined }, serverSession) === "mismatch") {
+              return sessionMismatch();
+            }
             if (!decision.settle({ feedback: "", annotations: [], exit: true })) {
               return alreadyDecided();
             }
@@ -1401,6 +1413,7 @@ export async function startAnnotateServer(
             ) {
               return Response.json({ error: "Invalid approval body." }, { status: 400 });
             }
+            if (checkServerSession(body, serverSession) === "mismatch") return sessionMismatch();
 
             const approvalWon = decision.settle({
               feedback: (body.feedback as string | undefined) || "",
@@ -1442,6 +1455,7 @@ export async function startAnnotateServer(
                 feedbackScope?: "message" | "messages";
                 draftGeneration?: number;
               };
+              if (checkServerSession(body, serverSession) === "mismatch") return sessionMismatch();
 
               const feedbackWon = decision.settle({
                 feedback: body.feedback || "",

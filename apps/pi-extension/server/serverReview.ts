@@ -9,6 +9,7 @@ import { basename, resolve as resolvePath } from "node:path";
 import { SingleFlight } from "../generated/single-flight.ts";
 import { contentHash } from "../generated/draft.ts";
 import { countUnsentDraftComments, hostSessionClosedEvent } from "../generated/host-control.ts";
+import { checkServerSession, createServerSessionNonce, serverSessionMismatchBody } from "../generated/server-session.ts";
 import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control.ts";
 import { createReviewDraftSession, prDraftTargetKey, type ReviewDraftKeys } from "../generated/review-draft.ts";
 import { agentToolSaveFailed, loadConfig, saveConfig, detectGitUser, getServerConfig, parseReviewAnalysisConfig, resolveAIEnabled, resolveSharingEnabled, resolveClaudeSandbox, resolveCursorSandbox, resolveFeedbackHistory, resolveGuideHistory, resolveGuideShareUrl, resolveGitRemoteCheck, resolveReviewProgress } from "../generated/config.ts";
@@ -1842,6 +1843,11 @@ export async function startReviewServer(options: {
 	// Session-constant capability advert; rides every diff payload (see the
 	// option's doc). Absent option = false, so old callers advertise honestly.
 	const approvalNotesSupported = options.approvalNotesSupported === true;
+	// Stale-tab guard (packages/core/server-session.ts): advertised beside
+	// approvalNotesSupported on every diff payload and echoed by every
+	// decision; a different nonce is refused with 409 session_mismatch.
+	// Missing is accepted (older clients).
+	const serverSession = createServerSessionNonce();
 	// Static patch mode (`--patch-file`): caller-supplied diff bytes, no repo,
 	// no working tree. Advertised as `sourceKind: "patch"` on every diff payload
 	// (absent reads as "vcs") and enforced by 400ing the endpoints that would
@@ -2276,6 +2282,7 @@ export async function startReviewServer(options: {
 				gitContext: hasLocalAccess ? servedGitContext : undefined,
 				sharingEnabled,
 				approvalNotesSupported,
+				serverSession,
 				imagePreviewSupported,
 				...sourceKindAdvert,
 				// Mount is the only place the pin matters, so it rides /api/diff
@@ -2615,6 +2622,7 @@ export async function startReviewServer(options: {
 						gitRef: currentGitRef,
 						snapshotId: currentSnapshotId(),
 						approvalNotesSupported,
+						serverSession,
 						imagePreviewSupported,
 						...sourceKindAdvert,
 						diffType: currentDiffType,
@@ -2767,6 +2775,7 @@ export async function startReviewServer(options: {
 					gitRef: currentGitRef,
 					snapshotId: currentSnapshotId(),
 					approvalNotesSupported,
+					serverSession,
 					imagePreviewSupported,
 					...sourceKindAdvert,
 					diffType: currentDiffType,
@@ -2832,6 +2841,7 @@ export async function startReviewServer(options: {
 						snapshotId: currentSnapshotId(),
 						draftState: reviewDrafts.state(currentDraftKeys()),
 						approvalNotesSupported,
+						serverSession,
 						imagePreviewSupported,
 						...sourceKindAdvert,
 						prDiffScope: currentPRDiffScope,
@@ -2902,6 +2912,7 @@ export async function startReviewServer(options: {
 						snapshotId: currentSnapshotId(),
 						draftState: reviewDrafts.state(currentDraftKeys()),
 						approvalNotesSupported,
+						serverSession,
 						imagePreviewSupported,
 						...sourceKindAdvert,
 						prDiffScope: currentPRDiffScope,
@@ -2946,6 +2957,7 @@ export async function startReviewServer(options: {
 					snapshotId: currentSnapshotId(),
 					draftState: reviewDrafts.state(currentDraftKeys()),
 					approvalNotesSupported,
+					serverSession,
 					imagePreviewSupported,
 					...sourceKindAdvert,
 					prDiffScope: currentPRDiffScope,
@@ -3035,6 +3047,7 @@ export async function startReviewServer(options: {
 					snapshotId: currentSnapshotId(),
 					draftState: reviewDrafts.state(currentDraftKeys()),
 					approvalNotesSupported,
+					serverSession,
 					imagePreviewSupported,
 					...sourceKindAdvert,
 					prMetadata: pr.metadata,
@@ -3839,6 +3852,11 @@ export async function startReviewServer(options: {
 			handleApiNotFound(res, url.pathname);
 			return;
 		} else if (url.pathname === "/api/exit" && req.method === "POST") {
+			// Exit posts carry no body: the nonce rides the query string.
+			if (checkServerSession({ serverSession: url.searchParams.get("serverSession") ?? undefined }, serverSession) === "mismatch") {
+				json(res, serverSessionMismatchBody(), 409);
+				return;
+			}
 			// Already decided (the host closed it, or another tab decided):
 			// archiving or settling now would delete a draft the close kept.
 			if (reviewDecided) {
@@ -3854,6 +3872,10 @@ export async function startReviewServer(options: {
 		} else if (url.pathname === "/api/feedback" && req.method === "POST") {
 			try {
 				const body = await parseBody(req);
+				if (checkServerSession(body, serverSession) === "mismatch") {
+					json(res, serverSessionMismatchBody(), 409);
+					return;
+				}
 				// Checked after the body is read: a host close can land while
 				// it streams. A decided session must not archive, delete the
 				// draft, or answer ok for feedback nobody will receive.

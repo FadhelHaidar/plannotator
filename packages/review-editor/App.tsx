@@ -45,6 +45,8 @@ import type { CallFlowAdvert, CallFlowNode } from '@plannotator/shared/call-flow
 import { configStore, useConfigValue, setReviewPanelView } from '@plannotator/ui/config';
 import { loadDiffFont } from '@plannotator/ui/utils/diffFonts';
 import { getAgentSwitchSettings, getEffectiveAgentName } from '@plannotator/ui/utils/agentSwitch';
+import { adoptServerSession, noteServerSessionMismatch, withServerSession, withServerSessionQuery } from '@plannotator/ui/utils/serverSession';
+import { ServerSessionReplacedBanner } from '@plannotator/ui/components/ServerSessionReplacedBanner';
 import { useAIProviderConfig } from '@plannotator/ui/hooks/useAIProviderConfig';
 import { useAIProviderActivation } from '@plannotator/ui/hooks/useAIProviderActivation';
 import { isSessionBridgeProvider } from '@plannotator/ui/utils/aiProvider';
@@ -2294,6 +2296,7 @@ const ReviewApp: React.FC = () => {
         agentCwd?: string | null;
         sharingEnabled?: boolean;
         approvalNotesSupported?: boolean;
+        serverSession?: string;
         imagePreviewSupported?: boolean;
         sourceKind?: ReviewSourceKind;
         repoInfo?: { display: string; branch?: string };
@@ -2365,6 +2368,8 @@ const ReviewApp: React.FC = () => {
         if (data.agentCwd !== undefined) setAgentCwd(data.agentCwd);
         if (data.sharingEnabled !== undefined) setSharingEnabled(data.sharingEnabled);
         setApprovalNotesSupported(readApprovalNotesAdvert(data.approvalNotesSupported));
+        // Stale-tab guard: every decision echoes this server's nonce.
+        adoptServerSession(data.serverSession);
         setImagePreviewSupported(data.imagePreviewSupported === true);
         // Session-constant: a static patch session has no diff-type switch to
         // re-advertise it on, so `/api/diff` is the only place it can arrive.
@@ -4059,14 +4064,18 @@ const ReviewApp: React.FC = () => {
       const res = await fetch('/api/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify(withServerSession({
           draftGeneration: getDraftGeneration(),
           approved: false,
           feedback: feedbackMarkdown,
           annotations: allAnnotations,
           ...(effectiveAgent && { agentSwitch: effectiveAgent }),
-        }),
+        })),
       });
+      if (await noteServerSessionMismatch(res)) {
+        setIsSendingFeedback(false);
+        return false;
+      }
       if (res.ok) {
         setSubmitted('feedback');
         return true;
@@ -4086,7 +4095,11 @@ const ReviewApp: React.FC = () => {
     setIsExiting(true);
     try {
       await flushReviewProgress();
-      const res = await fetch(`/api/exit?draftGeneration=${getDraftGeneration()}`, { method: 'POST' });
+      const res = await fetch(withServerSessionQuery(`/api/exit?draftGeneration=${getDraftGeneration()}`), { method: 'POST' });
+      if (await noteServerSessionMismatch(res)) {
+        setIsExiting(false);
+        return;
+      }
       if (res.ok) {
         setSubmitted('exited');
       } else {
@@ -4112,14 +4125,18 @@ const ReviewApp: React.FC = () => {
       const res = await fetch('/api/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildReviewApprovalBody({
+        body: JSON.stringify(withServerSession(buildReviewApprovalBody({
           draftGeneration: getDraftGeneration(),
           note: options?.note,
           withAnnotations: options?.withAnnotations === true,
           feedbackMarkdown,
           annotations: allAnnotations,
-        })),
+        }))),
       });
+      if (await noteServerSessionMismatch(res)) {
+        setIsApproving(false);
+        return;
+      }
       if (res.ok) {
         setSubmitted('approved');
       } else {
@@ -4389,7 +4406,7 @@ const ReviewApp: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         keepalive: true,
-        body: JSON.stringify({
+        body: JSON.stringify(withServerSession({
           // Tombstones the draft (and its PR target key) at this generation,
           // like the agent-path decisions, so no late autosave revives it.
           draftGeneration: getDraftGeneration(),
@@ -4404,7 +4421,7 @@ const ReviewApp: React.FC = () => {
           // comments, which ride only in `feedback`.
           platform: true,
           ...(effectiveAgent && { agentSwitch: effectiveAgent }),
-        }),
+        })),
       }).catch(() => {});
     } catch (err) {
       closePendingTab(pendingTab);
@@ -6124,6 +6141,8 @@ const ReviewApp: React.FC = () => {
         onSelectLocation={handleTokenHoverSelectLocation}
       />
     )}
+
+    <ServerSessionReplacedBanner />
 
     <Toaster
       position="bottom-center"
