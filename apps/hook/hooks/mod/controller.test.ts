@@ -1015,12 +1015,12 @@ describe('Ask this session survives a server that stops answering', () => {
 })
 
 describe('two Claude Code processes on one session (claude --continue while the first runs)', () => {
-  /** A second process: same disk and store, its own timers, clock and instance id. */
-  function secondProcess(host: FakeHost): FakeHost {
+  /** A second process: same disk and store, its own timers, clock and instance id; started `later` ms after the first. */
+  function secondProcess(host: FakeHost, later = 1_000): FakeHost {
     const other = fakeHost()
     other.files = host.files
     other.store = host.store
-    other.clock = host.clock
+    other.clock = host.clock + later
     other.randomHex = (bytes) => 'cd'.repeat(bytes)
     return other
   }
@@ -1030,30 +1030,37 @@ describe('two Claude Code processes on one session (claude --continue while the 
     await b.tick()
   }
 
-  // The failure: both processes delivered the decision (two turns), or the
-  // one that did not deliver showed "waiting for you" forever.
-  test('one watches and delivers; the other forgets the review quietly', async () => {
+  function feedback(text: string) {
+    return { surface: 'annotate', decision: 'annotated', message: text, noop: false }
+  }
+
+  const delivered = (hosts: FakeHost[], text: string) => hosts.flatMap((h) => h.submits).filter((submit) => submit.includes(text))
+
+  // The failure: the old process kept the reviews and received the decision
+  // while the person worked in the new one (and plan review broke there).
+  test('the process that restored later watches and delivers; the first forgets the review quietly', async () => {
     const host = fakeHost()
     serveOnLaunch(host)
     const first = new PlannotatorMod(host, SESSION)
     await first.runCommand('annotate', 'notes.md')
+    await host.tick()
     const other = secondProcess(host)
     const second = new PlannotatorMod(other, SESSION)
     await second.restore()
+    await bothTick(other, host)
 
+    decide(host, launches(host)[0]!, feedback('please fix'))
+    // The first process looks first, with its lease answer cached from before: it must not deliver.
     await bothTick(host, other)
-    decide(host, launches(host)[0]!, { surface: 'annotate', decision: 'annotated', message: 'please fix', noop: false })
-    // The watcher looks first: it must not deliver.
-    await bothTick(other, host)
-    await bothTick(other, host)
+    await bothTick(host, other)
 
-    expect(host.submits.filter((text) => text.includes('please fix'))).toHaveLength(1)
-    expect(other.submits).toEqual([])
-    expect(other.statuses.at(-1)).toBeUndefined()
-    expect(other.logs.filter((line) => line.includes('stopped') || line.includes('no longer running'))).toEqual([])
+    expect(delivered([other], 'please fix')).toHaveLength(1)
+    expect(host.submits).toEqual([])
+    expect(host.statuses.at(-1)).toBeUndefined()
+    expect(host.logs.filter((line) => line.includes('stopped') || line.includes('no longer running'))).toEqual([])
   })
 
-  test('both checking the same decision at once still deliver it once', async () => {
+  test('typing in the first process takes the reviews back there', async () => {
     const host = fakeHost()
     serveOnLaunch(host)
     const first = new PlannotatorMod(host, SESSION)
@@ -1061,13 +1068,148 @@ describe('two Claude Code processes on one session (claude --continue while the 
     const other = secondProcess(host)
     const second = new PlannotatorMod(other, SESSION)
     await second.restore()
+    await bothTick(other, host)
 
-    // No lease yet and the decision already on disk: both may take the lease; the claim decides.
-    decide(host, launches(host)[0]!, { surface: 'annotate', decision: 'annotated', message: 'please fix', noop: false })
+    host.clock = other.clock + 1_000
+    first.onPromptEntered({ text: 'back here', fromUs: false, originKind: 'composer' })
+    await bothTick(host, other)
+    decide(host, launches(host)[0]!, feedback('please fix'))
+    await bothTick(other, host)
+    await bothTick(other, host)
+
+    expect(delivered([host], 'please fix')).toHaveLength(1)
+    expect(other.submits).toEqual([])
+  })
+
+  test('a plan approval reaches the process the person works in, and its next ExitPlanMode passes', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const first = new PlannotatorMod(host, SESSION)
+    await first.onPlanCall({ tool_use_id: 't1', plan: PLAN })
+    await host.tick()
+    const other = secondProcess(host)
+    const second = new PlannotatorMod(other, SESSION)
+    await second.restore()
+
+    decide(host, launches(host)[0]!, { surface: 'plan', decision: 'approved', message: 'Plan approved.', noop: false, approvedPlan: PLAN })
+    await bothTick(host, other)
+    await bothTick(host, other)
+
+
+    expect(delivered([other], PLAN_APPROVAL_NEXT_STEP)).toHaveLength(1)
+    expect(host.submits).toEqual([])
+    expect(await second.onPlanCall({ tool_use_id: 't2', plan: PLAN })).toEqual({ pass: true })
+  })
+
+  test('an approval the other process received still lets this one pass its ExitPlanMode', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const other = secondProcess(host, 0)
+    const second = new PlannotatorMod(other, SESSION)
+    await second.restore()
+    const first = new PlannotatorMod(host, SESSION)
+    await first.onPlanCall({ tool_use_id: 't1', plan: PLAN })
+    decide(host, launches(host)[0]!, { surface: 'plan', decision: 'approved', message: 'Plan approved.', noop: false, approvedPlan: PLAN })
+    await host.tick()
+    expect(delivered([host], PLAN_APPROVAL_NEXT_STEP)).toHaveLength(1)
+
+    expect(await second.onPlanCall({ tool_use_id: 't2', plan: PLAN })).toEqual({ pass: true })
+    // Consumed: the first process does not pass the same approval again.
+    expect('deny' in (await first.onPlanCall({ tool_use_id: 't3', plan: PLAN }))).toBe(true)
+  })
+
+  // The failure (reproduced on the per-file claim): one process claimed the
+  // result record while the other, finding no record, claimed the exit code
+  // and delivered the stdout copy too.
+  test('a decision on disk as both a record and an exit code is delivered once when both check at once', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const first = new PlannotatorMod(host, SESSION)
+    await first.runCommand('annotate', 'notes.md')
+    const other = secondProcess(host, 0)
+    const second = new PlannotatorMod(other, SESSION)
+    await second.restore()
+    const dir = launchDirOf(launches(host)[0]!)
+
+    decide(host, launches(host)[0]!, feedback('please fix'))
+    host.files.set(`${dir}/exit`, '0\n')
+    host.files.set(`${dir}/stdout`, 'please fix (printed)')
     await Promise.all([host.tick(), other.tick()])
     await bothTick(host, other)
 
-    expect([...host.submits, ...other.submits].filter((text) => text.includes('please fix'))).toHaveLength(1)
+    expect(delivered([host, other], 'please fix')).toHaveLength(1)
+  })
+
+  test("the other process's claim stops this one whichever file it finds", async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.runCommand('annotate', 'notes.md')
+    const dir = launchDirOf(launches(host)[0]!)
+    host.files.set(`${dir}/settled`, '')
+    host.files.set(`${dir}/settled/by`, 'another-process')
+    host.files.set(`${dir}/exit`, '0\n')
+    host.files.set(`${dir}/stdout`, 'please fix (printed)')
+
+    await host.tick()
+
+    expect(host.submits).toEqual([])
+    expect(host.logs.filter((line) => line.includes('stopped'))).toEqual([])
+    expect(host.statuses.at(-1)).toBeUndefined()
+  })
+
+  // The failure: a claim made by a process call whose answer timed out read as
+  // someone else's next tick, so the decision was never delivered.
+  test('a claim whose answer was lost is retried by its claimant and delivered once', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.runCommand('annotate', 'notes.md')
+    const run = host.run
+    let lost = 1
+    host.run = async (argv, init) => {
+      const answer = await run(argv, init)
+      if (argv[3] === 'plannotator-claim' && lost-- > 0) throw new Error('process.run timed out')
+      return answer
+    }
+    decide(host, launches(host)[0]!, feedback('please fix'))
+
+    await host.tick()
+    expect(host.submits).toEqual([])
+    await host.tick()
+
+    expect(delivered([host], 'please fix')).toHaveLength(1)
+  })
+
+  // The failure: the 1 s timer does not wait for a slow check, so a second
+  // check of the same launch ran beside it; the claim names this instance,
+  // so both checks won it and the decision went to Claude twice.
+  test('overlapping ticks check a launch once', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.runCommand('annotate', 'notes.md')
+    const dir = launchDirOf(launches(host)[0]!)
+    const exists = host.exists
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let stalls = 1
+    host.exists = async (path) => {
+      // The first check stalls on a slow file system call.
+      if (path === `${dir}/settled` && stalls-- > 0) await held
+      return exists(path)
+    }
+    decide(host, launches(host)[0]!, feedback('please fix'))
+
+    await host.tick()
+    await host.tick()
+    release()
+    await host.tick()
+    await host.tick()
+
+    expect(delivered([host], 'please fix')).toHaveLength(1)
   })
 
   test('when the watching process goes away, the other takes over and delivers', async () => {
@@ -1075,7 +1217,8 @@ describe('two Claude Code processes on one session (claude --continue while the 
     serveOnLaunch(host)
     const first = new PlannotatorMod(host, SESSION)
     await first.runCommand('annotate', 'notes.md')
-    const other = secondProcess(host)
+    // Started at the same moment: a tie, which the first watcher keeps.
+    const other = secondProcess(host, 0)
     const second = new PlannotatorMod(other, SESSION)
     await second.restore()
     await bothTick(host, other)
@@ -1083,10 +1226,10 @@ describe('two Claude Code processes on one session (claude --continue while the 
     // The first process is killed: no more ticks, no release. Its lease goes stale.
     other.clock += 25_000
     for (let index = 0; index < 5; index += 1) await other.tick()
-    decide(host, launches(host)[0]!, { surface: 'annotate', decision: 'annotated', message: 'please fix', noop: false })
+    decide(host, launches(host)[0]!, feedback('please fix'))
     await other.tick()
 
-    expect(other.submits.filter((text) => text.includes('please fix'))).toHaveLength(1)
+    expect(delivered([other], 'please fix')).toHaveLength(1)
     expect(host.submits).toEqual([])
   })
 
@@ -1095,17 +1238,17 @@ describe('two Claude Code processes on one session (claude --continue while the 
     serveOnLaunch(host)
     const first = new PlannotatorMod(host, SESSION)
     await first.runCommand('annotate', 'notes.md')
-    const other = secondProcess(host)
+    const other = secondProcess(host, 0)
     const second = new PlannotatorMod(other, SESSION)
     await second.restore()
     await bothTick(host, other)
 
     first.dispose()
     for (let index = 0; index < 5; index += 1) await other.tick()
-    decide(host, launches(host)[0]!, { surface: 'annotate', decision: 'annotated', message: 'please fix', noop: false })
+    decide(host, launches(host)[0]!, feedback('please fix'))
     await other.tick()
 
-    expect(other.submits.filter((text) => text.includes('please fix'))).toHaveLength(1)
+    expect(delivered([other], 'please fix')).toHaveLength(1)
   })
 
   test('a review the other process launched stays in the store when this one settles its own', async () => {
@@ -1119,7 +1262,7 @@ describe('two Claude Code processes on one session (claude --continue while the 
     other.randomHex = (bytes) => 'ef'.repeat(bytes)
     await second.runCommand('annotate', 'theirs.md')
     await first.runCommand('annotate', 'mine.md')
-    decide(host, launches(host)[0]!, { surface: 'annotate', decision: 'annotated', message: 'done', noop: false })
+    decide(host, launches(host)[0]!, feedback('done'))
     await host.tick()
 
     const stored = (host.store.get(STORE_LAUNCHES) as { subject: string }[]).map((record) => record.subject)
@@ -1128,21 +1271,24 @@ describe('two Claude Code processes on one session (claude --continue while the 
 })
 
 describe('stored launch records are pruned', () => {
-  test('records with nothing left are dropped at restore; live servers, pending decisions and young records stay', async () => {
+  const record = (id: string, sessionId: string, startedAt: number) => ({
+    id,
+    sessionId,
+    kind: 'annotate',
+    dir: `/data/claude-code-mod/${sessionId}/${id}`,
+    subject: `${id}.md`,
+    startedAt,
+  })
+
+  test('after restore, off its path: what the script names is dropped; young records are not probed; records added meanwhile stay', async () => {
     const host = fakeHost()
-    const record = (id: string, sessionId: string, startedAt: number) => ({
-      id,
-      sessionId,
-      kind: 'annotate',
-      dir: `/data/claude-code-mod/${sessionId}/${id}`,
-      subject: `${id}.md`,
-      startedAt,
-    })
     const old = host.clock - 10 * 60_000
+    const ancient = host.clock - 30 * 24 * 60 * 60_000
     host.store.set(STORE_LAUNCHES, [
       record('cleaned', 'session-2', old),
       record('dead', 'session-2', old),
       record('live', 'session-2', old),
+      record('forgotten', 'session-3', ancient),
       record('young', 'session-2', host.clock - 1_000),
       record('mine', 'session-1', old),
     ])
@@ -1150,24 +1296,34 @@ describe('stored launch records are pruned', () => {
     host.onRun = (call) => {
       if (call.argv[3] !== 'plannotator-prune') return
       probes.push(call.argv.slice(4))
-      return { exitCode: 0, stdout: '/data/claude-code-mod/session-2/cleaned\n/data/claude-code-mod/session-2/dead\n', stderr: '' }
+      // Another process records a launch while the probe runs.
+      const stored = host.store.get(STORE_LAUNCHES) as unknown[]
+      host.store.set(STORE_LAUNCHES, [...stored, record('meanwhile', 'session-4', host.clock)])
+      return {
+        exitCode: 0,
+        stdout: ['cleaned', 'dead', 'forgotten'].map((id) => `/data/claude-code-mod/${id === 'forgotten' ? 'session-3' : 'session-2'}/${id}`).join('\n'),
+        stderr: '',
+      }
     }
-    host.files.set('/data/claude-code-mod/session-1/mine/pid', '4242\n')
 
-    await new PlannotatorMod(host, SESSION).restore()
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.restore()
+    await mod.pruning
 
-    // This session's records are pruned only when cleaned up, others' also when
-    // their server died (the script decides; launch.test.ts runs it). Young ones are not probed.
+    // This session's records only when cleaned up; others' also when dead; a long-unresumed session's also with a decision.
     expect(probes).toEqual([
       [
+        '--cleaned',
         '/data/claude-code-mod/session-1/mine',
-        '--',
+        '--dead',
         '/data/claude-code-mod/session-2/cleaned',
         '/data/claude-code-mod/session-2/dead',
         '/data/claude-code-mod/session-2/live',
+        '--expired',
+        '/data/claude-code-mod/session-3/forgotten',
       ],
     ])
     const kept = (host.store.get(STORE_LAUNCHES) as { id: string }[]).map((entry) => entry.id)
-    expect(kept).toEqual(['live', 'young', 'mine'])
+    expect(kept).toEqual(['live', 'young', 'mine', 'meanwhile'])
   })
 })

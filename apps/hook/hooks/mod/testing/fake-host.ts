@@ -79,11 +79,14 @@ export function fakeHost(): FakeHost {
         const dir = argv[4] as string
         if (!host.files.has(`${dir}/pid`)) host.files.set(`${dir}/pid`, '4242\n')
       } else if (argv[3] === 'plannotator-claim') {
-        const path = argv[4] as string
-        const text = host.files.get(path)
-        if (text === undefined) return { exitCode: 3, stdout: '', stderr: '' }
-        host.files.delete(path)
-        host.files.set(`${path}.claimed`, text)
+        // mkdir "$dir/settled" (one winner), naming the claimant; a claimant's own claim wins again.
+        const dir = argv[4] as string
+        const me = argv[5] as string
+        const by = host.files.get(`${dir}/settled/by`)
+        if (by !== undefined) return { exitCode: by === me ? 0 : 3, stdout: '', stderr: '' }
+        host.files.set(`${dir}/settled`, '')
+        host.files.set(`${dir}/settled/by`, me)
+        return { exitCode: host.files.has(`${dir}/stdin`) ? 0 : 3, stdout: '', stderr: '' }
       }
       return { exitCode: 0, stdout: '', stderr: '' }
     },

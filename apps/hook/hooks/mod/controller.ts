@@ -14,8 +14,6 @@ import {
   aliveArgv,
   CLAIM_EXIT,
   claimArgv,
-  CLAIMED_SUFFIX,
-  type ClaimableFile,
   cleanupArgv,
   stopArgv,
   STOP_EXIT,
@@ -32,6 +30,8 @@ import {
   pruneArgv,
   RECENT_MESSAGES_SUBJECT,
   recentAssistantTexts,
+  SETTLED_BY,
+  SETTLED_DIR,
   subjectFor,
   wordsOf,
 } from './launch'
@@ -174,10 +174,12 @@ export const BRIDGE_RETRY_MS = { first: 5_000, max: 60_000 } as const
  * The watcher lease (`watcher.json` in the launch directory): when two Claude
  * Code processes hold the same session (`claude --continue` while the first
  * still runs), one of them watches a launch, runs its bridge and delivers its
- * decision. The holder renews it every `LEASE_EVERY_TICKS`; another process
- * takes it over once it is `LEASE_STALE_MS` old (the holder exited, slept, or
- * hung). Delivery is also claimed atomically (`claimArgv`), so a lease race
- * can never deliver twice.
+ * decision. The process the person last acted in wins it (`touchedAt`:
+ * restore, a typed prompt, a command, the tool, ExitPlanMode); the holder
+ * renews it every `LEASE_EVERY_TICKS`, and anyone takes it over once it is
+ * `LEASE_STALE_MS` old (the holder exited, slept, or hung). Delivery is also
+ * claimed once per launch (`claimArgv`), so a lease race can never deliver
+ * twice.
  */
 const LEASE_EVERY_TICKS = 5
 export const LEASE_STALE_MS = 20_000
@@ -186,6 +188,8 @@ export const LEASE_STALE_MS = 20_000
  * younger one's wrapper may not have written its pid yet.
  */
 export const LAUNCH_SETTLED_AGE_MS = 60_000
+/** Another session's launch this old whose server is gone is pruned even with a decision waiting. */
+export const LAUNCH_EXPIRED_MS = 14 * 24 * 60 * 60_000
 
 interface LiveLaunch extends LaunchRecord {
   pidMisses: number
@@ -196,6 +200,8 @@ interface LiveLaunch extends LaunchRecord {
    * fail: that hook reports the outcome, so the timer leaves the launch alone.
    */
   starting: boolean
+  /** A tick is checking this launch now: the next tick skips it (ticks are not awaited). */
+  checking: boolean
   bridge: BridgeHandle | null
   /** No new bridge before this time (after a loop gave up on a silent server). */
   bridgeRetryAt: number
@@ -207,17 +213,30 @@ interface LiveLaunch extends LaunchRecord {
   leader: boolean
   /** The tick the lease was last looked at; null: never. */
   leaseTick: number | null
+  /**
+   * When the person last acted on this launch from this process (restored it,
+   * typed here, ran a command or tool, ExitPlanMode); 0: never. The more
+   * recent touch wins the watcher lease.
+   */
+  touchedAt: number
 }
 
 interface WatcherLease {
   owner: string | null
+  /** Heartbeat. */
   at: number
+  /** The holder's `touchedAt` for this launch. */
+  touchedAt: number
 }
 
 function parseWatcherLease(text: string): WatcherLease | null {
   const body = jsonObjectOf(text)
   if (!body || typeof body.at !== 'number') return null
-  return { owner: typeof body.owner === 'string' && body.owner ? body.owner : null, at: body.at }
+  return {
+    owner: typeof body.owner === 'string' && body.owner ? body.owner : null,
+    at: body.at,
+    touchedAt: typeof body.touchedAt === 'number' ? body.touchedAt : 0,
+  }
 }
 
 export interface SessionInfo {
@@ -245,8 +264,10 @@ export class PlannotatorMod {
   private disposed = false
   /** Launch ids this instance settled or dropped: kept out of the store even if another process re-adds them. */
   private forgotten = new Set<string>()
-  /** Names this instance in a launch's watcher lease. */
+  /** Names this instance in a launch's watcher lease and settlement claim. */
   private readonly instanceId: string
+  /** The store housekeeping started at restore (awaited by tests only). */
+  pruning: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly host: Host,
@@ -257,14 +278,30 @@ export class PlannotatorMod {
 
   // --- Lifecycle -----------------------------------------------------------
 
-  /** Reattach the reviews this session left open (restart, `--resume`). */
+  /**
+   * Reattach the reviews this session left open (restart, `--resume`,
+   * `--continue`). Restoring is the strongest sign the person now works in
+   * THIS process, so its launches are touched: when another process still
+   * runs on the same session, this one takes over watching them
+   * (`holdLease`), and their decisions land in the conversation in use.
+   */
   async restore(): Promise<void> {
-    const records = await this.pruneStoredLaunches()
-    const mine = records.filter((record) => record && record.sessionId === this.session.sessionId && typeof record.dir === 'string')
-    for (const record of mine) this.adopt(record)
-    const approvals = await this.host.storeGet(STORE_APPROVALS)
-    const approval = approvals && typeof approvals === 'object' ? (approvals as Record<string, PendingApproval>)[this.session.sessionId] : undefined
-    if (approval && typeof approval.hash === 'string') this.approval = approval
+    const stored = await this.host.storeGet(STORE_LAUNCHES)
+    const records = (Array.isArray(stored) ? (stored as LaunchRecord[]) : []).filter(
+      (record) => record && record.sessionId === this.session.sessionId && typeof record.dir === 'string',
+    )
+    const now = await this.host.now()
+    const mine: LaunchRecord[] = []
+    for (const record of records) {
+      // Already settled (by another process) or cleaned up: nothing to reattach.
+      if (await this.host.exists(`${record.dir}/${SETTLED_DIR}`)) continue
+      if (!(await this.host.exists(fileIn(record.dir, 'stdin')))) continue
+      mine.push(record)
+    }
+    // Watched from here from now on (the lease is written at once, so a
+    // decision arriving before the first tick lands here too).
+    for (const record of mine) await this.holdLease(this.adopt(record, now), true).catch(() => false)
+    await this.loadApproval()
     for (const launch of this.launches.values()) {
       if (launch.kind === 'plan') this.planVersion = Math.max(this.planVersion, launch.version ?? 0)
     }
@@ -273,6 +310,58 @@ export class PlannotatorMod {
       this.host.log(`Reattached ${mine.length} open ${mine.length === 1 ? 'session' : 'sessions'} (${names}).`)
       this.ensureTimer()
       this.refreshStatus()
+    }
+    // Housekeeping off the session-start path.
+    this.pruning = this.pruneStoredLaunches().catch(() => undefined)
+  }
+
+  /**
+   * The approval waiting for this session's next ExitPlanMode, from the store:
+   * another Claude Code process on the session may have received it, or
+   * already used it.
+   */
+  private async loadApproval(): Promise<void> {
+    const approvals = await this.host.storeGet(STORE_APPROVALS)
+    const approval = approvals && typeof approvals === 'object' ? (approvals as Record<string, PendingApproval>)[this.session.sessionId] : undefined
+    this.approval = approval && typeof approval.hash === 'string' ? approval : null
+  }
+
+  /**
+   * Adopt this session's launches another Claude Code process on the same
+   * session started after this one restored, so a plan review, `list` and
+   * `close` see them here too.
+   */
+  private async adoptNewStoredLaunches(): Promise<void> {
+    const stored = await this.host.storeGet(STORE_LAUNCHES)
+    const records = Array.isArray(stored) ? (stored as LaunchRecord[]) : []
+    const now = await this.host.now()
+    let adopted = 0
+    for (const record of records) {
+      if (!record || record.sessionId !== this.session.sessionId || typeof record.dir !== 'string') continue
+      if (this.launches.has(record.id) || this.forgotten.has(record.id)) continue
+      if (await this.host.exists(`${record.dir}/${SETTLED_DIR}`)) continue
+      if (!(await this.host.exists(fileIn(record.dir, 'stdin')))) continue
+      const live = this.adopt(record, now)
+      if (live.kind === 'plan') this.planVersion = Math.max(this.planVersion, live.version ?? 0)
+      adopted += 1
+    }
+    if (adopted > 0) {
+      this.ensureTimer()
+      this.refreshStatus()
+    }
+  }
+
+  /**
+   * The person acts in this process (a prompt typed here, a slash command,
+   * Claude's tool, ExitPlanMode): its launches should be watched from here,
+   * so the lease is taken at once.
+   */
+  private async touchLaunches(): Promise<void> {
+    if (this.launches.size === 0) return
+    const now = await this.host.now()
+    for (const launch of [...this.launches.values()]) {
+      launch.touchedAt = now
+      if (!launch.settling) await this.holdLease(launch, true).catch(() => false)
     }
   }
 
@@ -291,7 +380,7 @@ export class PlannotatorMod {
     for (const launch of this.launches.values()) {
       if (!launch.leader) continue
       launch.leader = false
-      void this.host.writeFile(fileIn(launch.dir, 'watcher'), JSON.stringify({ owner: null, at: 0 })).catch(() => undefined)
+      void this.host.writeFile(fileIn(launch.dir, 'watcher'), JSON.stringify({ owner: null, at: 0, touchedAt: 0 })).catch(() => undefined)
     }
   }
 
@@ -299,50 +388,61 @@ export class PlannotatorMod {
     return this.disposed
   }
 
-  private adopt(record: LaunchRecord): LiveLaunch {
+  private adopt(record: LaunchRecord, touchedAt = 0): LiveLaunch {
     const live: LiveLaunch = {
       ...record,
       pidMisses: 0,
       ticks: 0,
       settling: false,
       starting: false,
+      checking: false,
       bridge: null,
       bridgeRetryAt: 0,
       bridgeBackoffMs: 0,
       bridgeOff: false,
       leader: false,
       leaseTick: null,
+      touchedAt,
     }
     this.launches.set(record.id, live)
     return live
   }
 
   /**
-   * Stored records, minus the ones nothing is left of: a launch directory
-   * that was cleaned or removed (any session), or, for other sessions, a
-   * server that died without a decision. A live server, or a decision still
-   * waiting to be delivered when its session resumes, keeps its record; so
-   * does anything younger than a minute (its wrapper may not have written the
-   * pid yet). This session's dead servers are left to the timer, which says so.
+   * Drops stored records nothing is left of (all sessions older than a
+   * minute, whose wrapper has surely written its pid):
+   * - settled or cleaned-up launches (a `settled/` claim, no `stdin`);
+   * - other sessions' servers that died without a decision;
+   * - other sessions' launches older than `LAUNCH_EXPIRED_MS` whose server is
+   *   gone, decision or not (a session nobody resumed).
+   * A live server always keeps its record; this session's dead servers are
+   * left to the timer, which reports them. The store is read again before the
+   * write, so a record another process added meanwhile is kept.
    */
-  private async pruneStoredLaunches(): Promise<LaunchRecord[]> {
+  private async pruneStoredLaunches(): Promise<void> {
     const stored = await this.host.storeGet(STORE_LAUNCHES)
     const records = (Array.isArray(stored) ? (stored as LaunchRecord[]) : []).filter(
       (record) => record && typeof record.dir === 'string' && typeof record.sessionId === 'string',
     )
     const now = await this.host.now()
-    const old = records.filter((record) => now - (Number(record.startedAt) || 0) > LAUNCH_SETTLED_AGE_MS)
-    if (old.length === 0) return records
-    const own = old.filter((record) => record.sessionId === this.session.sessionId).map((record) => record.dir)
-    const others = old.filter((record) => record.sessionId !== this.session.sessionId).map((record) => record.dir)
-    const probe = await this.host.run(pruneArgv(own, others), { timeoutMs: 10_000 }).catch(() => null)
-    if (!probe || probe.exitCode !== 0) return records
+    const age = (record: LaunchRecord) => now - (Number(record.startedAt) || 0)
+    const old = records.filter((record) => age(record) > LAUNCH_SETTLED_AGE_MS)
+    if (old.length === 0) return
+    const mine = (record: LaunchRecord) => record.sessionId === this.session.sessionId
+    const groups = {
+      cleaned: old.filter(mine).map((record) => record.dir),
+      dead: old.filter((record) => !mine(record) && age(record) <= LAUNCH_EXPIRED_MS).map((record) => record.dir),
+      expired: old.filter((record) => !mine(record) && age(record) > LAUNCH_EXPIRED_MS).map((record) => record.dir),
+    }
+    const probe = await this.host.run(pruneArgv(groups), { timeoutMs: 5_000 }).catch(() => null)
+    if (!probe || probe.exitCode !== 0) return
     const gone = new Set(probe.stdout.split('\n').map((line) => line.trim()).filter(Boolean))
-    if (gone.size === 0) return records
-    const kept = records.filter((record) => !gone.has(record.dir))
-    this.host.debug(`pruned ${records.length - kept.length} stored launch record(s)`)
+    if (gone.size === 0) return
+    const current = await this.host.storeGet(STORE_LAUNCHES)
+    const all = Array.isArray(current) ? (current as LaunchRecord[]) : []
+    const kept = all.filter((record) => !record || typeof record.dir !== 'string' || !gone.has(record.dir) || this.launches.has(record.id))
+    this.host.debug(`pruned ${all.length - kept.length} stored launch record(s)`)
     await this.host.storeSet(STORE_LAUNCHES, kept)
-    return kept
   }
 
   /**
@@ -368,6 +468,8 @@ export class PlannotatorMod {
         bridgeOff: _off,
         leader: _leader,
         leaseTick: _leaseTick,
+        touchedAt: _touchedAt,
+        checking: _checking,
         ...record
       }) => record,
     )
@@ -446,7 +548,8 @@ export class PlannotatorMod {
       return { error: error instanceof Error ? error.message : String(error) }
     }
     const record: LaunchRecord = { id, sessionId: this.session.sessionId, kind, dir, subject, startedAt: await this.host.now(), bridgeToken, ...extra }
-    const live = this.adopt(record)
+    // Launched from here: the person is in this process.
+    const live = this.adopt(record, record.startedAt)
     this.host.debug(`launched ${kind} ${id}: ${cliArgv.join(' ')}`)
     await this.persist()
     this.ensureTimer()
@@ -527,6 +630,7 @@ export class PlannotatorMod {
 
   /** `/plannotator-review`, `/plannotator-annotate`, `/plannotator-last`: open and return at once. */
   async runCommand(kind: Exclude<SessionKind, 'plan'>, rawArgs: string): Promise<string> {
+    await this.touchLaunches()
     const opened = await this.open(kind, rawArgs, subjectFor(kind, rawArgs))
     switch (opened.state) {
       case 'error':
@@ -550,6 +654,8 @@ export class PlannotatorMod {
    * tells Claude the page is open and to end its turn and wait.
    */
   async runTool(input: unknown): Promise<{ text: string } | { deny: string }> {
+    await this.adoptNewStoredLaunches()
+    await this.touchLaunches()
     const parsed = parsePlannotatorToolInput(input)
     if (!parsed.ok) return { deny: parsed.error }
     const call = parsed.input
@@ -819,6 +925,11 @@ export class PlannotatorMod {
    * call is answered with `deny` text Claude reads.
    */
   async onPlanCall(input: { tool_use_id: string; plan?: unknown; planFilePath?: unknown }): Promise<{ pass: true } | { deny: string }> {
+    // Another Claude Code process on this session may have received the
+    // approval (or used it), or opened the plan review this call revises.
+    await this.loadApproval()
+    await this.adoptNewStoredLaunches()
+    await this.touchLaunches()
     const plan = await this.resolvePlan(input)
     if (!plan.trim()) return { pass: true }
     const hash = await this.host.sha256(normalizePlanForHash(plan))
@@ -926,12 +1037,15 @@ export class PlannotatorMod {
   private async tick(): Promise<void> {
     if (this.disposed) return
     for (const launch of [...this.launches.values()]) {
-      if (launch.settling || launch.starting) continue
+      if (launch.settling || launch.starting || launch.checking) continue
       launch.ticks += 1
+      launch.checking = true
       try {
         await this.check(launch)
       } catch {
         // A transient read failure: next tick.
+      } finally {
+        launch.checking = false
       }
     }
     this.stopTimerIfIdle()
@@ -955,7 +1069,7 @@ export class PlannotatorMod {
       // the reviewer's decision that won the race against a TERM: deliver it.
       const record = (await this.host.exists(resultPath)) ? parseHostResult(await this.host.readFile(resultPath)) : null
       if (record) {
-        if (!(await this.claimSettlement(launch, 'result'))) return
+        if (!(await this.claimSettlement(launch))) return
         if (record.closedBy === 'agent') {
           await this.finishAgentClose(launch, record)
           return
@@ -969,7 +1083,7 @@ export class PlannotatorMod {
       if (await this.host.exists(exitPath)) {
         const code = (await this.host.readFile(exitPath).catch(() => '')).trim()
         if (code !== '0' || launch.kind === 'plan') {
-          if (!(await this.claimSettlement(launch, 'exit'))) return
+          if (!(await this.claimSettlement(launch))) return
           await this.finishAgentClose(launch, null)
           return
         }
@@ -983,7 +1097,7 @@ export class PlannotatorMod {
     if (await this.host.exists(resultPath)) {
       const record = parseHostResult(await this.host.readFile(resultPath))
       if (record) {
-        if (!(await this.claimSettlement(launch, 'result'))) return
+        if (!(await this.claimSettlement(launch))) return
         this.host.debug(`result ${launch.id}: ${record.surface} ${record.decision}${record.noop ? ' (no-op)' : ''}`)
         // Claude closed it from another process on this session: nothing to deliver.
         if (record.closedBy === 'agent') {
@@ -996,7 +1110,7 @@ export class PlannotatorMod {
     }
     if (await this.host.exists(fileIn(launch.dir, 'exit'))) {
       const code = (await this.host.readFile(fileIn(launch.dir, 'exit')).catch(() => '')).trim()
-      if (!(await this.claimSettlement(launch, 'exit'))) return
+      if (!(await this.claimSettlement(launch))) return
       // A CLI older than the host result file still prints the decision the
       // skill would have shown Claude. (A plan never exits 0 without a record.)
       if (code === '0' && launch.kind !== 'plan') {
@@ -1034,7 +1148,7 @@ export class PlannotatorMod {
     launch.pidMisses += 1
     // Gone and never wrote an exit code: the whole process group was killed.
     if (launch.pidMisses >= PID_MISSES_BEFORE_STOPPED && !(await this.host.exists(fileIn(launch.dir, 'exit')))) {
-      if (!(await this.claimSettlement(launch, 'pid'))) return
+      if (!(await this.claimSettlement(launch))) return
       if (launch.closedByAgent) {
         await this.finishAgentClose(launch, null)
         return
@@ -1047,14 +1161,23 @@ export class PlannotatorMod {
   // --- Several Claude Code processes on one session ---------------------------
 
   /**
-   * Claims the right to settle a launch by renaming the file that says it is
-   * settled (`claimArgv`). True: this instance settles it (marked settling).
-   * False: another process got there first (the launch is forgotten here,
-   * nothing said), or the rename failed (tried again next tick).
+   * Claims the right to settle a launch: ONE claim per launch (`claimArgv`,
+   * the `settled/` directory) whichever file settles it, so one process can
+   * never deliver the result record while another delivers the exit code's
+   * stdout copy. True: this instance settles it (marked settling). False:
+   * another process got there first (the launch is forgotten here, nothing
+   * said), or the claim could not be made or its answer was lost (tried again
+   * next tick; the claim names this instance, so a claim it already made wins
+   * again). A process that dies between the claim and the delivery loses that
+   * decision (the claim stays, nobody else delivers it): a window of one
+   * process call and one `$.prompt.submit`.
    */
-  private async claimSettlement(launch: LiveLaunch, file: ClaimableFile): Promise<boolean> {
+  private async claimSettlement(launch: LiveLaunch): Promise<boolean> {
+    // The lease read every few ticks may be stale by now: the person may have
+    // moved to another process on this session, which then delivers.
+    if (!(await this.holdLease(launch, true))) return false
     launch.settling = true
-    const claimed = await this.host.run(claimArgv(fileIn(launch.dir, file)), { timeoutMs: 5_000 }).catch(() => null)
+    const claimed = await this.host.run(claimArgv(launch.dir, this.instanceId), { timeoutMs: 5_000 }).catch(() => null)
     if (claimed?.exitCode === CLAIM_EXIT.won) return true
     if (claimed?.exitCode === CLAIM_EXIT.lost) {
       await this.forgetSettledElsewhere(launch)
@@ -1065,13 +1188,15 @@ export class PlannotatorMod {
   }
 
   /**
-   * Another process claimed it, or delivered it and cleaned the launch
-   * directory up: `stdin` is written by the mod before the launch is recorded
-   * and removed only by `cleanupArgv`.
+   * Another process claimed it (a `settled/` claim not naming this instance),
+   * or delivered it and cleaned the launch directory up: `stdin` is written by
+   * the mod before the launch is recorded and removed only by `cleanupArgv`.
    */
   private async settledElsewhere(launch: LiveLaunch): Promise<boolean> {
-    for (const file of ['result', 'exit', 'pid'] as const) {
-      if (await this.host.exists(`${fileIn(launch.dir, file)}${CLAIMED_SUFFIX}`)) return true
+    if (await this.host.exists(`${launch.dir}/${SETTLED_DIR}`)) {
+      const by = (await this.host.readFile(`${launch.dir}/${SETTLED_BY}`).catch(() => '')).trim()
+      // Our own claim whose answer was lost: settle it now.
+      return by !== this.instanceId
     }
     return !(await this.host.exists(fileIn(launch.dir, 'stdin')))
   }
@@ -1087,22 +1212,25 @@ export class PlannotatorMod {
    * decision): it holds the watcher lease, renewed every few ticks, unless
    * another live process holds it. See `LEASE_STALE_MS`.
    */
-  private async holdLease(launch: LiveLaunch): Promise<boolean> {
-    if (launch.leaseTick !== null && launch.ticks - launch.leaseTick < LEASE_EVERY_TICKS) return launch.leader
+  private async holdLease(launch: LiveLaunch, fresh = false): Promise<boolean> {
+    if (!fresh && launch.leaseTick !== null && launch.ticks - launch.leaseTick < LEASE_EVERY_TICKS) return launch.leader
     launch.leaseTick = launch.ticks
     const path = fileIn(launch.dir, 'watcher')
     const now = await this.host.now()
     const lease = parseWatcherLease(await this.host.readFile(path).catch(() => ''))
-    if (lease?.owner && lease.owner !== this.instanceId && Math.abs(now - lease.at) < LEASE_STALE_MS) {
+    const foreign = !!lease?.owner && lease.owner !== this.instanceId && Math.abs(now - lease.at) < LEASE_STALE_MS
+    // A live holder keeps it unless the person touched the launch here more recently.
+    if (foreign && lease && lease.touchedAt >= launch.touchedAt) {
       if (launch.leader) this.host.debug(`launch ${launch.id}: another Claude Code process watches it now`)
       launch.leader = false
       return false
     }
-    await this.host.writeFile(path, JSON.stringify({ owner: this.instanceId, at: now })).catch(() => undefined)
+    await this.host.writeFile(path, JSON.stringify({ owner: this.instanceId, at: now, touchedAt: launch.touchedAt })).catch(() => undefined)
     if (!launch.leader) this.host.debug(`launch ${launch.id}: watching it (lease ${this.instanceId})`)
     launch.leader = true
     return true
   }
+
 
   private async settle(launch: LiveLaunch, record: HostResultRecord): Promise<void> {
     if (record.surface === 'plan' && record.decision === 'approved' && typeof record.approvedPlan === 'string') {
@@ -1201,6 +1329,8 @@ export class PlannotatorMod {
     const wasOurs = !!turnId && this.turns.ownsTurn(turnId)
     this.turns.onPromptEntered(prompt)
     if (wasOurs && turnId && this.turns.isTakenOver(turnId)) this.host.debug(`ask turn ${turnId} taken over`)
+    // The person typed here: decisions should arrive in this conversation.
+    if (originKind === 'composer') void this.touchLaunches()
   }
 
   /** A prompt reached prompt.submit, before the hooks beneath it ran, from register.ts. */

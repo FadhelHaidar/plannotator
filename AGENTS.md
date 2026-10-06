@@ -438,7 +438,7 @@ launch directory is `${PLANNOTATOR_DATA_DIR or ~/.plannotator}/claude-code-mod/<
 (`PLANNOTATOR_HOST_RESULT_FILE`), `stdout`, `stderr`, `pid`, `exit` (written
 after the CLI exits), `revision.json` + `.ack` (plan revisions),
 `messages.json` (`PLANNOTATOR_HOST_MESSAGES_FILE`, `last`'s picker list),
-`watcher.json` and `<file>.claimed` (see "Two processes on one session" below) and
+`watcher.json` and `settled/by` (see "Two processes on one session" below) and
 `feedback.md` (oversized feedback). Waiting inside a hook (for the ready file, a
 revision ack) happens in a `$.process.run` shell loop (`waitForAny`), never a
 `$.clock` wait, which would spend the hook's budget and let the engine run the
@@ -467,29 +467,50 @@ review; verified live, `claude --continue` reattached and delivered it.
 *Two processes on one session.* `claude --continue` while the first process
 still runs gives two Claude Code processes the same session id, and both
 reattach the same launches. One of them watches each launch: `watcher.json` in
-the launch directory is a lease (`{ owner, at }`, the owner a random id per mod
-instance) renewed every 5 s; another process takes it over once it is 20 s old
-(`LEASE_STALE_MS`: the holder exited, slept or hung), and a disposed instance
+the launch directory is a lease (`{ owner, at, touchedAt }`, the owner a random
+id per mod instance) renewed every 5 s. The process the person works in wins
+it: restoring a launch, a prompt typed in that process (origin `composer`), a
+slash command, Claude's `plannotator` tool and ExitPlanMode all touch that
+process's launches and take the lease at once; a live holder keeps it against
+an older or equal touch, and anyone takes it once it is 20 s old
+(`LEASE_STALE_MS`: the holder exited, slept or hung). A disposed instance
 (`session.end`) releases it at once. Only the watcher runs the bridge (so the
-two never supersede each other) and delivers. Delivery is also claimed, so a
-lease race cannot deliver twice: before settling, the mod renames the file that
-settles the launch (`result.json`, `exit`, or `pid` for a server that died) to
-`<file>.claimed` (`claimArgv`; rename(2) in one directory has exactly one
-winner). A process that loses the claim, or finds a `.claimed` file or the
-launch's `stdin` gone (cleaned up after the other delivered), forgets the
-launch quietly, so its status line no longer says "waiting for you". A process
-restarted after a crash may wait up to 20 s for the dead holder's lease before
-delivering. `persist` keeps this session's records it does not know (the other
-process launched them) unless it settled them. At restore the stored launch
-records are pruned (`pruneArgv`, records older than a minute): any whose
-directory was cleaned up (no `stdin`), and, for other sessions, any whose
-server died without a decision (`kill -0` fails, no `result.json`, no `exit`).
-A live server, or a decision a resumed session would still deliver, keeps its
-record; this session's dead servers are left to the timer, which reports them.
+two never supersede each other) and delivers, re-reading the lease right
+before it settles, so a decision follows the person within a tick. Plan
+approvals live in `$.store` and every ExitPlanMode re-reads them, so an
+approval received (or already used) by the other process is honored once;
+ExitPlanMode and the tool also adopt this session's launches the other process
+started, so a revision goes into the open review instead of opening a new one.
+Delivery is claimed once per launch, whichever file settles it (`result.json`,
+`exit` with an older CLI's stdout, or a dead `pid`): `claimArgv` makes the
+launch's `settled/` directory (mkdir has exactly one winner) and writes the
+claimant's id to `settled/by`, so a claimant whose process call timed out wins
+again on the next tick, while every other process loses. A process that loses,
+or finds a `settled/` claim naming someone else or the launch's `stdin` gone
+(cleaned up after the other delivered), forgets the launch quietly, so its
+status line no longer says "waiting for you". A per-launch in-flight flag keeps
+the 1 s timer, which never waits for a slow check, from checking one launch
+twice at once. Residual window: a process that dies between its claim and its
+`$.prompt.submit` loses that decision (nobody else delivers a claimed launch).
+`cleanupArgv` removes `stdin` first and keeps `settled/` while `feedback.md`
+keeps the directory, so a claim made after cleanup started loses.
+`persist` keeps this session's records it does not know (the other process
+launched them) unless it settled them. After restore, off the session-start
+path (5 s cap), the stored launch records older than a minute are pruned
+(`pruneArgv`): any settled or cleaned up (`settled/`, no `stdin`); for other
+sessions, any whose server died without a decision (`kill -0` fails, no
+`result.json`, no `exit`); and for other sessions older than 14 days
+(`LAUNCH_EXPIRED_MS`, a session nobody resumed), any whose server is gone, decision
+or not. A live server always keeps its record; this session's dead servers are
+left to the timer, which reports them. The store is read again before the
+write, so a record another process added meanwhile is kept.
 The debug log (`PLANNOTATOR_MOD_DEBUG=1`) is appended (`debugAppendArgv`,
-O_APPEND, rotated to `debug.log.1` past 1 MiB) with a per-process tag on every
-line, because rewriting the whole file from each process's own buffer clobbered
-the other's lines and left NUL bytes.
+O_APPEND) with a per-process tag on every line, because rewriting the whole
+file from each process's own buffer clobbered the other's lines and left NUL
+bytes. Past 1 MiB it is rotated to `debug.log.1` under a lock
+(`debug.log.rotating`, mkdir; one older than a minute is a dead writer's) with
+the size checked again inside it, so two writers never rotate twice and move a
+fresh log over the old one.
 
 **Host result file (`PLANNOTATOR_HOST_RESULT_FILE`).** New CLI side channel
 (`apps/hook/server/host-result.ts`), taken from the env at startup and scrubbed

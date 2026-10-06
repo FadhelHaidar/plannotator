@@ -14,8 +14,8 @@
  *   exit         the CLI's exit code, written after it exits
  *   revision.json / revision.json.ack   plan revisions pushed into an open review
  *   messages.json  PLANNOTATOR_HOST_MESSAGES_FILE: `last`'s recent assistant messages, for the picker
- *   watcher.json   which Claude Code process watches this launch (`{ owner, at }`, a heartbeat)
- *   <file>.claimed result.json, exit or pid renamed by the process that settles the launch
+ *   watcher.json   which Claude Code process watches this launch (`{ owner, at, touchedAt }`, a heartbeat)
+ *   settled/by     the claim: made (mkdir) by the one process that settles the launch, naming it
  *
  * No listener in the mod: it looks at these files on a timer.
  */
@@ -52,9 +52,9 @@ export const LAUNCH_FILES = {
   overflow: 'feedback.md',
 } as const
 
-/** The files whose rename claims a launch's settlement (`claimArgv`). */
-export type ClaimableFile = 'result' | 'exit' | 'pid'
-export const CLAIMED_SUFFIX = '.claimed'
+/** The claim directory `claimArgv` makes, and the file in it naming the claimant. */
+export const SETTLED_DIR = 'settled'
+export const SETTLED_BY = 'settled/by'
 
 export function fileIn(dir: string, name: keyof typeof LAUNCH_FILES): string {
   return `${dir}/${LAUNCH_FILES[name]}`
@@ -118,21 +118,27 @@ export function privateDirArgv(dir: string): string[] {
 /**
  * Removes a settled launch's files, keeping `feedback.md` (Claude reads it
  * later) and the directory when that file is there. Only names this module
- * wrote; never a glob.
+ * wrote; never a glob. The claim (`settled/`) goes only with the directory:
+ * while `feedback.md` keeps the directory, the claim keeps saying the launch
+ * was settled. Files go first, `stdin` among them, so a claim made after this
+ * started finds `stdin` gone and loses (`CLAIM_SCRIPT`).
  */
 export function cleanupArgv(dir: string): string[] {
   const names = Object.entries(LAUNCH_FILES)
     .filter(([key]) => key !== 'overflow')
     .map(([, name]) => name)
-  const claimed = (['result', 'exit', 'pid'] as const).map((key) => `${LAUNCH_FILES[key]}${CLAIMED_SUFFIX}`)
   return [
     '/bin/sh',
     '-c',
-    'dir=$1; shift; for f in "$@"; do rm -f "$dir/$f"; done; rmdir "$dir" 2>/dev/null; exit 0',
+    [
+      'dir=$1; shift',
+      'for f in "$@"; do rm -f "$dir/$f"; done',
+      `if [ ! -e "$dir/${LAUNCH_FILES.overflow}" ]; then rm -f "$dir/${SETTLED_BY}"; rmdir "$dir/${SETTLED_DIR}" 2>/dev/null; rmdir "$dir" 2>/dev/null; fi`,
+      'exit 0',
+    ].join('\n'),
     'plannotator-cleanup',
     dir,
     ...names,
-    ...claimed,
     'revision.json.ack',
     'exit.tmp',
   ]
@@ -144,50 +150,76 @@ export const CLAIM_EXIT = { won: 0, lost: 3, failed: 4 } as const
 /**
  * Claims one launch's settlement across Claude Code processes: two processes
  * on one session id (`claude --continue` while the first still runs) both
- * watch the launch, and only the one whose rename of `$1` to `$1.claimed`
- * succeeds delivers. rename(2) in one directory is atomic, so exactly one
- * wins; the other finds the file gone (exit 3). A file still there after a
- * failed rename (permissions, a full disk) is exit 4: try again later.
+ * watch the launch, and only the one that makes `$1/settled` (mkdir is atomic
+ * and fails when it exists: exactly one winner) settles it, whichever file
+ * says it is settled (the result record, the exit code, or a dead pid). The
+ * winner writes its id (`$2`) to `settled/by`, so the same instance that
+ * claimed but lost the answer (a timed-out process call) wins again on retry
+ * (exit 0). A claim made once cleanup removed `stdin` is too late (exit 3).
+ * Neither made nor found: try again later (exit 4).
  */
 export const CLAIM_SCRIPT = [
-  '[ -e "$1" ] || exit 3',
-  'mv -f "$1" "$1.claimed" 2>/dev/null && exit 0',
-  '[ -e "$1" ] && exit 4',
-  'exit 3',
+  'd=$1; me=$2',
+  `if mkdir "$d/${SETTLED_DIR}" 2>/dev/null; then`,
+  `  printf '%s' "$me" > "$d/${SETTLED_BY}"`,
+  '  [ -e "$d/stdin" ] && exit 0',
+  '  exit 3',
+  'fi',
+  `[ "$(cat "$d/${SETTLED_BY}" 2>/dev/null)" = "$me" ] && exit 0`,
+  `[ -d "$d/${SETTLED_DIR}" ] && exit 3`,
+  '[ -d "$d" ] || exit 3',
+  'exit 4',
 ].join('\n')
 
-export function claimArgv(path: string): string[] {
-  return ['/bin/sh', '-c', CLAIM_SCRIPT, 'plannotator-claim', path]
+export function claimArgv(dir: string, claimant: string): string[] {
+  return ['/bin/sh', '-c', CLAIM_SCRIPT, 'plannotator-claim', dir, claimant]
 }
 
 /**
- * Prints each launch directory (argument) whose stored record can go: no
- * decision waiting (`result.json` or `exit` not yet claimed), and either
- * cleaned up (no `stdin`, which the mod writes before launching and only
- * `cleanupArgv` removes; or no directory at all) or, for directories after a
- * `--` marker, a server whose pid no longer answers `kill -0`.
- * A live server, or a decision a resumed session would still deliver, keeps
- * its record.
+ * Prints each launch directory whose stored record can go. Arguments are
+ * directories in three groups, each started by a marker:
+ * - `--cleaned`: only when settled or cleaned up (a `settled/` claim, no
+ *   `stdin` — which the mod writes before launching and only `cleanupArgv`
+ *   removes — or no directory at all);
+ * - `--dead`: also when no decision waits (`result.json`, `exit`) and the
+ *   server's pid no longer answers `kill -0` (or there is none);
+ * - `--expired`: also with a decision waiting, unless the server still runs
+ *   (a session nobody resumed for a long time).
+ * A live server always keeps its record.
  */
 export const PRUNE_SCRIPT = [
-  'dead=0',
+  'mode=cleaned',
   'for d in "$@"; do',
-  '  if [ "$d" = "--" ]; then dead=1; continue; fi',
-  '  for f in result.json exit; do [ -e "$d/$f" ] && continue 2; done',
-  '  if [ ! -e "$d/stdin" ]; then echo "$d"; continue; fi',
-  '  [ "$dead" = 1 ] || continue',
+  '  case "$d" in --cleaned|--dead|--expired) mode=${d#--}; continue ;; esac',
+  `  if [ -e "$d/${SETTLED_DIR}" ] || [ ! -e "$d/stdin" ]; then echo "$d"; continue; fi`,
+  '  [ "$mode" = cleaned ] && continue',
   '  pid=$(cat "$d/pid" 2>/dev/null)',
-  '  case "$pid" in ""|*[!0-9]*) continue ;; esac',
-  '  kill -0 "$pid" 2>/dev/null || echo "$d"',
+  '  case "$pid" in',
+  '    "") alive=0 ;;',
+  '    *[!0-9]*) alive=1 ;;',
+  '    *) if kill -0 "$pid" 2>/dev/null; then alive=1; else alive=0; fi ;;',
+  '  esac',
+  '  [ "$alive" = 1 ] && continue',
+  '  if [ "$mode" = dead ]; then',
+  '    for f in result.json exit; do [ -e "$d/$f" ] && continue 2; done',
+  '  fi',
+  '  echo "$d"',
   'done',
 ].join('\n')
 
-/**
- * `cleanedDirs` are pruned only when cleaned up (no `stdin`); `deadDirs`
- * also when their server's pid is gone.
- */
-export function pruneArgv(cleanedDirs: readonly string[], deadDirs: readonly string[]): string[] {
-  return ['/bin/sh', '-c', PRUNE_SCRIPT, 'plannotator-prune', ...cleanedDirs, '--', ...deadDirs]
+export function pruneArgv(groups: { cleaned: readonly string[]; dead: readonly string[]; expired: readonly string[] }): string[] {
+  return [
+    '/bin/sh',
+    '-c',
+    PRUNE_SCRIPT,
+    'plannotator-prune',
+    '--cleaned',
+    ...groups.cleaned,
+    '--dead',
+    ...groups.dead,
+    '--expired',
+    ...groups.expired,
+  ]
 }
 
 /** Above this the debug log is moved to `<file>.1` before the next append. */
@@ -197,13 +229,23 @@ export const DEBUG_LOG_MAX_BYTES = 1_048_576
  * Appends stdin to the debug log, rotating it once it passes
  * `DEBUG_LOG_MAX_BYTES`. Appending (O_APPEND) is what lets several Claude Code
  * processes share one log: rewriting the whole file from each process's own
- * buffer clobbered the other's lines and could leave NUL bytes behind.
+ * buffer clobbered the other's lines and could leave NUL bytes behind. The
+ * rotation runs under a lock (`<file>.rotating`, mkdir; a lock older than a
+ * minute is a dead writer's and is removed) and re-checks the size inside it,
+ * so two writers past the limit at once rotate once instead of the second
+ * moving the fresh log over the first one's `<file>.1`.
  */
 export const DEBUG_APPEND_SCRIPT = [
-  'f=$1',
+  'f=$1; lock="$f.rotating"',
   'mkdir -p "$(dirname "$f")" 2>/dev/null',
-  'size=$(wc -c < "$f" 2>/dev/null | tr -d \' \')',
-  `[ "\${size:-0}" -gt ${DEBUG_LOG_MAX_BYTES} ] && mv -f "$f" "$f.1" 2>/dev/null`,
+  `size() { s=$(wc -c < "$f" 2>/dev/null | tr -d ' '); echo "\${s:-0}"; }`,
+  `if [ "$(size)" -gt ${DEBUG_LOG_MAX_BYTES} ]; then`,
+  '  [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ] && rmdir "$lock" 2>/dev/null',
+  '  if mkdir "$lock" 2>/dev/null; then',
+  `    [ "$(size)" -gt ${DEBUG_LOG_MAX_BYTES} ] && mv -f "$f" "$f.1" 2>/dev/null`,
+  '    rmdir "$lock" 2>/dev/null',
+  '  fi',
+  'fi',
   'cat >> "$f"',
 ].join('\n')
 
