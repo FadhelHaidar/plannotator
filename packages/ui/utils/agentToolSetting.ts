@@ -88,12 +88,12 @@ export function agentToolHostName(host: AgentToolHost): string {
 
 /**
  * When a change takes effect on this host: the tool list is part of the
- * model's prompt, so each host reads the setting once at start. OpenCode
- * decides when the plugin loads, so it takes a restart rather than a new
- * session.
+ * model's prompt, so each host reads the setting once. Pi reads it per
+ * session; the Claude Code mod and the OpenCode plugin decide once per
+ * process (when the module or plugin loads), so those take a restart.
  */
 export function agentToolAppliesWhen(host: AgentToolHost): string {
-  return host === 'opencode' ? 'the next time OpenCode starts' : `the next ${HOST_NAMES[host]} session`;
+  return host === 'pi' ? 'the next Pi session' : `the next time ${HOST_NAMES[host]} starts`;
 }
 
 /**

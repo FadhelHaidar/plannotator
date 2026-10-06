@@ -87,6 +87,13 @@ export interface ServerOptions {
   plan: string;
   /** Origin identifier (e.g., "claude-code", "opencode") */
   origin: Origin;
+  /**
+   * The OpenCode host can register the `plannotator` agent tool, so the
+   * serverConfig advert names it. Set by the OpenCode 2 plugin's in-process
+   * plan review; a CLI it launches carries OPENCODE_TOOL_CAPABLE_ENV instead
+   * (packages/server/ai-runtime.ts).
+   */
+  opencodeToolCapable?: boolean;
   /** HTML content to serve for the UI */
   htmlContent: string;
   /** Current permission mode to preserve (Claude Code only) */
@@ -424,11 +431,11 @@ export async function startPlannotatorServer(
                 sharingEnabled,
                 shareBaseUrl,
                 isWSL: wslFlag,
-                serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge)),
+                serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge, options.opencodeToolCapable)),
                 ...getAutoUpdateAdvert(),
               });
             }
-            return Response.json({ plan, origin, permissionMode, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, ...(options.planRevisions ? { planRevision } : {}), projectRoot: process.cwd(), planDir: planFile?.dir, isWSL: wslFlag, serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge)), ...getAutoUpdateAdvert() });
+            return Response.json({ plan, origin, permissionMode, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, ...(options.planRevisions ? { planRevision } : {}), projectRoot: process.cwd(), planDir: planFile?.dir, isWSL: wslFlag, serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge, options.opencodeToolCapable)), ...getAutoUpdateAdvert() });
           }
 
           // API: The live plan revision (open reviews that receive revised plans)

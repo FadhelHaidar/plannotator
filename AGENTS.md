@@ -1347,7 +1347,14 @@ offer on Pi and OpenCode 2. Both read `parseAgentToolSetting(serverConfig)`
 (`packages/ui/utils/agentToolSetting.ts`): present only when the server reports
 `agentToolHost` and `agentToolEnabled` (the integration that launched the server has the tool),
 so OpenCode 1, Codex, the classic hook and `@plannotator/ui` hosts (which pass neither
-`agentToolSetting` nor `onAgentToolChange` to `Settings`) get nothing. Writes go through
+`agentToolSetting` nor `onAgentToolChange` to `Settings`) get nothing. An OpenCode bridge
+alone is not enough: the plugin also reports that its host can register the tool (a
+`tool.transform` domain) as `PLANNOTATOR_OPENCODE_TOOL_CAPABLE=1` on the CLI it launches and
+`opencodeToolCapable` on its in-process plan server (`agentToolHostForServer` in
+`packages/server/ai-runtime.ts`), so an OpenCode host without the domain, or an older plugin,
+gets no switch and no offer. The row says when a change applies: the next Pi session, the next
+time Claude Code / OpenCode starts (the mod and the OpenCode plugin decide once per process).
+Writes go through
 `saveAgentToolSetting` (POST `/api/config` `{ agentTool }`, awaited, not the settings registry's
 debounced best-effort write-back); the handlers answer 500 when the value did not reach
 config.json (`agentToolSaveFailed`), and both surfaces show that. The row is locked with a note
@@ -1357,10 +1364,13 @@ shows in the other.
 The offer (`AgentToolAnnouncementDialog`, `packages/ui/utils/agentToolAnnouncement.ts`, cookie
 `plannotator-announce-agent-tool-seen`, a plain storage key for the registry-seeding reason)
 follows the announcement shell (portal, `z-[100]`, Escape / Tab wrap / focus restore, backdrop
-dismiss, capture-phase `Mod+Enter` swallow) but collects a decision: "Not now" holds initial
-focus, the dialog cannot close while a save is in flight, a failure shows the reason with
-"Try again", success says when it applies (next Pi session; next time OpenCode starts) and
-offers Done. "Not now", Escape, the backdrop and a successful save write the cookie; a failed
+dismiss, capture-phase `Mod+Enter` swallow) but collects a decision. Approved design ("Loop",
+`.product/approved/agent-tool-dialog/`): a theme-token SVG of the round trip over the question
+"Do you use Plannotator as a skill?", two example requests, one line of why, the token cost,
+and the buttons "No, I’ll just use slash commands" (initial focus) and "Yes, turn it on"; change
+copy there first. The dialog cannot close while a save is in flight, a failure shows the reason
+with "Try again", success says when it starts and offers Done. Declining, Escape, the backdrop
+and a successful save write the cookie; a failed
 save does not. It shows only for a Pi / OpenCode 2 host whose next-session value is off, never
 chosen in config.json (`agentToolConfigured`), and not set by the env. Ordering: LAST in each
 app's chain, after terminal tools (latched, `agentToolAnnouncementPendingThisLoad`) and after

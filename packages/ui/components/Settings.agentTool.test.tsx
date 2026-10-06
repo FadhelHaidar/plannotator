@@ -118,6 +118,8 @@ describe('Settings agent tool switch', () => {
   test.skipIf(!hasDom)('names the cost per host: Claude Code defers the tool, Pi sends it every request', async () => {
     await mount({ mode: 'plan', initial: { host: 'claude-code', enabled: true, configured: false }, save: async () => {} });
     expect(document.querySelector(ROW)?.textContent).not.toContain('780');
+    // The mod decides once per Claude Code process, so it takes a restart, not a new session.
+    expect(document.querySelector(ROW)?.textContent).toContain('next time Claude Code starts');
     await act(async () => root?.unmount());
     root = null;
     await mount({ mode: 'plan', initial: PI_OFF, save: async () => {} });

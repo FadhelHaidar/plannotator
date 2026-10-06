@@ -96,6 +96,12 @@ export interface OpenCodeBridgeContext {
   shareBaseUrl?: string;
   pasteApiUrl?: string;
   agents?: OpenCodeBridgeAgent[];
+  /**
+   * The host can register the `plannotator` agent tool (OpenCode 2 with a tool
+   * domain). The child CLI then advertises the tool's switch; without it the
+   * reviews it opens offer none (PLANNOTATOR_OPENCODE_TOOL_CAPABLE).
+   */
+  toolCapable?: boolean;
 }
 
 interface RunCliOptions {
@@ -338,6 +344,9 @@ export function buildCliBridgeEnv(
     }),
     ...(bridge?.shareBaseUrl && { PLANNOTATOR_SHARE_URL: bridge.shareBaseUrl }),
     ...(bridge?.pasteApiUrl && { PLANNOTATOR_PASTE_URL: bridge.pasteApiUrl }),
+    // Kept literal (packages/server's OPENCODE_TOOL_CAPABLE_ENV): this module
+    // must not pull the server package into the plugin bundle.
+    ...(bridge?.toolCapable && { PLANNOTATOR_OPENCODE_TOOL_CAPABLE: "1" }),
   };
 }
 

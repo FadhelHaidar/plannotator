@@ -97,7 +97,7 @@ describe("the agent tool advert on the Bun servers", () => {
   });
 
   test("an in-process OpenCode 2 bridge: the OpenCode view (off by default), a saved choice, an env override", async () => {
-    const server = await startPlannotatorServer({ plan: "# Plan", origin: "opencode", htmlContent: MINIMAL_HTML, sessionBridge: opencodeBridge });
+    const server = await startPlannotatorServer({ plan: "# Plan", origin: "opencode", htmlContent: MINIMAL_HTML, sessionBridge: opencodeBridge, opencodeToolCapable: true });
     try {
       expect(await serverConfig(server.url)).toMatchObject({ agentTool: false, agentToolConfigured: false, agentToolHost: "opencode", agentToolEnabled: false });
       await post(server.url, { agentTool: true });
@@ -109,20 +109,33 @@ describe("the agent tool advert on the Bun servers", () => {
     }
   });
 
+  test("an OpenCode bridge whose host cannot register the tool: no agentTool fields", async () => {
+    // A host without a tool domain, or a plugin release from before the tool,
+    // still bridges the session; it must not be offered a switch for a tool
+    // it cannot have.
+    const server = await startPlannotatorServer({ plan: "# Plan", origin: "opencode", htmlContent: MINIMAL_HTML, sessionBridge: opencodeBridge });
+    try {
+      const config = await serverConfig(server.url);
+      expect([config.agentToolHost, config.agentToolEnabled]).toEqual([undefined, undefined]);
+    } finally {
+      server.stop();
+    }
+  });
+
   // The CLI reads the launching host once per process from the pull-bridge
   // env the mod / OpenCode 2 plugin set, so each case runs in its own process.
-  async function launchingHost(env: Record<string, string>, discard = false): Promise<string | null> {
+  async function launchingHost(env: Record<string, string>, discard = false, advert = false): Promise<string | null> {
     const dir = mkdtempSync(join(tmpdir(), "plannotator-launching-host-"));
     try {
       const runner = join(dir, "runner.ts");
       const runtimeUrl = pathToFileURL(join(import.meta.dir, "ai-runtime.ts")).href;
       writeFileSync(runner, `
-        import { discardEnvPullSessionBridgeConfig, launchingSessionHost } from ${JSON.stringify(runtimeUrl)};
+        import { agentToolHostForServer, discardEnvPullSessionBridgeConfig, launchingSessionHost } from ${JSON.stringify(runtimeUrl)};
         ${discard ? "discardEnvPullSessionBridgeConfig();" : ""}
-        console.log(JSON.stringify(launchingSessionHost() ?? null));
+        console.log(JSON.stringify((${advert ? "agentToolHostForServer()" : "launchingSessionHost()"}) ?? null));
       `);
       const base = { ...process.env };
-      for (const key of ["PLANNOTATOR_SESSION_BRIDGE_TOKEN", "PLANNOTATOR_SESSION_BRIDGE_HOST", "PLANNOTATOR_SESSION_BRIDGE_MODES"]) delete base[key];
+      for (const key of ["PLANNOTATOR_SESSION_BRIDGE_TOKEN", "PLANNOTATOR_SESSION_BRIDGE_HOST", "PLANNOTATOR_SESSION_BRIDGE_MODES", "PLANNOTATOR_OPENCODE_TOOL_CAPABLE"]) delete base[key];
       const proc = Bun.spawn([process.execPath, runner], { cwd: import.meta.dir, env: { ...base, ...env }, stdout: "pipe", stderr: "pipe" });
       const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
       expect(code, stderr).toBe(0);
@@ -140,5 +153,11 @@ describe("the agent tool advert on the Bun servers", () => {
     // No integration (classic hook, OpenCode 1, a shell), or a malformed one.
     expect(await launchingHost({})).toBeNull();
     expect(await launchingHost({ ...mod, PLANNOTATOR_SESSION_BRIDGE_TOKEN: "short" })).toBeNull();
+  }, 20_000);
+
+  test("a CLI launched by an OpenCode plugin advertises the tool only with its capability marker", async () => {
+    const opencode = { PLANNOTATOR_SESSION_BRIDGE_TOKEN: "k".repeat(43), PLANNOTATOR_SESSION_BRIDGE_HOST: "opencode" };
+    expect(await launchingHost(opencode, false, true)).toBeNull();
+    expect(await launchingHost({ ...opencode, PLANNOTATOR_OPENCODE_TOOL_CAPABLE: "1" }, false, true)).toBe("opencode");
   }, 20_000);
 });
