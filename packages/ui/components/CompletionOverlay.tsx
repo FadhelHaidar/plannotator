@@ -26,7 +26,8 @@ const ChatBubbleIcon = () => (
 
 interface CompletionOverlayProps {
   /** `done`: the session finished with nothing sent (an annotate Done with
-   *  no feedback). Neutral styling, and no "response has been sent" line. */
+   *  no feedback). Neutral styling. `done` and `exited` (Close) send nothing,
+   *  so neither shows the "response has been sent" line. */
   submitted: 'approved' | 'denied' | 'feedback' | 'done' | 'exited' | null | false;
   title: string;
   subtitle: string;
@@ -46,6 +47,7 @@ export function CompletionOverlay({ submitted, title, subtitle, agentLabel, link
 
   const isApproved = submitted === 'approved';
   const isDone = submitted === 'done';
+  const sentNothing = isDone || submitted === 'exited';
 
   return (
     <div className="fixed inset-0 z-[100] bg-background flex items-center justify-center" data-completion-state={submitted}>
@@ -114,7 +116,7 @@ export function CompletionOverlay({ submitted, title, subtitle, agentLabel, link
                   </label>
                   <p className="text-xs text-muted-foreground/60">You can change the delay in Settings.</p>
                 </>
-              ) : isDone ? null : (
+              ) : sentNothing ? null : (
                 <p className="text-xs text-muted-foreground/60">Your response has been sent.</p>
               )}
             </>

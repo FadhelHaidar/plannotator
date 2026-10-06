@@ -43,6 +43,7 @@ if (hasDom) {
 
 const appModule = hasDom ? await import("./App") : null;
 const App = appModule?.default as typeof import("./App")["default"];
+const fileBrowserModule = hasDom ? await import("@plannotator/ui/hooks/useFileBrowser") : null;
 const originalFetch = globalThis.fetch;
 const originalEventSource = globalThis.EventSource;
 const originalMatchMedia = hasDom ? window.matchMedia : undefined;
@@ -65,6 +66,9 @@ function seedAnnouncementsSeen(): void {
  *  can seed the session with pre-existing feedback without driving the DOM
  *  annotation flow. Read by the EventSource double at construction time. */
 let seededExternalAnnotations: unknown[] = [];
+/** Per-document saved drafts (`/api/draft/document`), keyed by absolute path:
+ *  merged into a folder-session document the first time it opens. */
+const savedDocumentDrafts = new Map<string, unknown[]>();
 
 class StubEventSource {
   static readonly CONNECTING = 0;
@@ -137,6 +141,18 @@ function makeFetch(plan: unknown): typeof fetch {
     if (url.pathname === "/api/plan") return Response.json(plan);
     if (url.pathname === "/api/ai/capabilities") return Response.json({ available: false, providers: [] });
     if (url.pathname === "/api/draft") return Response.json({ error: "Not found" }, { status: 404 });
+    if (url.pathname === "/api/draft/document") {
+      const saved = savedDocumentDrafts.get(url.searchParams.get("path") ?? "");
+      if (!saved || (init?.method ?? "GET") !== "GET") {
+        return saved ? Response.json({ ok: true }) : Response.json({ error: "Not found" }, { status: 404 });
+      }
+      return Response.json({ annotations: saved, globalAttachments: [] });
+    }
+    if (url.pathname === "/api/doc") {
+      const filepath = url.searchParams.get("path") ?? "";
+      const name = filepath.split("/").pop() ?? filepath;
+      return Response.json({ markdown: `# ${name}\n\nBody of ${name}.\n`, filepath, renderAs: "markdown" });
+    }
     if (url.pathname === "/api/feedback" || url.pathname === "/api/approve") {
       submissions.push({
         endpoint: url.pathname === "/api/feedback" ? "feedback" : "approve",
@@ -241,6 +257,8 @@ afterEach(async () => {
   submissions = [];
   failFeedbackPosts = 0;
   seededExternalAnnotations = [];
+  savedDocumentDrafts.clear();
+  fileBrowserModule?.resetFileTreeBackend();
   memory.clear();
   resetStorageBackend();
   if (hasDom) document.body.replaceChildren();
@@ -531,6 +549,12 @@ describe.if(hasDom)("annotate decision control", () => {
   });
 });
 
+/** A file row in the folder session's sidebar tree (labelled without `.md`). */
+function fileButton(name: string): HTMLButtonElement | undefined {
+  return Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+    .find((button) => button.textContent?.trim() === name);
+}
+
 /** The completion overlay's state attribute, or null while no overlay shows. */
 function completionState(): string | null {
   return document.querySelector("[data-completion-state]")?.getAttribute("data-completion-state") ?? null;
@@ -548,13 +572,33 @@ function completionTitle(): string | null {
  * screen there told the reviewer the agent got something it never did.
  */
 describe.if(hasDom)("annotate completion screen", () => {
+  type GlimpseWindow = Window & { glimpse?: { close?: () => void } };
+
+  // The footer's "Your response has been sent." line renders in the auto-close
+  // `closed` phase: an immediate auto-close whose close request went to a host
+  // window (Glimpse, or the VS Code panel's parent frame), so the tab stays up.
+  // With the default delay the footer shows the auto-close prompt instead and
+  // an assertion about the line would pass vacuously.
+  afterEach(() => {
+    delete (window as GlimpseWindow).glimpse;
+  });
+
+  function useImmediateHostClose(): void {
+    memory.set("plannotator-auto-close", "0");
+    (window as GlimpseWindow).glimpse = { close: () => {} };
+  }
+
   async function clickPrimary(): Promise<void> {
     await act(async () => primaryButton()!.click());
     await settle();
   }
 
+  function completionText(): string {
+    return document.querySelector("[data-completion-state]")?.textContent ?? "";
+  }
+
   function expectNoSentClaim(): void {
-    const text = document.querySelector("[data-completion-state]")?.textContent ?? "";
+    const text = completionText();
     expect(text).not.toContain("Feedback Sent");
     expect(text).not.toContain("address your feedback");
     expect(text).not.toContain("has been sent");
@@ -563,6 +607,7 @@ describe.if(hasDom)("annotate completion screen", () => {
   test("Done with nothing to send shows the Done screen, not Feedback Sent", async () => {
     setStorageBackend(memoryBackend);
     seedAnnouncementsSeen();
+    useImmediateHostClose();
     await mountAnnotate();
 
     await clickPrimary();
@@ -577,6 +622,7 @@ describe.if(hasDom)("annotate completion screen", () => {
   test("a note that was sent still shows Feedback Sent", async () => {
     setStorageBackend(memoryBackend);
     seedAnnouncementsSeen();
+    useImmediateHostClose();
     await mountAnnotate();
 
     await openComposer("Send a note");
@@ -584,6 +630,79 @@ describe.if(hasDom)("annotate completion screen", () => {
     await pressNoteKey("Enter", { metaKey: true });
 
     expect(submissions[0]!.nothingToSend).toBeUndefined();
+    expect(completionState()).toBe("denied");
+    expect(completionTitle()).toBe("Feedback Sent");
+    // Something was sent, so the footer still says so (this also proves the
+    // harness reaches the footer line the nothing-sent tests assert away).
+    expect(completionText()).toContain("has been sent");
+  });
+
+  test("Close keeps Session Closed but does not claim a response was sent", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    useImmediateHostClose();
+    await mountAnnotate();
+
+    const close = document.querySelector<HTMLButtonElement>(
+      'button[aria-label^="Close session without sending"]',
+    );
+    if (!close) throw new Error("Close button not found");
+    await act(async () => close.click());
+    await settle();
+
+    expect(submissions).toHaveLength(0);
+    expect(completionState()).toBe("exited");
+    expect(completionTitle()).toBe("Session Closed");
+    expectNoSentClaim();
+  });
+
+  test("folder: a comment on another document still shows Feedback Sent", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    useImmediateHostClose();
+    fileBrowserModule!.setFileTreeBackend({
+      loadTree: async () => Response.json({
+        tree: [
+          { name: "alpha.md", path: "alpha.md", type: "file" },
+          { name: "beta.md", path: "beta.md", type: "file" },
+        ],
+      }),
+      loadVaultTree: async () => Response.json({ error: "Unavailable" }, { status: 404 }),
+      watchTrees: () => undefined,
+    });
+    // alpha.md carries a saved comment, merged in when the file opens.
+    savedDocumentDrafts.set("/repo/alpha.md", [{
+      id: "alpha-1",
+      blockId: "",
+      startOffset: 0,
+      endOffset: 0,
+      type: "COMMENT",
+      text: "alpha needs work",
+      originalText: "Body of alpha.md.",
+      createdA: 1,
+    }]);
+    await mount(annotatePlan({
+      plan: "",
+      mode: "annotate-folder",
+      filePath: "/repo",
+      projectRoot: "/repo",
+      documentDrafts: true,
+    }), () => fileButton("alpha"));
+
+    async function openFile(name: string): Promise<void> {
+      await act(async () => fileButton(name)!.click());
+      for (let attempt = 0; attempt < 20; attempt += 1) await settle();
+    }
+    await openFile("alpha");
+    await openFile("beta"); // the comment now lives on a document that is not open
+
+    await clickPrimary();
+
+    expect(submissions).toHaveLength(1);
+    const body = submissions[0]!;
+    expect(body.endpoint).toBe("feedback");
+    expect(body.feedback).toContain("alpha needs work");
+    expect(body.nothingToSend).toBeUndefined();
     expect(completionState()).toBe("denied");
     expect(completionTitle()).toBe("Feedback Sent");
   });
