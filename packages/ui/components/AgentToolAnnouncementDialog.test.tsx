@@ -49,7 +49,7 @@ describe('AgentToolAnnouncementDialog', () => {
   test.skipIf(!hasDom)('"Not now" holds focus; Escape and the backdrop dismiss', async () => {
     let dismissed = 0;
     await mount(async () => {}, () => { dismissed += 1; });
-    expect(document.activeElement).toBe(button('Not now'));
+    expect(document.activeElement).toBe(button('No, I’ll just use slash commands'));
 
     await act(async () => press('Escape'));
     expect(dismissed).toBe(1);
@@ -66,7 +66,7 @@ describe('AgentToolAnnouncementDialog', () => {
     let finish: () => void = () => {};
     await mount(() => new Promise<void>((resolve) => { finish = resolve; }), () => { dismissed += 1; });
 
-    await act(async () => button('Turn it on').click());
+    await act(async () => button('Yes, turn it on').click());
     expect(button('Turning on…').disabled).toBe(true);
     await act(async () => press('Escape'));
     expect(dismissed).toBe(0);

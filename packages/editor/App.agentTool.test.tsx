@@ -9,7 +9,7 @@
  *    chosen, and not decided by PLANNOTATOR_AGENT_TOOL. Claude Code (on by
  *    default), a server that reports no tool host (OpenCode 1, Codex, an
  *    older server) and an env override never see it.
- *  - "Turn it on" posts `{ agentTool: true }` and only then retires the
+ *  - "Yes, turn it on" posts `{ agentTool: true }` and only then retires the
  *    offer; a failed save shows the reason and leaves it pending.
  *  - It never shares a load with the "Ask this session" announcement, but a
  *    reader whose session is never connected still gets it.
@@ -199,7 +199,7 @@ describe.if(hasDom)("agent tool offer in the plan editor", () => {
     expect(document.querySelector(DIALOG)?.getAttribute("data-agent-tool-host")).toBe("pi");
     expect(memory.has(AGENT_TOOL_KEY)).toBe(false);
 
-    await act(async () => buttonIn(DIALOG, "Turn it on").click());
+    await act(async () => buttonIn(DIALOG, "Yes, turn it on").click());
     await settle();
 
     expect(configPosts).toEqual([{ agentTool: true }]);
@@ -214,12 +214,12 @@ describe.if(hasDom)("agent tool offer in the plan editor", () => {
     expect(settingSwitch()?.getAttribute("aria-checked")).toBe("true");
   });
 
-  test("Not now retires it without writing anything", async () => {
+  test("Declining retires it without writing anything", async () => {
     seedEarlierChainSeen();
     await mountApp({ origin: "opencode", agentTool: offByDefault("opencode") });
     expect(document.querySelector(DIALOG)?.getAttribute("data-agent-tool-host")).toBe("opencode");
 
-    await act(async () => buttonIn(DIALOG, "Not now").click());
+    await act(async () => buttonIn(DIALOG, "No, I’ll just use slash commands").click());
     expect(document.querySelector(DIALOG)).toBeNull();
     expect(memory.get(AGENT_TOOL_KEY)).toBe("1");
     expect(configPosts).toEqual([]);
@@ -233,7 +233,7 @@ describe.if(hasDom)("agent tool offer in the plan editor", () => {
     seedEarlierChainSeen();
     await mountApp({ origin: "pi", agentTool: offByDefault("pi"), configStatus: 500 });
 
-    await act(async () => buttonIn(DIALOG, "Turn it on").click());
+    await act(async () => buttonIn(DIALOG, "Yes, turn it on").click());
     await settle();
 
     expect(document.querySelector(`${DIALOG} [data-agent-tool-status="failed"]`)?.textContent)
@@ -290,7 +290,7 @@ describe.if(hasDom)("agent tool offer in the plan editor", () => {
   test("Mod+Enter over the offer does not reach the plan behind it", async () => {
     seedEarlierChainSeen();
     await mountApp({ origin: "pi", agentTool: offByDefault("pi") });
-    const notNow = buttonIn(DIALOG, "Not now");
+    const notNow = buttonIn(DIALOG, "No, I’ll just use slash commands");
     const reached: string[] = [];
     const listener = (event: KeyboardEvent) => { if (event.key === "Enter") reached.push("window"); };
     window.addEventListener("keydown", listener);

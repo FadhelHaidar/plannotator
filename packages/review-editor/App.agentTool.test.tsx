@@ -4,7 +4,7 @@
  * /api/diff. The plan editor's twin is packages/editor/App.agentTool.test.tsx.
  *
  * Regressions guarded: the offer missing from code review on Pi / OpenCode 2
- * or showing where the server reports no tool host; "Turn it on" not posting
+ * or showing where the server reports no tool host; "Yes, turn it on" not posting
  * `{ agentTool: true }` or not retiring the offer; the Settings row missing
  * from code review, or editable under PLANNOTATOR_AGENT_TOOL.
  */
@@ -194,7 +194,7 @@ describe.if(hasDom)("agent tool switch in code review", () => {
     await mount("pi", PI_OFF);
     expect(document.querySelector(DIALOG)?.getAttribute("data-agent-tool-host")).toBe("pi");
 
-    await act(async () => buttonIn(DIALOG, "Turn it on").click());
+    await act(async () => buttonIn(DIALOG, "Yes, turn it on").click());
     await settle();
     expect(configPosts).toEqual([{ agentTool: true }]);
     expect(memory.get(AGENT_TOOL_KEY)).toBe("1");
