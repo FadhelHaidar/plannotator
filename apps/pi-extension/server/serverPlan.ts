@@ -383,7 +383,7 @@ export async function startPlanReviewServer(options: {
 				composedLength: composed?.length ?? null,
 			});
 		} else if (url.pathname === "/api/config" && req.method === "POST") {
-			if (!isSameOriginOrNoOrigin(req.headers.origin ?? null, req.headers.host ?? "")) {
+			if (!isSameOriginOrNoOrigin(req.headers.origin ?? null, req.headers.host ?? "", req.headers["sec-fetch-site"])) {
 				json(res, { error: "Cross-origin config writes are not allowed" }, 403);
 				return;
 			}

@@ -133,6 +133,10 @@ export class CallFlowInstallCoordinator {
  * the request host. Same-origin requests and non-browser clients (no Origin
  * header) pass.
  */
-export function callFlowInstallOriginAllowed(originHeader: string | null | undefined, requestHost: string): boolean {
-  return isSameOriginOrNoOrigin(originHeader, requestHost);
+export function callFlowInstallOriginAllowed(
+  originHeader: string | null | undefined,
+  requestHost: string,
+  fetchSite?: string | string[] | null,
+): boolean {
+  return isSameOriginOrNoOrigin(originHeader, requestHost, fetchSite);
 }

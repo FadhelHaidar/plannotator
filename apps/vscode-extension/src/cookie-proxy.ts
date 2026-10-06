@@ -21,6 +21,8 @@ export function createCookieProxy(
   return new Promise((resolve, reject) => {
     const events = new EventEmitter();
     let upstream: string | null = null;
+    /** `http://127.0.0.1:<port>` once listening: the origin the panel's page has. */
+    let proxyOrigin: string | null = null;
 
     const server = http.createServer((req, res) => {
       const reqUrl = new globalThis.URL(req.url!, "http://localhost");
@@ -59,6 +61,15 @@ export function createCookieProxy(
         host: targetUrl.host,
         "accept-encoding": "identity",
       };
+      // The page lives on this proxy's origin, so its writes carry
+      // `Origin: http://127.0.0.1:<proxy port>` while Host now names the
+      // server. Re-anchor that one Origin onto the upstream so the server's
+      // same-origin check sees its own page (servers also accept
+      // `Sec-Fetch-Site: same-origin`, which covers older extensions). Any
+      // other Origin passes through untouched and stays foreign.
+      if (proxyOrigin && req.headers.origin === proxyOrigin) {
+        proxyHeaders.origin = new globalThis.URL(upstream).origin;
+      }
 
       // Buffer request body so retries can replay it
       const bodyChunks: Buffer[] = [];
@@ -124,6 +135,7 @@ export function createCookieProxy(
       const addr = server.address();
       if (addr && typeof addr === "object") {
         const port = addr.port;
+        proxyOrigin = `http://127.0.0.1:${port}`;
         resolve({
           server,
           port,

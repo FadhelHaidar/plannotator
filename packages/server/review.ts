@@ -2095,7 +2095,7 @@ export async function startReviewServer(
             });
           }
           if (guideShareMatch && guideShareMatch[2] === "share" && (req.method === "POST" || req.method === "DELETE")) {
-            if (!callFlowInstallOriginAllowed(req.headers.get("origin"), url.host)) {
+            if (!callFlowInstallOriginAllowed(req.headers.get("origin"), url.host, req.headers.get("sec-fetch-site"))) {
               return Response.json({ error: "Cross-origin share requests are not allowed" }, { status: 403 });
             }
             const jobId = decodeURIComponent(guideShareMatch[1]);
@@ -2476,7 +2476,7 @@ export async function startReviewServer(
           // download, and a cross-origin POST is rejected because this
           // endpoint starts a native runtime download and build.
           if (url.pathname === "/api/call-flow/install" && req.method === "POST") {
-            if (!callFlowInstallOriginAllowed(req.headers.get("origin"), url.host)) {
+            if (!callFlowInstallOriginAllowed(req.headers.get("origin"), url.host, req.headers.get("sec-fetch-site"))) {
               return Response.json({ error: "Cross-origin install requests are not allowed" }, { status: 403 });
             }
             let request: ReturnType<typeof parseCallFlowInstallRequest>;
@@ -3636,7 +3636,7 @@ export async function startReviewServer(
 
           // API: Update user config (write-back to ~/.plannotator/config.json)
           if (url.pathname === "/api/config" && req.method === "POST") {
-            if (!isSameOriginOrNoOrigin(req.headers.get("origin"), url.host)) {
+            if (!isSameOriginOrNoOrigin(req.headers.get("origin"), url.host, req.headers.get("sec-fetch-site"))) {
               return Response.json({ error: "Cross-origin config writes are not allowed" }, { status: 403 });
             }
             try {
@@ -3768,7 +3768,7 @@ export async function startReviewServer(
 
           // API: Durable viewed-file progress
           if (url.pathname === "/api/review-progress") {
-            if (req.method === "POST" && !callFlowInstallOriginAllowed(req.headers.get("origin"), url.host)) {
+            if (req.method === "POST" && !callFlowInstallOriginAllowed(req.headers.get("origin"), url.host, req.headers.get("sec-fetch-site"))) {
               return Response.json({ error: "Cross-origin progress updates are not allowed" }, { status: 403 });
             }
             let body: unknown;

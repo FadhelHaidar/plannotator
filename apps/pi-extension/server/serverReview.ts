@@ -2061,7 +2061,7 @@ export async function startReviewServer(options: {
 			return;
 		}
 		if (guideShareMatch && guideShareMatch[2] === "share" && (req.method === "POST" || req.method === "DELETE")) {
-			if (!callFlowInstallOriginAllowed(req.headers.origin ?? null, req.headers.host ?? "")) {
+			if (!callFlowInstallOriginAllowed(req.headers.origin ?? null, req.headers.host ?? "", req.headers["sec-fetch-site"])) {
 				json(res, { error: "Cross-origin share requests are not allowed" }, 403);
 				return;
 			}
@@ -2429,7 +2429,7 @@ export async function startReviewServer(options: {
 			// download and build.
 			// requestUrl() parses against a fixed localhost base, so the real
 			// request authority is the Host header, not url.host.
-			if (!callFlowInstallOriginAllowed(req.headers.origin ?? null, req.headers.host ?? "")) {
+			if (!callFlowInstallOriginAllowed(req.headers.origin ?? null, req.headers.host ?? "", req.headers["sec-fetch-site"])) {
 				json(res, { error: "Cross-origin install requests are not allowed" }, 403);
 				return;
 			}
@@ -3530,7 +3530,7 @@ export async function startReviewServer(options: {
 				json(res, { error: "File not found" }, 404);
 			}
 		} else if (url.pathname === "/api/config" && req.method === "POST") {
-			if (!isSameOriginOrNoOrigin(req.headers.origin ?? null, req.headers.host ?? "")) {
+			if (!isSameOriginOrNoOrigin(req.headers.origin ?? null, req.headers.host ?? "", req.headers["sec-fetch-site"])) {
 				json(res, { error: "Cross-origin config writes are not allowed" }, 403);
 				return;
 			}
@@ -3752,7 +3752,7 @@ export async function startReviewServer(options: {
 				);
 			}
 		} else if (url.pathname === "/api/review-progress") {
-			if (req.method === "POST" && !callFlowInstallOriginAllowed(req.headers.origin ?? null, req.headers.host ?? "")) {
+			if (req.method === "POST" && !callFlowInstallOriginAllowed(req.headers.origin ?? null, req.headers.host ?? "", req.headers["sec-fetch-site"])) {
 				json(res, { error: "Cross-origin progress updates are not allowed" }, 403);
 				return;
 			}
