@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 
 import { contentHash, deleteDraft, loadDraft } from "../generated/draft.ts";
 import { countUnsentDraftComments } from "../generated/host-control.ts";
+import { checkServerSession, createServerSessionNonce, serverSessionMismatchBody } from "../generated/server-session.ts";
 import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control.ts";
 import {
 	type ArchivedPlan,
@@ -229,6 +230,11 @@ export async function startPlanReviewServer(options: {
 	// (note integrations): updatePlan then refuses, so the plan a decision
 	// names cannot be swapped while that decision is still being recorded.
 	let decisionClaimed = false;
+	// Stale-tab guard (packages/core/server-session.ts): advertised on
+	// /api/plan, echoed by every decision; a different nonce (a tab left open
+	// on a port a new server now owns) is refused with 409 session_mismatch.
+	// A body without it (an older client) is accepted.
+	const serverSession = createServerSessionNonce();
 	const decisionPromise = new Promise<PlanReviewDecision>((r) => {
 		resolveDecision = r;
 	});
@@ -355,6 +361,7 @@ export async function startPlanReviewServer(options: {
 					// Advertises that this review receives revised plans while open;
 					// the tab then polls /api/plan/revision.
 					...(options.planRevisions ? { planRevision } : {}),
+					serverSession,
 					origin: options.origin ?? "pi",
 					permissionMode: options.permissionMode,
 					previousPlan,
@@ -478,6 +485,16 @@ export async function startPlanReviewServer(options: {
 		} else if (url.pathname === "/api/save-notes" && req.method === "POST") {
 			await handleSaveNotesRequest(req, res);
 		} else if (url.pathname === "/api/approve" && req.method === "POST") {
+			let body: Record<string, unknown> = {};
+			try {
+				body = await parseBody(req);
+			} catch {
+				body = {};
+			}
+			if (checkServerSession(body, serverSession) === "mismatch") {
+				json(res, serverSessionMismatchBody(), 409);
+				return;
+			}
 			if (decisionSettled) {
 				json(res, { ok: true, duplicate: true });
 				return;
@@ -488,12 +505,6 @@ export async function startPlanReviewServer(options: {
 			let planSaveEnabled = true;
 			let planSaveCustomPath: string | undefined;
 			let draftGeneration: number | undefined;
-			let body: Record<string, unknown> = {};
-			try {
-				body = await parseBody(req);
-			} catch {
-				body = {};
-			}
 			if (isStaleRevision(body)) {
 				refuseStaleRevision(res);
 				return;
@@ -575,6 +586,16 @@ export async function startPlanReviewServer(options: {
 			});
 			json(res, { ok: true, savedPath });
 		} else if (url.pathname === "/api/deny" && req.method === "POST") {
+			let body: Record<string, unknown> = {};
+			try {
+				body = await parseBody(req);
+			} catch {
+				body = {};
+			}
+			if (checkServerSession(body, serverSession) === "mismatch") {
+				json(res, serverSessionMismatchBody(), 409);
+				return;
+			}
 			if (decisionSettled) {
 				json(res, { ok: true, duplicate: true });
 				return;
@@ -584,12 +605,6 @@ export async function startPlanReviewServer(options: {
 			let planSaveCustomPath: string | undefined;
 			let draftGeneration: number | undefined;
 			let answersOnly = false;
-			let body: Record<string, unknown> = {};
-			try {
-				body = await parseBody(req);
-			} catch {
-				body = {};
-			}
 			if (isStaleRevision(body)) {
 				refuseStaleRevision(res);
 				return;
