@@ -1080,7 +1080,7 @@ export async function startAnnotateServer(
 
           // API: Update user config (write-back to ~/.plannotator/config.json)
           if (url.pathname === "/api/config" && req.method === "POST") {
-            if (!isSameOriginOrNoOrigin(req.headers.get("origin"), url.host)) {
+            if (!isSameOriginOrNoOrigin(req.headers.get("origin"), url.host, req.headers.get("sec-fetch-site"))) {
               return Response.json({ error: "Cross-origin config writes are not allowed" }, { status: 403 });
             }
             try {

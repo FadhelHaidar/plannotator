@@ -1049,7 +1049,7 @@ export async function startAnnotateServer(options: {
 		} else if (url.pathname === "/api/share-html" && req.method === "GET") {
 			handleShareHtml(res, url);
 		} else if (url.pathname === "/api/config" && req.method === "POST") {
-			if (!isSameOriginOrNoOrigin(req.headers.origin ?? null, req.headers.host ?? "")) {
+			if (!isSameOriginOrNoOrigin(req.headers.origin ?? null, req.headers.host ?? "", req.headers["sec-fetch-site"])) {
 				json(res, { error: "Cross-origin config writes are not allowed" }, 403);
 				return;
 			}
