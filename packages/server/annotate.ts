@@ -47,7 +47,7 @@ import {
   type AnnotateClientLeaseStreamSession,
 } from "@plannotator/shared/annotate-client-lease";
 import { createAnnotateDecisionSettler, isNothingToSendFeedbackBody } from "@plannotator/shared/annotate-decision";
-import { saveConfig, detectGitUser, getServerConfig, isAgentTerminalSide, loadConfig, resolveAIEnabled, resolveAnnotateHistory, resolveFeedbackHistory } from "./config";
+import { agentToolSaveFailed, saveConfig, detectGitUser, getServerConfig, isAgentTerminalSide, loadConfig, resolveAIEnabled, resolveAnnotateHistory, resolveFeedbackHistory } from "./config";
 import { getAutoUpdateAdvert } from "./auto-update";
 import { appendFeedbackRecord, type FeedbackDecision, type FeedbackSurface } from "@plannotator/shared/feedback-archive";
 import { isFaviconStyle, type FaviconStyle } from "@plannotator/shared/favicon";
@@ -1098,6 +1098,7 @@ export async function startAnnotateServer(
               if (isAgentTerminalSide(body.agentTerminalSide)) toSave.agentTerminalSide = body.agentTerminalSide;
               if (typeof body.agentTerminalDefaultAgent === "string") toSave.agentTerminalDefaultAgent = body.agentTerminalDefaultAgent;
               if (Object.keys(toSave).length > 0) saveConfig(toSave as Parameters<typeof saveConfig>[0]);
+              if (agentToolSaveFailed(toSave)) return Response.json({ error: "Could not save the setting to config.json." }, { status: 500 });
               return Response.json({ ok: true });
             } catch {
               return Response.json({ error: "Invalid request" }, { status: 400 });

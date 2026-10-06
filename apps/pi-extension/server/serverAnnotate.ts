@@ -24,7 +24,7 @@ import { handleHostControl, resolveHostControlToken, type HostControl } from "./
 import { getPlanVersion, getVersionCount, listVersions } from "../generated/storage.ts";
 import { computeAnnotateHistory, deriveAnnotateHistorySlug, persistAnnotateSubmission, type AnnotateHistoryResult } from "../generated/annotate-history.ts";
 import { htmlDiff } from "../generated/html-diff.ts";
-import { saveConfig, detectGitUser, getServerConfig, isAgentTerminalSide, loadConfig, resolveAIEnabled, resolveSharingEnabled, resolveAnnotateHistory, resolveFeedbackHistory, type PromptRuntime } from "../generated/config.ts";
+import { agentToolSaveFailed, saveConfig, detectGitUser, getServerConfig, isAgentTerminalSide, loadConfig, resolveAIEnabled, resolveSharingEnabled, resolveAnnotateHistory, resolveFeedbackHistory, type PromptRuntime } from "../generated/config.ts";
 import { appendFeedbackRecord, type FeedbackDecision, type FeedbackSurface } from "../generated/feedback-archive.ts";
 import { isFaviconStyle, type FaviconStyle } from "../generated/favicon.ts";
 import { getAnnotateFileFeedbackTemplate, getAnnotateMessageFeedbackTemplate } from "../generated/prompts.ts";
@@ -1067,6 +1067,7 @@ export async function startAnnotateServer(options: {
 				if (isAgentTerminalSide(body.agentTerminalSide)) toSave.agentTerminalSide = body.agentTerminalSide;
 				if (typeof body.agentTerminalDefaultAgent === "string") toSave.agentTerminalDefaultAgent = body.agentTerminalDefaultAgent;
 				if (Object.keys(toSave).length > 0) saveConfig(toSave as Parameters<typeof saveConfig>[0]);
+				if (agentToolSaveFailed(toSave)) return json(res, { error: "Could not save the setting to config.json." }, 500);
 				json(res, { ok: true });
 			} catch {
 				json(res, { error: "Invalid request" }, 400);
