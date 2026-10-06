@@ -104,7 +104,18 @@ function createHarness(cwd: string) {
 		ui: {
 			notify: (message: string) => notifications.push(message),
 			setStatus: () => undefined,
-			setWidget: (_key: string, content: string[] | undefined) => widgets.push(content),
+		setWidget: (_key: string, content: unknown) => {
+			// The widget may be lines (legacy) or a component factory (current).
+			if (content === undefined) widgets.push(undefined);
+			else if (Array.isArray(content)) widgets.push(content);
+			else if (typeof content === "function") {
+				const component = (content as (tui: unknown, theme: unknown) => { render: (width: number) => string[] })(
+					undefined,
+					{ fg: (_color: string, text: string) => text },
+				);
+				widgets.push(component.render(80));
+			} else widgets.push((content as { render: (width: number) => string[] }).render(80));
+		},
 			theme: {
 				fg: (_color: string, text: string) => text,
 				strikethrough: (text: string) => text,
@@ -236,12 +247,11 @@ describe("plan execution mirrors into a detected todo provider", () => {
 		await harness.startSession();
 		await harness.submitPlan("PLAN.md");
 
-		// The mirror is additive: the tracker still renders both steps...
+		// The mirror is additive: the compact tracker still renders both steps
+		// (summary row + one row per pending step).
 		const rendered = harness.widgets.filter((content): content is string[] => Array.isArray(content));
-		expect(rendered.at(-1)).toHaveLength(2);
-
-		// ...and the provider actually received the same two steps, not just
-		// an empty or partial mirror running alongside an unaffected widget.
+		expect(rendered.at(-1)).toHaveLength(3);
+		expect(rendered.at(-1)![0]).toBe("Plan: 0/2 complete");
 		const todos = readTodos(todosDir);
 		expect(todos.map((todo) => todo.title).sort()).toEqual(["1. First step", "2. Second step"]);
 		for (const todo of todos) expect(todo.status).toBe("open");
@@ -309,9 +319,10 @@ describe("plan execution mirrors into a detected todo provider", () => {
 		const failureNotices = harness.notifications.filter((note) => note.includes("sync failed"));
 		expect(failureNotices).toHaveLength(1);
 
-		// The widget is wired independently of provider health: execution
-		// keeps rendering progress after the provider latches disabled.
+		// The widget is wired independently of provider health: execution keeps
+		// rendering progress after the provider latches disabled. Both steps are
+		// done here, so the compact tracker shows just the summary row.
 		const rendered = harness.widgets.filter((content): content is string[] => Array.isArray(content));
-		expect(rendered.at(-1)).toHaveLength(2);
+		expect(rendered.at(-1)).toEqual(["Plan: 2/2 complete"]);
 	});
 });

@@ -354,6 +354,8 @@ export interface PlannotatorConfig {
    * never read back. Failures are non-fatal.
    */
   todoProvider?: "auto" | "off";
+  /** Show Pi's compact execution checklist widget. Footer and syncing are unaffected. Default: true. */
+  piProgressWidgetVisible?: boolean;
   /**
    * Selected favicon style for Plannotator application surfaces:
    * 'totman' (production brand mascot) or 'classic' (historical dark-navy P tile).
@@ -1186,6 +1188,10 @@ export function resolveGitRemoteCheck(
  * keeps it on. Enabled only means "sync when a provider is detected": with no
  * provider present, the progress widget is the whole experience either way.
  */
+export function resolvePiProgressWidgetVisible(config: PlannotatorConfig): boolean {
+  return coerceConfigBoolean(config.piProgressWidgetVisible, true);
+}
+
 export function resolveTodoProviderEnabled(config: PlannotatorConfig): boolean {
   const envVal = process.env.PLANNOTATOR_TODO_PROVIDER;
   if (envVal !== undefined) {

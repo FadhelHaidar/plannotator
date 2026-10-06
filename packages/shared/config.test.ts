@@ -15,6 +15,7 @@ import {
   resolveClaudeSandbox,
   resolveCursorSandbox,
   resolveGitRemoteCheck,
+  resolvePiProgressWidgetVisible,
   resolveUseGlimpse,
   resolveAnnotateHistory,
   resolveGuideHistory,
@@ -88,6 +89,30 @@ describe("resolveAIEnabled", () => {
 
 const TODO_ENV = "PLANNOTATOR_TODO_PROVIDER";
 const originalTodoEnv = process.env[TODO_ENV];
+
+describe("resolvePiProgressWidgetVisible", () => {
+  // Deliberately outside the generic boolean-coercion table: unlike those
+  // flags, this display preference has no environment override by design.
+  test("defaults to visible", () => {
+    expect(resolvePiProgressWidgetVisible({})).toBe(true);
+  });
+
+  test("coerces booleans and boolean strings", () => {
+    expect(resolvePiProgressWidgetVisible({ piProgressWidgetVisible: false })).toBe(false);
+    for (const v of ["false", "False", "0", " false "]) {
+      expect(resolvePiProgressWidgetVisible({ piProgressWidgetVisible: v } as PlannotatorConfig)).toBe(false);
+    }
+    for (const v of ["true", "1", " true "]) {
+      expect(resolvePiProgressWidgetVisible({ piProgressWidgetVisible: v } as PlannotatorConfig)).toBe(true);
+    }
+  });
+
+  test("garbage values fall back to visible", () => {
+    for (const v of ["yes", "", 42, null, {}, []]) {
+      expect(resolvePiProgressWidgetVisible({ piProgressWidgetVisible: v } as PlannotatorConfig)).toBe(true);
+    }
+  });
+});
 
 describe("resolveTodoProviderEnabled", () => {
   beforeEach(() => {

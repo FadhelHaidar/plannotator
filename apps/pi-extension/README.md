@@ -102,6 +102,21 @@ The submit tool does not wait for you: it returns as soon as the review opens, t
 
 Pressing Esc in Pi no longer cancels an open plan review. To abandon a review, leave plan mode (`/plannotator-plan-mode` or `Ctrl+Alt+P`).
 
+### Progress tracker
+
+During execution, Plannotator shows a compact progress widget above the editor: a summary row (`Plan: 2/8 complete`), up to three pending steps, and a `… N more pending` row — at most five lines, no completed rows, each row truncated to the widget width.
+
+Control it with:
+
+```text
+/plannotator-tracker [on|off|toggle|status]
+```
+
+- No argument toggles; `on`/`off` are idempotent; `status` only reports.
+- Turning the tracker off hides the checklist widget only. The footer count (`📋 done/total`) and execution behavior are unchanged.
+- The preference (`piProgressWidgetVisible`, default `true`) is remembered across sessions in `~/.plannotator/config.json`.
+- A hidden tracker **enforces the todo-list mirror**: the checklist keeps syncing to any detected todo provider (pi-todos) even when `todoProvider` is configured `"off"`, so hiding the widget never removes every tracking surface. With no provider detected, Plannotator says so and progress stays visible in the footer count.
+
 ### Programmatic plan-mode control
 
 Other Pi extensions can enter, exit, toggle, or query Plannotator plan mode through the shared Pi event bus without invoking the `/plannotator-plan-mode` slash command:

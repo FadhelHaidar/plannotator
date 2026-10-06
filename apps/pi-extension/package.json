@@ -43,6 +43,7 @@
     "server.ts",
     "tool-scope.ts",
     "config.ts",
+    "progress-widget.ts",
     "plannotator.json",
     "server/",
     "todo-providers/",

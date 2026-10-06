@@ -65,4 +65,18 @@ describe("vendored config write path", () => {
     expect(isAgentTerminalSide("top")).toBe(false);
     expect(isAgentTerminalSide(undefined)).toBe(false);
   });
+
+  test("piProgressWidgetVisible round-trips without dropping other settings", () => {
+    saveConfig({ agentTerminalSide: "right", displayName: "kept" });
+    saveConfig({ piProgressWidgetVisible: false });
+
+    const config = loadConfig();
+    expect(config.piProgressWidgetVisible).toBe(false);
+    // The read-merge-write preserves keys from concurrent or prior writers.
+    expect(config.agentTerminalSide).toBe("right");
+    expect(config.displayName).toBe("kept");
+
+    saveConfig({ piProgressWidgetVisible: true });
+    expect(loadConfig().piProgressWidgetVisible).toBe(true);
+  });
 });

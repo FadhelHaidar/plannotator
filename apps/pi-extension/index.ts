@@ -33,7 +33,8 @@ import {
 	parseChecklist,
 	renderCompletedChecklist,
 } from "./generated/checklist.ts";
-import { loadConfig, resolveAgentTool, resolveUseJina } from "./generated/config.ts";
+import { loadConfig, resolveAgentTool, resolveUseJina, resolvePiProgressWidgetVisible, saveConfig } from "./generated/config.ts";
+import { createProgressWidget } from "./progress-widget.ts";
 import { readImprovementHook } from "./generated/improvement-hooks.ts";
 import { composeImproveContext } from "./generated/pfm-reminder.ts";
 import {
@@ -48,7 +49,7 @@ import {
 	type PlannotatorPlanApprovedEvent,
 	registerPlannotatorEventListeners,
 } from "./plannotator-events.ts";
-import { resolveTodoProvider, type TodoProvider } from "./todo-providers/index.ts";
+import { detectPiTodos, resolveTodoProvider, type TodoProvider } from "./todo-providers/index.ts";
 import {
 	findAssistantMessageByEntryId,
 	getAssistantMessageText,
@@ -447,6 +448,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	 */
 	let approvedPlanContent: string | null = null;
 	let checklistItems: ChecklistItem[] = [];
+	let progressWidgetVisible = true;
 	let savedState: SavedPhaseState | null = null;
 	let phaseAddedTools: string[] = [];
 	let plannotatorConfig = {};
@@ -557,17 +559,8 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	}
 
 	function updateWidget(ctx: ExtensionContext): void {
-		if (phase === "executing" && checklistItems.length > 0) {
-			const lines = checklistItems.map((item) => {
-				if (item.completed) {
-					return (
-						ctx.ui.theme.fg("success", "☑ ") +
-						ctx.ui.theme.fg("muted", ctx.ui.theme.strikethrough(item.text))
-					);
-				}
-				return `${ctx.ui.theme.fg("muted", "☐ ")}${item.text}`;
-			});
-			ctx.ui.setWidget("plannotator-progress", lines);
+		if (progressWidgetVisible && phase === "executing" && checklistItems.length > 0) {
+			ctx.ui.setWidget("plannotator-progress", (_tui, theme) => createProgressWidget(checklistItems, theme));
 		} else {
 			ctx.ui.setWidget("plannotator-progress", undefined);
 		}
@@ -576,7 +569,9 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	/**
 	 * Mirror the checklist into an editable todo provider, when one is present.
 	 *
-	 * Additive by design: the progress widget above stays exactly as it was.
+	 * Additive by design: syncing is independent of progress-widget visibility — and
+	 * enforced when the widget is hidden, so a hidden tracker never loses the
+	 * only remaining todo surface (footer counts stay, but they are not a list).
 	 * pi-todos renders its list on demand in `/todos` and has no live surface,
 	 * so replacing the widget with it would trade a visible tracker for files
 	 * behind a keystroke. Failures are swallowed after one notification —
@@ -588,10 +583,12 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		if (todoProviderDisabled) return;
 		if (phase !== "executing" || !lastSubmittedPath) return;
 		if (!todoProvider) {
+			// Hidden tracker ⇒ enforce the mirror: ignore a configured todoProvider
+			// "off" so an agent with a todo-list tool keeps a tracking surface.
 			todoProvider = resolveTodoProvider(loadConfig(), {
 				cwd: ctx.cwd,
 				sessionId: ctx.sessionManager.getSessionId(),
-			});
+			}, !progressWidgetVisible);
 			if (!todoProvider) {
 				todoProviderDisabled = true;
 				return;
@@ -605,7 +602,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		} catch (error) {
 			todoProviderDisabled = true;
 			ctx.ui.notify(
-				`Plannotator: ${todoProvider.name} sync failed, continuing with the progress widget only. ${
+				`Plannotator: ${todoProvider.name} sync failed, continuing plan execution without the todo mirror. ${
 					error instanceof Error ? error.message : String(error)
 				}`,
 				"warning",
@@ -857,6 +854,45 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	}
 
 	// ── Commands & Shortcuts ─────────────────────────────────────────────
+
+	pi.registerCommand("plannotator-tracker", {
+		description: "Toggle compact plan tracker: on, off, toggle, or status (footer unchanged)",
+		handler: async (args, ctx) => {
+			const action = args.trim() || "toggle";
+			if (!["on", "off", "toggle", "status"].includes(action)) {
+				ctx.ui.notify("Usage: /plannotator-tracker [on|off|toggle|status]", "warning");
+				return;
+			}
+			if (action === "status") {
+				ctx.ui.notify(`Plannotator tracker: ${progressWidgetVisible ? "on" : "off"} (footer unchanged).`);
+				return;
+			}
+			const wasVisible = progressWidgetVisible;
+			progressWidgetVisible = action === "toggle" ? !progressWidgetVisible : action === "on";
+			// Re-resolve the todo mirror under the new visibility: a hidden tracker
+			// enforces the mirror, so a latch set while visible must not survive.
+			todoProvider = undefined;
+			todoProviderDisabled = false;
+			updateWidget(ctx);
+			if (wasVisible !== progressWidgetVisible && !progressWidgetVisible) {
+				if (phase === "executing" && detectPiTodos(ctx.cwd)) {
+					ctx.ui.notify(
+						"Plannotator tracker off: the checklist keeps mirroring to your todo list (pi-todos), even if it was configured off. Use your todo tool to track it.",
+					);
+				} else {
+					ctx.ui.notify(
+						"Plannotator tracker off: no todo-list tool detected. Progress stays visible only in the footer count.",
+					);
+				}
+			}
+			saveConfig({ piProgressWidgetVisible: progressWidgetVisible });
+			if (loadConfig().piProgressWidgetVisible !== progressWidgetVisible) {
+				ctx.ui.notify("Plannotator: tracker changed for this session only; preference could not be saved.", "warning");
+			} else {
+				ctx.ui.notify(`Plannotator tracker: ${progressWidgetVisible ? "on" : "off"} (saved; footer unchanged).`);
+			}
+		},
+	});
 
 	pi.registerCommand("plannotator-plan-mode", {
 		description: "Toggle plannotator planning mode",
@@ -2503,6 +2539,7 @@ Call ${PLAN_MARK_DONE_TOOL} immediately after each completed step and before the
 			projectTrusted,
 		});
 		plannotatorConfig = loadedConfig.config;
+		progressWidgetVisible = resolvePiProgressWidgetVisible(loadConfig());
 		for (const warning of loadedConfig.warnings) {
 			ctx.ui.notify(`Plannotator config: ${warning}`, "warning");
 		}

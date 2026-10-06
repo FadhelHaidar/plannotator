@@ -20,8 +20,12 @@ export { detectPiTodos, resolveTodoDir } from "./pi-todos.ts";
 export function resolveTodoProvider(
 	config: PlannotatorConfig,
 	env: TodoProviderEnv,
+	/** Enforce the mirror (ignore a configured "off") when the progress widget is hidden. */
+	enforce = false,
 ): TodoProvider | undefined {
-	if (!resolveTodoProviderEnabled(config)) return undefined;
+	// A hidden tracker must not silently disable the todo mirror: enforcement
+	// bypasses only this enabled check, never detection (no provider, no mirror).
+	if (!enforce && !resolveTodoProviderEnabled(config)) return undefined;
 	if (!detectPiTodos(env.cwd)) return undefined;
 	return createPiTodosProvider(env);
 }
