@@ -80,7 +80,7 @@ Start Pi in plan mode:
 pi --plan
 ```
 
-Or toggle it during a session with `/plannotator-plan-mode` or `Ctrl+Alt+P`.
+Or toggle it during a session with `/plannotator-plan-mode` or `Alt+M` (fork remap; upstream default was Ctrl+Alt+P).
 
 In plan mode the agent is restricted — destructive commands are blocked, writes are limited to the plan file. It explores your codebase, then writes a plan using markdown checklists:
 
@@ -100,7 +100,7 @@ The agent iterates on the plan until you approve, then executes with full tool a
 
 The submit tool does not wait for you: it returns as soon as the review opens, the agent ends its turn, and your decision reaches it later as a new message. While the review is open you can keep chatting with the agent in Pi, or ask it questions from the review's Ask AI panel ("Ask this session"). It still cannot change code: planning restrictions stay on until you approve. If the agent revises the plan while the review is open, the open tab updates to the new version and keeps your comments. Leaving plan mode closes an open review.
 
-Pressing Esc in Pi no longer cancels an open plan review. To abandon a review, leave plan mode (`/plannotator-plan-mode` or `Ctrl+Alt+P`).
+Pressing Esc in Pi no longer cancels an open plan review. To abandon a review, leave plan mode (`/plannotator-plan-mode` or `Alt+M` (fork remap; upstream default was Ctrl+Alt+P)).
 
 ### Progress tracker
 
@@ -354,7 +354,7 @@ When the `plannotator` tool is turned on, the agent opens, lists and closes revi
 
 | Shortcut | Description |
 |----------|-------------|
-| `Ctrl+Alt+P` | Toggle plan mode |
+| `Alt+M` | Toggle plan mode (fork remap; upstream: Ctrl+Alt+P) |
 
 ## How it works
 
