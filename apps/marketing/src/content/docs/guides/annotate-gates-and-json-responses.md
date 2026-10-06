@@ -78,7 +78,7 @@ A three-way review decision. The annotation UI adds an Approve button alongside 
 - **Send Annotations.** The reviewer has specific changes. The feedback is returned verbatim.
 - **Close.** The session ends without a decision. Neither a signal to the agent nor an instruction set.
 
-In plaintext mode, Approve emits the single line `The user approved.` on stdout so templates and agents can distinguish approval from close without needing `--json`. Close emits nothing. Send Annotations emits the feedback markdown. For hook integrations, use `--hook` instead, which emits hook-native JSON directly.
+In plaintext mode, Approve emits the single line `The user approved.` on stdout so templates and agents can distinguish approval from close without needing `--json`. An approval that carries a note (**Approve with a note…** or **Approve with notes**) prints the approved-with-notes message instead (the `approvedWithNotes` prompt, see [custom feedback](/docs/guides/custom-feedback/)), so the note is never dropped. `--hook` has no message on approval, so those two items are hidden there. Close emits nothing. Send Annotations emits the feedback markdown. For hook integrations, use `--hook` instead, which emits hook-native JSON directly.
 
 ## `--json`
 

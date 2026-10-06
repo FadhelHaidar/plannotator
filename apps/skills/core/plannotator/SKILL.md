@@ -40,7 +40,7 @@ Every review or annotate command starts a local web server, opens the browser, a
 
 Stdout is the interface, but its contract is command-specific. For `annotate` and its last-message variants:
 
-- Plaintext (default): empty output on close, `The user approved.` on approve, otherwise the feedback text. Address returned feedback in the same conversation.
+- Plaintext (default): empty output on close, `The user approved.` on approve (an approval with a note prints an "Approved with Notes" message instead; treat the notes as guidance, not a change request), otherwise the feedback text. Address returned feedback in the same conversation.
 - `--json`: one JSON record with `decision` (`approved`, `dismissed`, or `annotated`) and optional raw `feedback`. An approval may still carry notes in `feedback`; treat those as guidance, not a change request.
 - `--hook`: hook-native output for real PostToolUse/Stop hook contexts only. Approve/close emits nothing (hook passes); annotations emit `{"decision":"block","reason":"..."}`. `--hook` implies the gate UI. Never use it for a normal interactive invocation.
 
