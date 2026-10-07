@@ -37,6 +37,7 @@ import {
 } from "./generated/checklist.ts";
 import { loadConfig, resolveAgentTool, resolvePiProgressWidgetMode, resolveUseJina, saveConfig } from "./generated/config.ts";
 import { createProgressWidget, type ProgressWidgetMode } from "./progress-widget.ts";
+import { ensureAltPlanRemap } from "./auto-keymap.ts";
 import { readImprovementHook } from "./generated/improvement-hooks.ts";
 import { composeImproveContext } from "./generated/pfm-reminder.ts";
 import {
@@ -487,6 +488,11 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		sessionAlive = true;
 		currentPiSession.update(ctx);
 		settleAgentToolActivation(ctx);
+		// Fork: free alt+p from the WSL reserved cycleBackward binding so the
+		// plan toggle reaches the shortcut (idempotent, skips user-set values).
+		if (ensureAltPlanRemap()) {
+			ctx.ui.notify("Plannotator: remapped model cycle to Alt+M in keybindings.json so Alt+P toggles plan mode. Restart or /reload to apply.");
+		}
 	});
 
 	/**
