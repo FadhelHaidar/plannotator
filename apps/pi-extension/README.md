@@ -7,7 +7,7 @@ Plannotator integration for the [Pi coding agent](https://github.com/earendil-wo
 This checkout is a fork of `backnotprop/plannotator` (`feat/compact-pi-tracker`, based on upstream `71c968ce`). It exists for three changes upstream does not have:
 
 1. **Three-mode execution tracker (off / compact / full).** The terminal widget defaults to *compact*: a `Plan: X/Y complete` summary plus at most three pending steps and a hidden-step count (max five rows, no completed rows) instead of upstream's full unbounded checklist. *full* restores upstream-style rendering (every step in plan order, completed rows struck through). `/plannotator-tracker [off|compact|full|toggle|status]` sets the mode (`toggle` and the legacy `on` map sensibly), `Alt+T` cycles off → compact → full, and `piProgressWidgetMode` persists in `~/.plannotator/config.json`. With the tracker off, the todo-list mirror is **enforced**: the checklist keeps syncing to any detected provider (pi-todos) even when `todoProvider: "off"`, so hiding the widget never removes every tracking surface.
-2. **Plan-mode keybinding remapped to `Alt+P`** (v0.28.4-fork.2; previously `Alt+M`). Extension shortcuts register raw keys (Pi's extension runner keys them by KeyId), so `keybindings.json` cannot reassign them — the fork is the only place this could change. Upstream default: `Ctrl+Alt+P`.
+2. **Plan-mode keybinding remapped to `Alt+P`** (v0.28.4-fork.2; previously `Alt+M`). Extension shortcuts register raw keys (Pi's extension runner keys them by KeyId), so `keybindings.json` cannot reassign them — the fork is the only place this could change. Upstream default: `Ctrl+Alt+P`. Note: on WSL/Windows Pi reserves `alt+p` for `app.model.cycleBackward` (a reserved built-in, so the extension shortcut is silently skipped); pair the fork with `"app.model.cycleBackward": "alt+m"` in `~/.pi/agent/keybindings.json` to free it — this also gives `Alt+M` the model-cycle.
 3. **Fork-only packaging commit** (never part of upstream PRs): a root `pi.extensions` manifest pointing at `apps/pi-extension/index.ts` so Pi can install this monorepo as a pinned git source, the root `workspaces` glob dropped, and the extension's runtime deps hoisted to the root `dependencies` — plain npm rejects `workspace:*` specs and Pi installs git sources with npm.
 
 ### Installing and updating this fork
@@ -376,7 +376,8 @@ When the `plannotator` tool is turned on, the agent opens, lists and closes revi
 
 | Shortcut | Description |
 |----------|-------------|
-| `Alt+P` | Toggle plan mode (fork remap; upstream: Ctrl+Alt+P) |
+| `Alt+P` | Toggle plan mode (fork remap; upstream: Ctrl+Alt+P). On WSL/Windows Pi reserves `alt+p` for model-cycle-backward and skips the extension shortcut — set `"app.model.cycleBackward": "alt+m"` in `~/.pi/agent/keybindings.json` to free it (built-ins are remappable there, extension shortcuts are not) |
+| `Alt+M` | Recommended in this fork's keybindings.json as `app.model.cycleBackward` — cycles to the previous model. Fork remap of plan mode moved off `alt+m` in v0.28.4-fork.2 |
 | `Alt+T` | Cycle plan tracker: off → compact → full → off (fork) |
 
 ## How it works
