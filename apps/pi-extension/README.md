@@ -2,6 +2,28 @@
 
 Plannotator integration for the [Pi coding agent](https://github.com/earendil-works/pi). Adds file-based plan mode with a visual browser UI for reviewing, annotating, and approving agent plans.
 
+## Fork: FadhelHaidar/plannotator
+
+This checkout is a fork of `backnotprop/plannotator` (`feat/compact-pi-tracker`, based on upstream `71c968ce`). It exists for three changes upstream does not have:
+
+1. **Compact, toggleable execution tracker.** The terminal widget shows a `Plan: X/Y complete` summary plus at most three pending steps and a hidden-step count (max five rows, no completed rows), instead of upstream's full unbounded checklist. A new `/plannotator-tracker [on|off|toggle|status]` command controls it; the `piProgressWidgetVisible` preference persists in `~/.plannotator/config.json` (default visible). With the tracker hidden, the todo-list mirror is **enforced**: the checklist keeps syncing to any detected provider (pi-todos) even when `todoProvider: "off"`, so hiding the widget never removes every tracking surface.
+2. **Plan-mode keybinding remapped to `Alt+M`.** Extension shortcuts register raw keys (Pi's extension runner keys them by KeyId), so `keybindings.json` cannot reassign them — the fork is the only place this could change. Upstream default: `Ctrl+Alt+P`.
+3. **Fork-only packaging commit** (never part of upstream PRs): a root `pi.extensions` manifest pointing at `apps/pi-extension/index.ts` so Pi can install this monorepo as a pinned git source, the root `workspaces` glob dropped, and the extension's runtime deps hoisted to the root `dependencies` — plain npm rejects `workspace:*` specs and Pi installs git sources with npm.
+
+### Installing and updating this fork
+
+```bash
+pi install git:github.com/FadhelHaidar/plannotator@v0.28.4-fork.1
+```
+
+Build outputs (`plannotator.html`, `review-editor.html`, `generated/`, `skills/`) are gitignored, so they are not in the tag. After every retag, sync them from a built checkout (`bun run build:pi` in the dev clone, then copy `apps/pi-extension/{plannotator.html,review-editor.html,generated/,skills/}` into `~/.pi/agent/git/github.com/FadhelHaidar/plannotator/apps/pi-extension/`), then:
+
+```bash
+pi update git:github.com/FadhelHaidar/plannotator@<tag>
+```
+
+Update flow: patch in the dev clone → push `feat/compact-pi-tracker` → retag `v0.28.4-fork.N` → sync artifacts → `pi update`. Keep the packaging commit out of any upstream PRs. Rollback: `pi remove` the git source and `pi install npm:@plannotator/pi-extension`.
+
 ## Install
 
 **From npm** (recommended):
