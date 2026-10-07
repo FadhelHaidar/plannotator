@@ -354,7 +354,9 @@ export interface PlannotatorConfig {
    * never read back. Failures are non-fatal.
    */
   todoProvider?: "auto" | "off";
-  /** Show Pi's compact execution checklist widget. Footer and syncing are unaffected. Default: true. */
+  /** Show Pi's execution checklist widget: "off", "compact" (default), or "full". Footer and syncing are unaffected. */
+  piProgressWidgetMode?: "off" | "compact" | "full";
+  /** @deprecated Use `piProgressWidgetMode`. `true`/`false` map to "compact"/"off". Kept so an old config still loads. */
   piProgressWidgetVisible?: boolean;
   /**
    * Selected favicon style for Plannotator application surfaces:
@@ -1188,8 +1190,26 @@ export function resolveGitRemoteCheck(
  * keeps it on. Enabled only means "sync when a provider is detected": with no
  * provider present, the progress widget is the whole experience either way.
  */
+export type PiProgressWidgetMode = "off" | "compact" | "full";
+const PI_PROGRESS_WIDGET_MODES: ReadonlySet<string> = new Set(["off", "compact", "full"]);
+
+/**
+ * Resolve the tracker widget mode. A hand-edited invalid value falls back to
+ * "compact"; a legacy boolean `piProgressWidgetVisible` (false = off) still
+ * works, with `mode` winning when both are present.
+ */
+export function resolvePiProgressWidgetMode(config: PlannotatorConfig): PiProgressWidgetMode {
+  const mode = config.piProgressWidgetMode;
+  if (typeof mode === "string" && PI_PROGRESS_WIDGET_MODES.has(mode)) return mode as PiProgressWidgetMode;
+  if (config.piProgressWidgetVisible !== undefined) {
+    return coerceConfigBoolean(config.piProgressWidgetVisible, true) ? "compact" : "off";
+  }
+  return "compact";
+}
+
+/** @deprecated Compatibility alias for resolvePiProgressWidgetMode !== "off". */
 export function resolvePiProgressWidgetVisible(config: PlannotatorConfig): boolean {
-  return coerceConfigBoolean(config.piProgressWidgetVisible, true);
+  return resolvePiProgressWidgetMode(config) !== "off";
 }
 
 export function resolveTodoProviderEnabled(config: PlannotatorConfig): boolean {

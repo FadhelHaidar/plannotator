@@ -6,7 +6,7 @@ Plannotator integration for the [Pi coding agent](https://github.com/earendil-wo
 
 This checkout is a fork of `backnotprop/plannotator` (`feat/compact-pi-tracker`, based on upstream `71c968ce`). It exists for three changes upstream does not have:
 
-1. **Compact, toggleable execution tracker.** The terminal widget shows a `Plan: X/Y complete` summary plus at most three pending steps and a hidden-step count (max five rows, no completed rows), instead of upstream's full unbounded checklist. A new `/plannotator-tracker [on|off|toggle|status]` command controls it; the `piProgressWidgetVisible` preference persists in `~/.plannotator/config.json` (default visible). With the tracker hidden, the todo-list mirror is **enforced**: the checklist keeps syncing to any detected provider (pi-todos) even when `todoProvider: "off"`, so hiding the widget never removes every tracking surface.
+1. **Three-mode execution tracker (off / compact / full).** The terminal widget defaults to *compact*: a `Plan: X/Y complete` summary plus at most three pending steps and a hidden-step count (max five rows, no completed rows) instead of upstream's full unbounded checklist. *full* restores upstream-style rendering (every step in plan order, completed rows struck through). `/plannotator-tracker [off|compact|full|toggle|status]` sets the mode (`toggle` and the legacy `on` map sensibly), `Alt+T` cycles off → compact → full, and `piProgressWidgetMode` persists in `~/.plannotator/config.json`. With the tracker off, the todo-list mirror is **enforced**: the checklist keeps syncing to any detected provider (pi-todos) even when `todoProvider: "off"`, so hiding the widget never removes every tracking surface.
 2. **Plan-mode keybinding remapped to `Alt+M`.** Extension shortcuts register raw keys (Pi's extension runner keys them by KeyId), so `keybindings.json` cannot reassign them — the fork is the only place this could change. Upstream default: `Ctrl+Alt+P`.
 3. **Fork-only packaging commit** (never part of upstream PRs): a root `pi.extensions` manifest pointing at `apps/pi-extension/index.ts` so Pi can install this monorepo as a pinned git source, the root `workspaces` glob dropped, and the extension's runtime deps hoisted to the root `dependencies` — plain npm rejects `workspace:*` specs and Pi installs git sources with npm.
 
@@ -131,12 +131,12 @@ During execution, Plannotator shows a compact progress widget above the editor: 
 Control it with:
 
 ```text
-/plannotator-tracker [on|off|toggle|status]
+/plannotator-tracker [off|compact|full|toggle|status]
 ```
 
-- No argument toggles; `on`/`off` are idempotent; `status` only reports.
+- No argument cycles off → compact → full (same as `Alt+T`); `off`/`compact`/`full` set the mode explicitly; `status` only reports. The legacy `on` argument still works and means `compact`.
 - Turning the tracker off hides the checklist widget only. The footer count (`📋 done/total`) and execution behavior are unchanged.
-- The preference (`piProgressWidgetVisible`, default `true`) is remembered across sessions in `~/.plannotator/config.json`.
+- The mode (`piProgressWidgetMode`, default `compact`) is remembered across sessions in `~/.plannotator/config.json`. The old boolean `piProgressWidgetVisible` key still loads (mapped to compact/off) but new saves write `piProgressWidgetMode`.
 - A hidden tracker **enforces the todo-list mirror**: the checklist keeps syncing to any detected todo provider (pi-todos) even when `todoProvider` is configured `"off"`, so hiding the widget never removes every tracking surface. With no provider detected, Plannotator says so and progress stays visible in the footer count.
 
 ### Programmatic plan-mode control
@@ -377,6 +377,7 @@ When the `plannotator` tool is turned on, the agent opens, lists and closes revi
 | Shortcut | Description |
 |----------|-------------|
 | `Alt+M` | Toggle plan mode (fork remap; upstream: Ctrl+Alt+P) |
+| `Alt+T` | Cycle plan tracker: off → compact → full → off (fork) |
 
 ## How it works
 

@@ -35,8 +35,8 @@ import {
 	parseChecklist,
 	renderCompletedChecklist,
 } from "./generated/checklist.ts";
-import { loadConfig, resolveAgentTool, resolveUseJina, resolvePiProgressWidgetVisible, saveConfig } from "./generated/config.ts";
-import { createProgressWidget } from "./progress-widget.ts";
+import { loadConfig, resolveAgentTool, resolvePiProgressWidgetMode, resolveUseJina, saveConfig } from "./generated/config.ts";
+import { createProgressWidget, type ProgressWidgetMode } from "./progress-widget.ts";
 import { readImprovementHook } from "./generated/improvement-hooks.ts";
 import { composeImproveContext } from "./generated/pfm-reminder.ts";
 import {
@@ -450,7 +450,9 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	 */
 	let approvedPlanContent: string | null = null;
 	let checklistItems: ChecklistItem[] = [];
-	let progressWidgetVisible = true;
+	// Tracker widget mode: "off" hides the widget (footer count and todo sync stay).
+	// Legacy boolean preference maps to compact/off via resolvePiProgressWidgetMode.
+	let progressWidgetMode: ProgressWidgetMode | "off" = "compact";
 	let savedState: SavedPhaseState | null = null;
 	let phaseAddedTools: string[] = [];
 	let plannotatorConfig = {};
@@ -561,8 +563,9 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	}
 
 	function updateWidget(ctx: ExtensionContext): void {
-		if (progressWidgetVisible && phase === "executing" && checklistItems.length > 0) {
-			ctx.ui.setWidget("plannotator-progress", (_tui, theme) => createProgressWidget(checklistItems, theme));
+		if (progressWidgetMode !== "off" && phase === "executing" && checklistItems.length > 0) {
+			const mode: ProgressWidgetMode = progressWidgetMode;
+			ctx.ui.setWidget("plannotator-progress", (_tui, theme) => createProgressWidget(checklistItems, theme, mode));
 		} else {
 			ctx.ui.setWidget("plannotator-progress", undefined);
 		}
@@ -590,7 +593,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			todoProvider = resolveTodoProvider(loadConfig(), {
 				cwd: ctx.cwd,
 				sessionId: ctx.sessionManager.getSessionId(),
-			}, !progressWidgetVisible);
+			}, progressWidgetMode === "off");
 			if (!todoProvider) {
 				todoProviderDisabled = true;
 				return;
@@ -857,42 +860,63 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 
 	// ── Commands & Shortcuts ─────────────────────────────────────────────
 
+	const trackerModeOrder: Array<ProgressWidgetMode | "off"> = ["off", "compact", "full"];
+	function setTrackerMode(mode: ProgressWidgetMode | "off", ctx: ExtensionContext): void {
+		const wasOff = progressWidgetMode === "off";
+		progressWidgetMode = mode;
+		// Re-resolve the todo mirror under the new visibility: a hidden tracker
+		// enforces the mirror, so a latch set while visible must not survive.
+		todoProvider = undefined;
+		todoProviderDisabled = false;
+		updateWidget(ctx);
+		if (!wasOff === (mode !== "off")) {
+			// Visibility unchanged (e.g. compact↔full): no surface-change notice.
+		} else if (mode === "off") {
+			if (phase === "executing" && detectPiTodos(ctx.cwd)) {
+				ctx.ui.notify(
+					"Plannotator tracker off: the checklist keeps mirroring to your todo list (pi-todos), even if it was configured off. Use your todo tool to track it.",
+				);
+			} else {
+				ctx.ui.notify(
+					"Plannotator tracker off: no todo-list tool detected. Progress stays visible only in the footer count.",
+				);
+			}
+		}
+		saveConfig({ piProgressWidgetMode: mode });
+		if (loadConfig().piProgressWidgetMode !== mode) {
+			ctx.ui.notify("Plannotator: tracker changed for this session only; preference could not be saved.", "warning");
+		} else {
+			ctx.ui.notify(`Plannotator tracker: ${mode} (saved; footer unchanged).`);
+		}
+	}
+
 	pi.registerCommand("plannotator-tracker", {
-		description: "Toggle compact plan tracker: on, off, toggle, or status (footer unchanged)",
+		description: "Plan tracker mode: off, compact (default), full, toggle, or status (footer unchanged)",
 		handler: async (args, ctx) => {
 			const action = args.trim() || "toggle";
-			if (!["on", "off", "toggle", "status"].includes(action)) {
-				ctx.ui.notify("Usage: /plannotator-tracker [on|off|toggle|status]", "warning");
+			if (!["off", "compact", "full", "toggle", "status", "on"].includes(action)) {
+				ctx.ui.notify("Usage: /plannotator-tracker [off|compact|full|toggle|status]", "warning");
 				return;
 			}
 			if (action === "status") {
-				ctx.ui.notify(`Plannotator tracker: ${progressWidgetVisible ? "on" : "off"} (footer unchanged).`);
+				ctx.ui.notify(`Plannotator tracker: ${progressWidgetMode} (footer unchanged).`);
 				return;
 			}
-			const wasVisible = progressWidgetVisible;
-			progressWidgetVisible = action === "toggle" ? !progressWidgetVisible : action === "on";
-			// Re-resolve the todo mirror under the new visibility: a hidden tracker
-			// enforces the mirror, so a latch set while visible must not survive.
-			todoProvider = undefined;
-			todoProviderDisabled = false;
-			updateWidget(ctx);
-			if (wasVisible !== progressWidgetVisible && !progressWidgetVisible) {
-				if (phase === "executing" && detectPiTodos(ctx.cwd)) {
-					ctx.ui.notify(
-						"Plannotator tracker off: the checklist keeps mirroring to your todo list (pi-todos), even if it was configured off. Use your todo tool to track it.",
-					);
-				} else {
-					ctx.ui.notify(
-						"Plannotator tracker off: no todo-list tool detected. Progress stays visible only in the footer count.",
-					);
-				}
+			if (action === "toggle") {
+				// Alt+T semantics: cycle off → compact → full → off.
+				const next = trackerModeOrder[(trackerModeOrder.indexOf(progressWidgetMode) + 1) % trackerModeOrder.length];
+				setTrackerMode(next, ctx);
+				return;
 			}
-			saveConfig({ piProgressWidgetVisible: progressWidgetVisible });
-			if (loadConfig().piProgressWidgetVisible !== progressWidgetVisible) {
-				ctx.ui.notify("Plannotator: tracker changed for this session only; preference could not be saved.", "warning");
-			} else {
-				ctx.ui.notify(`Plannotator tracker: ${progressWidgetVisible ? "on" : "off"} (saved; footer unchanged).`);
-			}
+			setTrackerMode(action === "on" ? "compact" : (action as ProgressWidgetMode | "off"), ctx);
+		},
+	});
+
+	pi.registerShortcut(Key.alt("t"), {
+		description: "Cycle plan tracker: off → compact → full → off",
+		handler: async (ctx) => {
+			const next = trackerModeOrder[(trackerModeOrder.indexOf(progressWidgetMode) + 1) % trackerModeOrder.length];
+			setTrackerMode(next, ctx);
 		},
 	});
 
@@ -2545,7 +2569,7 @@ Call ${PLAN_MARK_DONE_TOOL} immediately after each completed step and before the
 			projectTrusted,
 		});
 		plannotatorConfig = loadedConfig.config;
-		progressWidgetVisible = resolvePiProgressWidgetVisible(loadConfig());
+		progressWidgetMode = resolvePiProgressWidgetMode(loadConfig());
 		for (const warning of loadedConfig.warnings) {
 			ctx.ui.notify(`Plannotator config: ${warning}`, "warning");
 		}

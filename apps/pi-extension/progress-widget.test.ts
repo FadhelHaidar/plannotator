@@ -52,3 +52,38 @@ describe("progress widget", () => {
 		expect(item.text).toBe("line one\nline two\ttabbed");
 	});
 });
+
+describe("progress widget full mode", () => {
+	test("renders every step, completed struck-style rows first in plan order", () => {
+		const widget = createProgressWidget(
+			items([
+				[1, "one", true],
+				[2, "two", false],
+				[3, "three", false],
+			]),
+			THEME,
+			"full",
+		);
+		const lines = widget.render(80);
+		expect(lines).toEqual([
+			"Plan: 1/3 complete",
+			"☑ 1. one",
+			"☐ 2. two",
+			"☐ 3. three",
+		]);
+	});
+
+	test("compact stays the default and caps rows", () => {
+		const widget = createProgressWidget(
+			items([
+				[1, "a", true],
+				[2, "b", false],
+				[3, "c", false],
+				[4, "d", false],
+				[5, "e", false],
+			]),
+			THEME,
+		);
+		expect(widget.render(80)).toHaveLength(5);
+	});
+});

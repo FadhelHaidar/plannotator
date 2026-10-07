@@ -184,7 +184,7 @@ describe("compact progress tracker", () => {
 		await harness.submitPlan("PLAN.md");
 		expect(renderLast(harness.widgets)).toHaveLength(3);
 
-		await harness.tracker("");
+		await harness.tracker("off");
 		expect(harness.widgets.at(-1)).toBeUndefined();
 		// Footer (setStatus) is untouched by the harness's no-op; provider sync continues.
 		await harness.markStepDone(1);
@@ -194,7 +194,7 @@ describe("compact progress tracker", () => {
 		expect(todos.find((todo) => todo.title === "2. Second step")?.status).toBe("open");
 		// Preference persisted through the shared writer.
 		const saved = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"));
-		expect(saved.piProgressWidgetVisible).toBe(false);
+		expect(saved.piProgressWidgetMode).toBe("off");
 	});
 
 	test("toggle on restores the widget; on/off are idempotent; status and usage behave", async () => {
@@ -215,7 +215,7 @@ describe("compact progress tracker", () => {
 
 		const before = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"));
 		await harness.tracker("status");
-		expect(harness.notifications.at(-1)).toContain("on");
+		expect(harness.notifications.at(-1)).toContain("compact");
 		await harness.tracker("bogus");
 		expect(harness.notifications.at(-1)).toContain("Usage");
 		// status and invalid args write nothing.
