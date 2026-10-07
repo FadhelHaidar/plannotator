@@ -6,7 +6,7 @@
  * browser UI and can approve, deny with annotations, or request changes.
  *
  * Features:
- * - /plannotator-plan-mode command or Alt+M to toggle
+ * - /plannotator-plan-mode command or Alt+P to toggle
  * (remapped fork default: upstream bound Ctrl+Alt+P, which keybindings.json
  * cannot reassign — extension shortcuts are raw-key registrations)
  * - --plan flag to start in planning mode
@@ -1695,12 +1695,13 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		};
 	}
 
-	pi.registerShortcut(Key.alt("m"), {
-		// Fork remap: the user's Alt+M choice. Extension shortcuts register raw
-		// keys (runner.getShortcuts keys by normalized KeyId), so there is no
-		// keybindings.json action name to override here — the fork is the only
-		// place this can change. `matchesKey("alt+m")` accepts alt+m directly.
-		description: "Toggle plannotator (fork: Alt+M)",
+	pi.registerShortcut(Key.alt("p"), {
+		// Fork remap: the user's Alt+P choice (v0.28.4-fork.2, was Alt+M).
+		// Extension shortcuts register raw keys (runner.getShortcuts keys by
+		// normalized KeyId), so there is no keybindings.json action name to
+		// override here — the fork is the only place this can change.
+		// `matchesKey("alt+p")` accepts alt+p directly.
+		description: "Toggle plannotator (fork: Alt+P)",
 		handler: async (ctx) => {
 			await togglePlanMode(ctx);
 		},
