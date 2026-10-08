@@ -8,21 +8,23 @@ This checkout is a fork of `backnotprop/plannotator` (`feat/compact-pi-tracker`,
 
 1. **Three-mode execution tracker (off / compact / full).** The terminal widget defaults to *compact*: a `Plan: X/Y complete` summary plus at most three pending steps and a hidden-step count (max five rows, no completed rows) instead of upstream's full unbounded checklist. *full* restores upstream-style rendering (every step in plan order, completed rows struck through). `/plannotator-tracker [off|compact|full|toggle|status]` sets the mode (`toggle` and the legacy `on` map sensibly), `Alt+T` cycles off → compact → full, and `piProgressWidgetMode` persists in `~/.plannotator/config.json`. With the tracker off, the todo-list mirror is **enforced**: the checklist keeps syncing to any detected provider (pi-todos) even when `todoProvider: "off"`, so hiding the widget never removes every tracking surface.
 2. **Plan-mode keybinding remapped to `Alt+P`** (v0.28.4-fork.2; previously `Alt+M`). Extension shortcuts register raw keys (Pi's extension runner keys them by KeyId), so `keybindings.json` cannot reassign them — the fork is the only place this could change. Upstream default: `Ctrl+Alt+P`. Note: on WSL/Windows Pi reserves `alt+p` for `app.model.cycleBackward` (a reserved built-in, so the extension shortcut is silently skipped); pair the fork with `"app.model.cycleBackward": "alt+m"` in `~/.pi/agent/keybindings.json` to free it — this also gives `Alt+M` the model-cycle.
-3. **Fork-only packaging commit** (never part of upstream PRs): a root `pi.extensions` manifest pointing at `apps/pi-extension/index.ts` so Pi can install this monorepo as a pinned git source, the root `workspaces` glob dropped, and the extension's runtime deps hoisted to the root `dependencies` — plain npm rejects `workspace:*` specs and Pi installs git sources with npm.
+3. **Fork-only source packaging** (keep out of upstream PRs): root Pi discovery and runtime dependencies remain npm-safe (no root `workspaces`). The root install lifecycle temporarily supplies Bun's workspace context, installs build dependencies, then builds both HTML assets, vendored TypeScript modules and the bundled skill from this checkout's source.
 
 ### Installing and updating this fork
 
 ```bash
-pi install git:github.com/FadhelHaidar/plannotator@v0.28.4-fork.1
+pi install git:github.com/FadhelHaidar/plannotator@<ref-containing-the-bootstrap-fix>
 ```
 
-Build outputs (`plannotator.html`, `review-editor.html`, `generated/`, `skills/`) are gitignored, so they are not in the tag. After every retag, sync them from a built checkout (`bun run build:pi` in the dev clone, then copy `apps/pi-extension/{plannotator.html,review-editor.html,generated/,skills/}` into `~/.pi/agent/git/github.com/FadhelHaidar/plannotator/apps/pi-extension/`), then:
+Use a ref containing the source-bootstrap fix; older tags still require manual builds. Git-source installation requires **Node, Bun and bash on PATH**, network access for dependencies, and enabled lifecycle scripts. Pi's `npm install --omit=dev` Git-source lifecycle now builds the ignored outputs automatically; no artifact copying or generated-file commits are needed. Published npm extension packages already contain those outputs and are unchanged.
 
 ```bash
-pi update git:github.com/FadhelHaidar/plannotator@<tag>
+pi update git:github.com/FadhelHaidar/plannotator@<new-ref>
 ```
 
-Update flow: patch in the dev clone → push `feat/compact-pi-tracker` → retag `v0.28.4-fork.N` → sync artifacts → `pi update`. Keep the packaging commit out of any upstream PRs. Rollback: `pi remove` the git source and `pi install npm:@plannotator/pi-extension`.
+Pi cleans ignored files when the ref changes, then runs installation again. An **unchanged-ref update does not repair missing build outputs**: explicitly rerun `npm run postinstall` in the source checkout, or remove and reinstall the Git source. With lifecycle scripts disabled, run `npm run postinstall` manually before loading the extension. Restart Pi after updating. Review the source diff and test results before pushing a new ref; rollback with `pi remove` and `pi install npm:@plannotator/pi-extension`.
+
+The bootstrap uses an in-place temporary `package.json` with Bun workspaces, restored byte-for-byte even on install/build failure. Bun installs development dependencies with `--no-save` and only the root bootstrap hook temporarily removed (no recursive lifecycle or lockfile rewrite). Trusted dependency scripts still run, including the native `node-pty` backend used by the agent terminal; on Linux its build requires Python, make and a C++ compiler, as well as access to Node headers. It shares `node_modules` with npm; do **not** run overlapping installers/builds in that checkout. A guard rejects concurrent bootstraps. Process termination (including a hard kill) or machine shutdown can leave the temporary manifest and `.pi-source-install.lock` behind: after confirming no bootstrap is running, restore the root manifest from your source revision (preserve any local edits), remove the guard, and rerun installation. This is a source build, so it is heavier than installing the npm extension.
 
 ## Install
 
@@ -82,15 +84,15 @@ also detects and removes the extension through Pi.
 
 ## Build from source
 
-If installing from a local clone, build the HTML assets first:
+For a fresh fork checkout, bootstrap local monorepo dependencies, then use the existing build sequence:
 
 ```bash
 cd plannotator
-bun install
+npm run install:dev
 bun run build:pi
 ```
 
-This builds the plan review and code review UIs and copies them into `apps/pi-extension/`.
+`install:dev` installs Bun workspace dependencies (including dev tools) without building or changing the checked-in manifest/lockfile. Subsequent `bun run dev:review`, other monorepo scripts and `bun run build:pi` resolve local workspace sources normally. A root `npm install` or `bun install --no-save` also runs the full bootstrap/build lifecycle. Prefer `install:dev` for development: a plain `bun install` rewrites the root-only lockfile before the lifecycle starts and can resolve newer workspace dependencies. `build:pi` builds review first, hook second, and copies both HTML assets before vendoring modules and the skill. Outputs remain ignored; rebuild after changing UI/shared sources. For local Pi installation, build before running `pi install ./plannotator/apps/pi-extension`.
 
 ## Usage
 

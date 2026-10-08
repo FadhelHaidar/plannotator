@@ -17,6 +17,8 @@
     "url": "https://github.com/backnotprop/plannotator/issues"
   },
   "scripts": {
+    "postinstall": "node scripts/install-pi-source.mjs",
+    "install:dev": "node scripts/install-pi-source.mjs --dependencies-only",
     "dev:hook": "bun run --cwd apps/hook dev",
     "dev:portal": "bun run --cwd apps/portal dev",
     "dev:marketing": "bun run --cwd apps/marketing dev",

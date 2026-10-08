@@ -79,6 +79,10 @@ packages/ui/components/html-viewer/bridge-script.asset.js
 packages/ui/components/html-viewer/bridge-script.lite.ts
 .wrangler/
 
+# Local npm install and the exclusive temporary Bun workspace guard.
+/package-lock.json
+/.pi-source-install.lock
+
 # Local working notes at the repo root (untracked by design — never commit).
 # Guard added after 548dad1f swept these into main with a blanket add.
 /DESIGN_*
