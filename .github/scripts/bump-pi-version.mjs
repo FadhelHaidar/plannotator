@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -24,12 +24,12 @@ export function bumpVersion(version, bump) {
 }
 
 function main() {
-  const tags = execFileSync('git', ['tag', '--list', 'pi-v*'], { encoding: 'utf8' })
+  const tags = execFileSync('git', ['tag', '--list', 'ct-v*'], { encoding: 'utf8' })
     .trim().split('\n').filter(Boolean)
-    .map((tag) => ({ tag, version: tag.match(/^pi-v(\d+\.\d+\.\d+)$/)?.[1] }))
+    .map((tag) => ({ tag, version: tag.match(/^ct-v(\d+\.\d+\.\d+)$/)?.[1] }))
     .filter(({ version }) => version)
     .sort((a, b) => a.version.localeCompare(b.version, undefined, { numeric: true }));
-  if (!tags.length) throw new Error('No pi-vX.Y.Z baseline tag; create the initial version tag first.');
+  if (!tags.length) throw new Error('No ct-vX.Y.Z baseline tag; create the initial version tag first.');
 
   const previous = tags.at(-1);
   const messages = execFileSync('git', ['log', '--no-merges', '-z', '--format=%B', `${previous.tag}..HEAD`], { encoding: 'utf8' })
