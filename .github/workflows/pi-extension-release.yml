@@ -10,7 +10,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: bump
+        name: Determine semantic version from Conventional Commits
+        run: node .github/scripts/bump-pi-version.mjs
+
   build-package:
+    needs: version
+    if: needs.version.outputs.version != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -30,6 +48,10 @@ jobs:
       - name: Build Pi extension and assets
         run: bun run build:pi
 
+      - name: Set extension package version
+        working-directory: apps/pi-extension
+        run: npm version "${{ needs.version.outputs.version }}" --no-git-tag-version
+
       - name: Pack Pi extension
         working-directory: apps/pi-extension
         run: bun pm pack --filename "$GITHUB_WORKSPACE/plannotator-pi-extension.tgz"
@@ -42,7 +64,8 @@ jobs:
           retention-days: 1
 
   publish-release:
-    needs: build-package
+    needs: [version, build-package]
+    if: needs.version.outputs.version != ''
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -56,9 +79,9 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
-          tag_name: pi-extension-${{ github.sha }}
+          tag_name: pi-v${{ needs.version.outputs.version }}
           target_commitish: ${{ github.sha }}
-          name: Pi extension build ${{ github.sha }}
+          name: Plannotator Pi Extension v${{ needs.version.outputs.version }}
           files: release-assets/plannotator-pi-extension.tgz
           fail_on_unmatched_files: true
           draft: false

@@ -44,6 +44,7 @@
     "tool-scope.ts",
     "config.ts",
     "progress-widget.ts",
+    "auto-keymap.ts",
     "plannotator.json",
     "server/",
     "todo-providers/",
