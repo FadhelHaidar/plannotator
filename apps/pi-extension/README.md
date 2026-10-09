@@ -4,31 +4,37 @@ Plannotator integration for the [Pi coding agent](https://github.com/earendil-wo
 
 ## Fork: FadhelHaidar/plannotator
 
-This checkout is a fork of `backnotprop/plannotator` (`feat/compact-pi-tracker`, based on upstream `71c968ce`). It exists for three changes upstream does not have:
+This checkout is a fork of `backnotprop/plannotator`, maintained on `compact-plan-tracker` and carrying forward the earlier `feat/compact-pi-tracker` customizations. It exists for three changes upstream does not have:
 
 1. **Three-mode execution tracker (off / compact / full).** The terminal widget defaults to *compact*: a `Plan: X/Y complete` summary plus at most three pending steps and a hidden-step count (max five rows, no completed rows) instead of upstream's full unbounded checklist. *full* restores upstream-style rendering (every step in plan order, completed rows struck through). `/plannotator-tracker [off|compact|full|toggle|status]` sets the mode (`toggle` and the legacy `on` map sensibly), `Alt+T` cycles off → compact → full, and `piProgressWidgetMode` persists in `~/.plannotator/config.json`. With the tracker off, the todo-list mirror is **enforced**: the checklist keeps syncing to any detected provider (pi-todos) even when `todoProvider: "off"`, so hiding the widget never removes every tracking surface.
-2. **Plan-mode keybinding remapped to `Alt+P`** (v0.28.4-fork.2; previously `Alt+M`). Extension shortcuts register raw keys (Pi's extension runner keys them by KeyId), so `keybindings.json` cannot reassign them — the fork is the only place this could change. Upstream default: `Ctrl+Alt+P`. Note: on WSL/Windows Pi reserves `alt+p` for `app.model.cycleBackward` (a reserved built-in, so the extension shortcut is silently skipped); pair the fork with `"app.model.cycleBackward": "alt+m"` in `~/.pi/agent/keybindings.json` to free it — this also gives `Alt+M` the model-cycle.
-3. **Fork-only source packaging** (keep out of upstream PRs): root Pi discovery and runtime dependencies remain npm-safe (no root `workspaces`). The root install lifecycle temporarily supplies Bun's workspace context, installs build dependencies, then builds both HTML assets, vendored TypeScript modules and the bundled skill from this checkout's source.
+2. **Plan-mode keybinding remapped to `Alt+P`** (previously `Alt+M`). Extension shortcuts register raw keys (Pi's extension runner keys them by KeyId), so `keybindings.json` cannot reassign them — the fork is the only place this could change. Upstream default: `Ctrl+Alt+P`. Note: on WSL/Windows Pi reserves `alt+p` for `app.model.cycleBackward` (a reserved built-in, so the extension shortcut is silently skipped); pair the fork with `"app.model.cycleBackward": "alt+m"` in `~/.pi/agent/keybindings.json` to free it — this also gives `Alt+M` the model-cycle.
+3. **Source bootstrap for development:** root Pi discovery and runtime dependencies remain npm-safe (no root `workspaces`). Git-source installation supplies Bun's workspace context and builds the assets locally; normal fork installation uses the prebuilt GitHub Release below and needs no build tools.
 
 ### Installing and updating this fork
 
-```bash
-pi install git:github.com/FadhelHaidar/plannotator@<ref-containing-the-bootstrap-fix>
-```
-
-Use a ref containing the source-bootstrap fix; older tags still require manual builds. Git-source installation requires **Node, Bun and bash on PATH**, network access for dependencies, and enabled lifecycle scripts. Pi's `npm install --omit=dev` Git-source lifecycle now builds the ignored outputs automatically; no artifact copying or generated-file commits are needed. Published npm extension packages already contain those outputs and are unchanged.
+Install the prebuilt GitHub Release; no local checkout, Bun, or build tools are needed:
 
 ```bash
-pi update git:github.com/FadhelHaidar/plannotator@<new-ref>
+pi install 'npm:@plannotator/pi-extension@https://github.com/FadhelHaidar/plannotator/releases/latest/download/plannotator-pi-extension.tgz'
 ```
 
-Pi cleans ignored files when the ref changes, then runs installation again. An **unchanged-ref update does not repair missing build outputs**: explicitly rerun `npm run postinstall` in the source checkout, or remove and reinstall the Git source. With lifecycle scripts disabled, run `npm run postinstall` manually before loading the extension. Restart Pi after updating. Review the source diff and test results before pushing a new ref; rollback with `pi remove` and `pi install npm:@plannotator/pi-extension`.
+Keep the `npm:@plannotator/pi-extension@` prefix: Pi uses the package name to discover and load the extension. The URL resolves to the latest stable release. This fork uses its own CT SemVer series, starting at `0.1.0` (release tags `ct-vX.Y.Z`), independent of upstream numbering.
 
-The bootstrap uses an in-place temporary `package.json` with Bun workspaces, restored byte-for-byte even on install/build failure. Bun installs development dependencies with `--no-save` and only the root bootstrap hook temporarily removed (no recursive lifecycle or lockfile rewrite). Trusted dependency scripts still run, including the native `node-pty` backend used by the agent terminal; on Linux its build requires Python, make and a C++ compiler, as well as access to Node headers. It shares `node_modules` with npm; do **not** run overlapping installers/builds in that checkout. A guard rejects concurrent bootstraps. Process termination (including a hard kill) or machine shutdown can leave the temporary manifest and `.pi-source-install.lock` behind: after confirming no bootstrap is running, restore the root manifest from your source revision (preserve any local edits), remove the guard, and rerun installation. This is a source build, so it is heavier than installing the npm extension.
+After a new release, update with:
 
-## Install
+```bash
+pi update --extensions
+```
 
-**From npm** (recommended):
+Pi does not poll GitHub or automatically notify you when a fork release appears. Restart Pi or run `/reload` after updating. A plain `pi update` updates Pi itself, not extensions.
+
+Git-source installation remains available for development, but requires **Node, Bun and bash on PATH**, network access for dependencies, and enabled lifecycle scripts; it builds ignored outputs locally. The prebuilt release above is recommended for normal installs.
+
+## Upstream package and local development
+
+The fork-specific prebuilt install is above. The plain npm package below is the upstream release, not this fork.
+
+**From npm**:
 
 ```bash
 pi install npm:@plannotator/pi-extension
@@ -47,13 +53,13 @@ pi install ./plannotator/apps/pi-extension
 pi -e npm:@plannotator/pi-extension
 ```
 
-## Update
+## Update upstream installations
 
 ```bash
 pi update --extensions
 ```
 
-This updates your installed Pi packages, Plannotator included. `pi update npm:@plannotator/pi-extension` updates only Plannotator, and `pi update --all` updates Pi and every package. A plain `pi update` updates only Pi itself, not Plannotator. Restart Pi after updating.
+This updates configured Pi packages, Plannotator included. For an upstream npm install, `pi update npm:@plannotator/pi-extension` updates only Plannotator; `pi update --all` updates Pi and every package. A plain `pi update` updates only Pi itself, not Plannotator. For this fork, use the release URL in [Installing and updating this fork](#installing-and-updating-this-fork).
 
 ## Pi version and project trust
 
@@ -73,9 +79,13 @@ was previously trusted.
 
 ## Uninstall
 
-Remove a standalone Pi installation with:
+Remove a standalone Pi installation with the matching source:
 
 ```bash
+# This fork
+pi remove 'npm:@plannotator/pi-extension@https://github.com/FadhelHaidar/plannotator/releases/latest/download/plannotator-pi-extension.tgz'
+
+# Upstream npm package
 pi remove npm:@plannotator/pi-extension
 ```
 
@@ -379,7 +389,7 @@ When the `plannotator` tool is turned on, the agent opens, lists and closes revi
 | Shortcut | Description |
 |----------|-------------|
 | `Alt+P` | Toggle plan mode (fork remap; upstream: Ctrl+Alt+P). On WSL/Windows Pi reserves `alt+p` for model-cycle-backward and skips the extension shortcut — set `"app.model.cycleBackward": "alt+m"` in `~/.pi/agent/keybindings.json` to free it (built-ins are remappable there, extension shortcuts are not) |
-| `Alt+M` | Recommended in this fork's keybindings.json as `app.model.cycleBackward` — cycles to the previous model. Fork remap of plan mode moved off `alt+m` in v0.28.4-fork.2 |
+| `Alt+M` | Recommended in this fork's keybindings.json as `app.model.cycleBackward` — cycles to the previous model. The fork remaps plan mode off `alt+m` |
 | `Alt+T` | Cycle plan tracker: off → compact → full → off (fork) |
 
 ## How it works

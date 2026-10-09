@@ -232,11 +232,11 @@ Then finish the step for your agent:
 | **Gemini CLI** | Nothing. The hook, policy, and slash commands are configured automatically. Requires Gemini CLI 0.36.0+. | [README](apps/gemini/README.md) |
 | **Kiro CLI** | Nothing. Skills and an example agent are installed automatically. Try `kiro-cli chat --agent plannotator`. | [README](apps/kiro-cli/README.md) |
 | **OpenCode** | Add `"plugin": ["@plannotator/opencode@latest"]` to `opencode.json`. Restart OpenCode. | [README](apps/opencode-plugin/README.md) |
-| **Pi** | Skip the installer. Just `pi install npm:@plannotator/pi-extension`. Start Pi with `--plan`, or toggle with `/plannotator-plan-mode`. | [README](apps/pi-extension/README.md) |
+| **Pi** | Install this fork’s prebuilt release: `pi install 'npm:@plannotator/pi-extension@https://github.com/FadhelHaidar/plannotator/releases/latest/download/plannotator-pi-extension.tgz'`. Start with `--plan`, or toggle with `/plannotator-plan-mode`. | [README](apps/pi-extension/README.md) |
 
-> **Fork (FadhelHaidar):** this repository's fork adds a compact/toggleable Pi plan tracker (`/plannotator-tracker`, `Alt+T`), an `Alt+P` plan-mode shortcut with WSL auto-remap, and git-source packaging for `pi install git:github.com/FadhelHaidar/plannotator@v0.28.4-fork.2`. Pi users: see the [fork notes in the Pi extension README](apps/pi-extension/README.md).
+> **Fork (FadhelHaidar):** this fork adds a compact/toggleable Pi plan tracker (`/plannotator-tracker`, `Alt+T`) and an `Alt+P` plan-mode shortcut with WSL auto-remap. The Pi extension is distributed as a prebuilt GitHub Release with independent CT versions, so installation does not require a local build. See the [fork install instructions](apps/pi-extension/README.md#installing-and-updating-this-fork).
 
-**Updating:** run the installer again for the binary and slash commands. Claude Code plugin: `claude plugin marketplace update plannotator`, then `claude plugin update plannotator@plannotator`, then restart Claude Code (refreshing the marketplace alone does not update the plugin). Pi: `pi update --extensions` (a plain `pi update` updates only Pi).
+**Updating:** run the installer again for the binary and slash commands. Claude Code plugin: `claude plugin marketplace update plannotator`, then `claude plugin update plannotator@plannotator`, then restart Claude Code (refreshing the marketplace alone does not update the plugin). Pi: `pi update --extensions` to fetch the latest fork release (a plain `pi update` updates only Pi; Pi does not automatically poll for fork releases).
 
 On Claude Code 2.1.287 or newer, plan review, code review and annotate don't make Claude wait: Claude ends its turn and your decision arrives later as a message. Set `PLANNOTATOR_CLAUDE_MOD=0` to go back to the classic flow.
 
